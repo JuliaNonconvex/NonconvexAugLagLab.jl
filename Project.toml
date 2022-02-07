@@ -1,7 +1,7 @@
 name = "NonconvexAugLagLab"
 uuid = "bd7bc4c3-5181-47e7-9a4c-580310605fa6"
 authors = ["Mohamed Tarek <mohamed82008@gmail.com> and contributors"]
-version = "0.1.0"
+version = "0.1.1"
 
 [deps]
 ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
@@ -15,9 +15,9 @@ Setfield = "efcf1570-3423-57d1-acb7-fd33fddbac46"
 
 [compat]
 ChainRulesCore = "0.10, 1"
-NonconvexCore = "0.1.5"
-NonconvexMMA = "0.1.0"
-Optim = "1.2"
+NonconvexCore = "1"
+NonconvexMMA = "0.1.2"
+Optim = "1"
 Parameters = "0.12"
 Reexport = "1"
 Setfield = "0.7"
