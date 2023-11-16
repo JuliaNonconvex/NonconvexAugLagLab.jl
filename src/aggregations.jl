@@ -4,7 +4,7 @@ getdim(::AbstractAggregation) = 1
 @params struct NonNegSumOfSquares <: AbstractAggregation
     c::Real
 end
-(f::NonNegSumOfSquares)(x::AbstractVector) = f.c * sum(max.(0, x).^2)
+(f::NonNegSumOfSquares)(x::AbstractVector) = f.c * sum(max.(0, x) .^ 2)
 
 @params struct NonNegSumOfRoots <: AbstractAggregation
     c::Real

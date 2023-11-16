@@ -55,7 +55,8 @@ function (obj::AugLag2Obj)(x::AbstractVector, λ::AbstractVector; penalise = tru
     savefg!(obj, origobjval, origconstrval)
 
     linepenalty = dot(λ, origconstrval)
-    quadpenalty = penalise ? NonNegSumOfSquares(obj.quadweight[])(origconstrval) : zero(linepenalty)
+    quadpenalty =
+        penalise ? NonNegSumOfSquares(obj.quadweight[])(origconstrval) : zero(linepenalty)
 
     return origobjval + linepenalty + quadpenalty
 end
@@ -75,7 +76,8 @@ function (obj::AugLag2Obj)(primaloptimizer::Function, λ::AbstractVector; penali
     savefg!(obj, origobjval, origconstrval)
 
     linepenalty = dot(λ, origconstrval)
-    quadpenalty = penalise ? NonNegSumOfSquares(obj.quadweight[])(origconstrval) : zero(linepenalty)
+    quadpenalty =
+        penalise ? NonNegSumOfSquares(obj.quadweight[])(origconstrval) : zero(linepenalty)
 
     return origobjval + linepenalty + quadpenalty
 end
@@ -95,7 +97,11 @@ function savexλ!(obj::AugLag2Obj, x::AbstractVector, λ::AbstractVector)
     setλ!(obj, λ)
     return obj
 end
-ChainRulesCore.@non_differentiable savexλ!(obj::AugLag2Obj, x::AbstractVector, λ::AbstractVector)
+ChainRulesCore.@non_differentiable savexλ!(
+    obj::AugLag2Obj,
+    x::AbstractVector,
+    λ::AbstractVector,
+)
 
 getparent(f::AugLag2Obj) = f.model
 
@@ -159,11 +165,8 @@ end
     parent::VecModel
     objective::AugLag2Obj
 end
-function AugLag2Model(
-    model::VecModel;
-    kwargs...,
-)
-    return AugLag2Model(model, AugLag2Obj(model; kwargs...,))
+function AugLag2Model(model::VecModel; kwargs...)
+    return AugLag2Model(model, AugLag2Obj(model; kwargs...))
 end
 
 getparent(model::AugLag2Model) = model.parent
@@ -174,11 +177,14 @@ getmax(model::AugLag2Model) = getmax(getparent(model))
 
 getobjective(model::AugLag2Model) = model.objective
 
-getineqconstraints(::AugLag2Model) = throw("`getineqconstraints` is not defined for `AugLag2Model`.")
+getineqconstraints(::AugLag2Model) =
+    throw("`getineqconstraints` is not defined for `AugLag2Model`.")
 
-geteqconstraints(::AugLag2Model) = throw("`geteqconstraints` is not defined for `AugLag2Model`.")
+geteqconstraints(::AugLag2Model) =
+    throw("`geteqconstraints` is not defined for `AugLag2Model`.")
 
-getobjectiveconstraints(::AugLag2Model) = throw("`getobjectiveconstraints` is not defined for `AugLag2Model`.")
+getobjectiveconstraints(::AugLag2Model) =
+    throw("`getobjectiveconstraints` is not defined for `AugLag2Model`.")
 
 getlinweights(model::AugLag2Model) = getlinweights(getobjective(model))
 
@@ -224,7 +230,7 @@ end
 
 function getresiduals(solution::Solution, model::AugLag2Model, ::GenericCriteria)
     @unpack prevx, x, prevf, f, g = solution
-    Δx = maximum(abs(x[j] - prevx[j]) for j in 1:length(x))
+    Δx = maximum(abs(x[j] - prevx[j]) for j = 1:length(x))
     Δf = abs(f - prevf)
     infeas = max(0, maximum(g))
     return Δx, Δf, infeas
