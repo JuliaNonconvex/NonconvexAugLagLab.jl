@@ -6,7 +6,7 @@ import Optim
 using Reexport, Parameters, ChainRulesCore
 using Setfield, NonconvexMMA
 @reexport using NonconvexCore
-using NonconvexCore: @params, AbstractOptimizer, AbstractModel
+using NonconvexCore: AbstractOptimizer, AbstractModel
 using NonconvexCore: ConvergenceState, ConvergenceCriteria
 using NonconvexCore: VecModel, Tolerance, AbstractFunction
 using NonconvexCore: Solution, GenericCriteria, Trace, NoCallback

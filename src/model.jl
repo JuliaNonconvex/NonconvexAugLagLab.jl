@@ -11,13 +11,20 @@ The objective function of the augmented Lagrangian model, `model`. The following
  - `f`: the current original objective value
  - `g`: the current constraint function value
 """
-@params struct AugLag2Obj <: AbstractFunction
-    model::VecModel
-    x::AbstractVector # primal solution
-    λ::AbstractVector # dual solution
-    quadweight::Base.RefValue # quadratic penalty factor
-    f::Base.RefValue
-    g::AbstractVector
+struct AugLag2Obj{
+    M<:VecModel,
+    X<:AbstractVector,
+    L<:AbstractVector,
+    Q<:Base.RefValue,
+    F<:Base.RefValue,
+    G<:AbstractVector,
+} <: AbstractFunction
+    model::M
+    x::X # primal solution
+    λ::L # dual solution
+    quadweight::Q # quadratic penalty factor
+    f::F
+    g::G
 end
 
 """
@@ -161,9 +168,9 @@ end
 
 # Model
 
-@params struct AugLag2Model <: AbstractModel
-    parent::VecModel
-    objective::AugLag2Obj
+struct AugLag2Model{P<:VecModel,O<:AugLag2Obj} <: AbstractModel
+    parent::P
+    objective::O
 end
 function AugLag2Model(model::VecModel; kwargs...)
     return AugLag2Model(model, AugLag2Obj(model; kwargs...))
@@ -233,10 +240,10 @@ function getresiduals(solution::Solution, model::AugLag2Model, ::GenericCriteria
     Δx = maximum(abs(x[j] - prevx[j]) for j = 1:length(x))
     Δf = abs(f - prevf)
     infeas = max(0, maximum(g))
-    return Δx, Δf, infeas
+    return Δx, Δf, infeas, f
 end
 function getresiduals(solution::Solution, model::AugLag2Model, ::KKTCriteria)
-    @unpack g, λ, x = solution
+    @unpack f, g, λ, x = solution
     xmin, xmax = getmin(model), getmax(model)
     T = eltype(x)
     auglag = getobjective(model)
@@ -261,10 +268,10 @@ function getresiduals(solution::Solution, model::AugLag2Model, ::KKTCriteria)
         @show maximum(x)
     end
     infeas = max(maximum(g), 0)
-    return res, infeas
+    return missing, res, infeas, f
 end
 function getresiduals(solution::Solution, model::AugLag2Model, ::IpoptCriteria)
-    @unpack g, λ, x = solution
+    @unpack f, g, λ, x = solution
     if debugging[]
         #@show x
     end
@@ -294,5 +301,5 @@ function getresiduals(solution::Solution, model::AugLag2Model, ::IpoptCriteria)
     if debugging[]
         println("Agg infeas = ", infeas)
     end
-    return res, infeas
+    return missing, res, infeas, f
 end

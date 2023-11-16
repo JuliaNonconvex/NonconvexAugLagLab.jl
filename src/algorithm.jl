@@ -1,7 +1,6 @@
-
-@params struct AugLag2 <: AbstractOptimizer
-    primaloptimizer::Any
-    dualoptimizer::Any
+struct AugLag2{P,D} <: AbstractOptimizer
+    primaloptimizer::P
+    dualoptimizer::D
 end
 function AugLag2(;
     primaloptimizer = Optim.ConjugateGradient(
@@ -14,12 +13,12 @@ function AugLag2(;
     return AugLag2(primaloptimizer, dualoptimizer)
 end
 
-@params struct AugLag2Options
-    primaloptions::Any
-    dualoptions::Any
-    maxiter::Any
-    tol::Any
-    quadfactor::Any
+struct AugLag2Options{P,D,M,T,Q}
+    primaloptions::P
+    dualoptions::D
+    maxiter::M
+    tol::T
+    quadfactor::Q
 end
 function AugLag2Options(
     alg::AugLag2;
@@ -55,18 +54,28 @@ function Solution(lagmodel::AugLag2Model)
     )
 end
 
-@params mutable struct AugLag2Workspace <: Workspace
-    model::VecModel
-    lagmodel::AugLag2Model
-    x0::AbstractVector
-    optimizer::AugLag2
-    options::AugLag2Options
+mutable struct AugLag2Workspace{
+    M<:VecModel,
+    L<:AugLag2Model,
+    X<:AbstractVector,
+    O1<:AugLag2,
+    O2<:AugLag2Options,
+    S<:Solution,
+    C1<:ConvergenceCriteria,
+    C2<:Function,
+    T<:Trace,
+} <: Workspace
+    model::M
+    lagmodel::L
+    x0::X
+    optimizer::O1
+    options::O2
 
-    solution::Solution
-    convcriteria::ConvergenceCriteria
-    callback::Function
+    solution::S
+    convcriteria::C1
+    callback::C2
 
-    trace::Trace
+    trace::T
     outer_iter::Int
     iter::Int
     fcalls::Int
@@ -146,7 +155,14 @@ function optimize!(workspace::AugLag2Workspace)
             solution.prevf = solution.f
             solution.f = getorigobjval(lagmodel)
             solution.g .= getorigconstrval(lagmodel)
-            assess_convergence!(solution, lagmodel, options.tol, convcriteria)
+            assess_convergence!(
+                solution,
+                lagmodel,
+                options.tol,
+                convcriteria,
+                true,
+                workspace.iter,
+            )
             callback(solution)
             return hasconverged(solution)
         end
