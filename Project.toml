@@ -1,7 +1,7 @@
 name = "NonconvexAugLagLab"
 uuid = "bd7bc4c3-5181-47e7-9a4c-580310605fa6"
 authors = ["Mohamed Tarek <mohamed82008@gmail.com> and contributors"]
-version = "0.1.1"
+version = "0.1.2"
 
 [deps]
 ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
