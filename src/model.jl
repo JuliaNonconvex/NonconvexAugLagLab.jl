@@ -239,7 +239,7 @@ function getresiduals(solution::Solution, model::AugLag2Model, ::GenericCriteria
     @unpack prevx, x, prevf, f, g = solution
     Δx = maximum(abs(x[j] - prevx[j]) for j = 1:length(x))
     Δf = abs(f - prevf)
-    infeas = max(0, maximum(g))
+    infeas = isempty(g) ? 0.0 : max(0, maximum(g))
     return Δx, Δf, infeas, f
 end
 function getresiduals(solution::Solution, model::AugLag2Model, ::KKTCriteria)
@@ -261,13 +261,13 @@ function getresiduals(solution::Solution, model::AugLag2Model, ::KKTCriteria)
     if debugging[]
         #@show λ, g
     end
-    res = max(res, maximum(abs.(λ .* g)))
+    res = isempty(g) ? res : max(res, maximum(abs.(λ .* g)))
     if debugging[]
         @show maximum(abs, g)
         @show maximum(abs, λ)
         @show maximum(x)
     end
-    infeas = max(maximum(g), 0)
+    infeas = isempty(g) ? 0.0 : max(maximum(g), 0)
     return missing, res, infeas, f
 end
 function getresiduals(solution::Solution, model::AugLag2Model, ::IpoptCriteria)
@@ -295,9 +295,9 @@ function getresiduals(solution::Solution, model::AugLag2Model, ::IpoptCriteria)
         end
     end
     sd = max(100, (sum(abs, λ) + s) / (n + m)) / 100
-    res = max(res, maximum(abs.(λ .* g)))
+    res = isempty(g) ? res : max(res, maximum(abs.(λ .* g)))
     res = res / sd
-    infeas = max(maximum(g), 0)
+    infeas = isempty(g) ? 0.0 : max(maximum(g), 0)
     if debugging[]
         println("Agg infeas = ", infeas)
     end
