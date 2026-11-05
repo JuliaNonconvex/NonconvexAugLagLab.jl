@@ -44,7 +44,7 @@ function Solution(lagmodel::AugLag2Model)
     return Solution(
         prevx,
         x,
-        getlinweights(lagmodel),
+        λ,
         prevf,
         f,
         nothing,
@@ -96,6 +96,8 @@ function AugLag2Workspace(
     ) : NoCallback(),
     kwargs...,
 )
+    length(model.eq_constraints.fs) == 0 ||
+        throw(ArgumentError("NonconvexAugLagLab does not support equality constraints."))
     T = eltype(x0)
     lagmodel = AugLag2Model(model; kwargs...)
 
@@ -148,7 +150,7 @@ function optimize!(workspace::AugLag2Workspace)
 
     cb =
         (tr; kwargs...) -> begin
-            solution = deepcopy(solution)
+            @unpack solution = workspace
             solution.prevx .= solution.x
             solution.x .= getx(lagmodel)
             solution.λ .= getλ(lagmodel)
@@ -222,6 +224,15 @@ function optimize!(workspace::AugLag2Workspace)
         if debugging[]
             @show getquadweight(lagmodel)
         end
+        if ni == 0
+            # No inequality constraints: the dual problem is trivial, so solve
+            # the primal problem directly. Optim's Fminbox cannot handle empty
+            # bound vectors.
+            primaloptimizerfunction(λ)
+            iter = i
+            @pack! workspace = iter, fcalls
+            continue
+        end
         λresult = Optim.optimize(
             Optim.only_fg!(dualobj),
             λl,
@@ -239,6 +250,8 @@ function optimize!(workspace::AugLag2Workspace)
             dualobj(λ)
             setλ!(lagmodel, λ)
         end
+        iter = i
+        @pack! workspace = iter, fcalls
     end
     if debugging[]
         #@show getx(lagmodel)
