@@ -190,7 +190,8 @@ function optimize!(workspace::AugLag2Workspace)
         else
             primalobj = getoptimobj(getprimalobjective(auglag), true)
             result = Optim.optimize(
-                primalobj,
+                z -> primalobj(1.0, nothing, z),
+                (G, z) -> primalobj(1.0, G, z),
                 xl,
                 xu,
                 clamp.(getx(lagmodel), xl .+ 1e-3, xu .- 1e-3),
@@ -234,7 +235,8 @@ function optimize!(workspace::AugLag2Workspace)
             continue
         end
         λresult = Optim.optimize(
-            dualobj,
+            z -> dualobj(1.0, nothing, z),
+            (G, z) -> dualobj(1.0, G, z),
             λl,
             λu,
             max.(copy(λ), 1e-3),
