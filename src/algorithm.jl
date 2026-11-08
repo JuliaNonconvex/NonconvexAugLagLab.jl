@@ -11,6 +11,7 @@ NonconvexCore.solver_capabilities(::AugLag2) = ConstraintCapabilities(
     sd = false,
     box = true,
     integer = false,
+    infinite_bounds = true,
 )
 function AugLag2(;
     primaloptimizer = Optim.ConjugateGradient(
