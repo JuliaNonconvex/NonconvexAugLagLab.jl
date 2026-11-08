@@ -2,6 +2,16 @@ struct AugLag2{P,D} <: AbstractOptimizer
     primaloptimizer::P
     dualoptimizer::D
 end
+
+# AugLag2 supports inequality constraints and boxes; equality constraints are
+# rejected with a descriptive error and sd constraints are not handled.
+NonconvexCore.solver_capabilities(::AugLag2) = ConstraintCapabilities(
+    eq = false,
+    ineq = true,
+    sd = false,
+    box = true,
+    integer = false,
+)
 function AugLag2(;
     primaloptimizer = Optim.ConjugateGradient(
         linesearch = Optim.LineSearches.BackTracking(iterations = 10),
