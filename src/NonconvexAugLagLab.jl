@@ -2,7 +2,7 @@ module NonconvexAugLagLab
 
 export AugLag2, AugLag2Options
 
-import Optim
+using Optim: Optim
 using Reexport, Parameters, ChainRulesCore
 using Setfield, NonconvexMMA
 @reexport using NonconvexCore

@@ -3,11 +3,11 @@ struct AugLag2{P,D} <: AbstractOptimizer
     dualoptimizer::D
 end
 function AugLag2(;
-    primaloptimizer = Optim.ConjugateGradient(
-        linesearch = Optim.LineSearches.BackTracking(iterations = 10),
+    primaloptimizer=Optim.ConjugateGradient(;
+        linesearch=Optim.LineSearches.BackTracking(; iterations=10)
     ),
-    dualoptimizer = Optim.GradientDescent(
-        linesearch = Optim.LineSearches.BackTracking(iterations = 10),
+    dualoptimizer=Optim.GradientDescent(;
+        linesearch=Optim.LineSearches.BackTracking(; iterations=10)
     ),
 )
     return AugLag2(primaloptimizer, dualoptimizer)
@@ -22,13 +22,15 @@ struct AugLag2Options{P,D,M,T,Q}
 end
 function AugLag2Options(
     alg::AugLag2;
-    primaloptions = alg.primaloptimizer isa MMA02 || alg.primaloptimizer isa MMA87 ?
-                    MMAOptions(maxiter = 100, tol = Tolerance(kkt = 1e-4)) :
-                    Optim.Options(outer_iterations = 10, iterations = 10),
-    dualoptions = Optim.Options(outer_iterations = 10, iterations = 10),
-    maxiter = 10,
-    tol = Tolerance(),
-    quadfactor = 10,
+    primaloptions=if alg.primaloptimizer isa MMA02 || alg.primaloptimizer isa MMA87
+        MMAOptions(; maxiter=100, tol=Tolerance(; kkt=1e-4))
+    else
+        Optim.Options(; outer_iterations=10, iterations=10)
+    end,
+    dualoptions=Optim.Options(; outer_iterations=10, iterations=10),
+    maxiter=10,
+    tol=Tolerance(),
+    quadfactor=10,
 )
     return AugLag2Options(primaloptions, dualoptions, maxiter, tol, quadfactor)
 end
@@ -41,17 +43,7 @@ function Solution(lagmodel::AugLag2Model)
     λ = copy(getlinweights(lagmodel))
     g = copy(λ)
     convstate = ConvergenceState()
-    return Solution(
-        prevx,
-        x,
-        λ,
-        prevf,
-        f,
-        nothing,
-        g,
-        nothing,
-        convstate,
-    )
+    return Solution(prevx, x, λ, prevf, f, nothing, g, nothing, convstate)
 end
 
 mutable struct AugLag2Workspace{
@@ -84,16 +76,16 @@ function AugLag2Workspace(
     model::VecModel,
     optimizer::AugLag2,
     x0::AbstractVector;
-    options::AugLag2Options = AugLag2Options(optimizer),
-    convcriteria::ConvergenceCriteria = KKTCriteria(),
-    plot_trace::Bool = false,
-    show_plot::Bool = plot_trace,
-    save_plot = nothing,
-    callback::Function = plot_trace ?
-                         LazyPlottingCallback(;
-        show_plot = show_plot,
-        save_plot = save_plot,
-    ) : NoCallback(),
+    options::AugLag2Options=AugLag2Options(optimizer),
+    convcriteria::ConvergenceCriteria=KKTCriteria(),
+    plot_trace::Bool=false,
+    show_plot::Bool=plot_trace,
+    save_plot=nothing,
+    callback::Function=if plot_trace
+        LazyPlottingCallback(; show_plot=show_plot, save_plot=save_plot)
+    else
+        NoCallback()
+    end,
     kwargs...,
 )
     length(model.eq_constraints.fs) == 0 ||
@@ -127,8 +119,9 @@ function AugLag2Workspace(
     )
 end
 
-Workspace(model::VecModel, alg::AugLag2, x0::AbstractVector; kwargs...) =
-    AugLag2Workspace(model, alg, x0; kwargs...)
+function Workspace(model::VecModel, alg::AugLag2, x0::AbstractVector; kwargs...)
+    return AugLag2Workspace(model, alg, x0; kwargs...)
+end
 
 function optimize!(workspace::AugLag2Workspace)
     @unpack lagmodel, solution, options, convcriteria = workspace
@@ -144,7 +137,7 @@ function optimize!(workspace::AugLag2Workspace)
     ni, nj = length(λ), length(x)
 
     # Original model
-    model = lagmodel |> getparent
+    model = getparent(lagmodel)
 
     auglag = getobjective(lagmodel)
 
@@ -158,12 +151,7 @@ function optimize!(workspace::AugLag2Workspace)
             solution.f = getorigobjval(lagmodel)
             solution.g .= getorigconstrval(lagmodel)
             assess_convergence!(
-                solution,
-                lagmodel,
-                options.tol,
-                convcriteria,
-                true,
-                workspace.iter,
+                solution, lagmodel, options.tol, convcriteria, true, workspace.iter
             )
             callback(solution)
             return hasconverged(solution)
@@ -181,10 +169,10 @@ function optimize!(workspace::AugLag2Workspace)
             result = optimize(
                 primalmodel,
                 primaloptimizer,
-                clamp.(getx(lagmodel), xl .+ 1e-3, xu .- 1e-3),
-                options = primaloptions,
-                callback = cb,
-                convcriteria = KKTCriteria(),
+                clamp.(getx(lagmodel), xl .+ 1e-3, xu .- 1e-3);
+                options=primaloptions,
+                callback=cb,
+                convcriteria=KKTCriteria(),
             )
             fcalls += result.fcalls
         else
@@ -196,7 +184,7 @@ function optimize!(workspace::AugLag2Workspace)
                 xu,
                 clamp.(getx(lagmodel), xl .+ 1e-3, xu .- 1e-3),
                 Optim.Fminbox(primaloptimizer),
-                @set(primaloptions.callback = cb),
+                @set(primaloptions.callback=cb),
             )
             fcalls += result.f_calls
         end
@@ -220,7 +208,7 @@ function optimize!(workspace::AugLag2Workspace)
     λu = fill(Inf, ni)
 
     # Solve the dual problem by minimizing negative the dual objective value
-    for i = 1:maxiter
+    for i in 1:maxiter
         setquadweight!(lagmodel, min(getquadweight(lagmodel) * quadfactor, 1e10))
         if debugging[]
             @show getquadweight(lagmodel)
@@ -264,7 +252,7 @@ function optimize!(workspace::AugLag2Workspace)
     solution.λ .= getλ(lagmodel)
     solution.f = getorigobjval(lagmodel)
     solution.g .= getorigconstrval(lagmodel)
-    callback(solution, update = true)
+    callback(solution; update=true)
 
     results = GenericResult(
         optimizer,
@@ -280,7 +268,7 @@ function optimize!(workspace::AugLag2Workspace)
     return results
 end
 
-function getoptimobj(obj, minimize = true)
+function getoptimobj(obj, minimize=true)
     optimobj(z) = optimobj(1.0, nothing, z)
     function optimobj(F, G, z)
         if G !== nothing

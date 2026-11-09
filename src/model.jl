@@ -33,10 +33,7 @@ end
 Constructs the objective function from the model, `model`.
 """
 function AugLag2Obj(
-    model::VecModel;
-    linweights = ones(getnineqconstraints(model)),
-    quadweight = 1e-6,
-    kwarg...,
+    model::VecModel; linweights=ones(getnineqconstraints(model)), quadweight=1e-6, kwarg...
 )
     x = copy(getmin(model))
     f = Ref(Inf)
@@ -51,7 +48,7 @@ getdim(::AugLag2Obj) = 1
 
 Evaluates the augmented Lagrangian at the primal solution `x` and the dual solution `λ`.
 """
-function (obj::AugLag2Obj)(x::AbstractVector, λ::AbstractVector; penalise = true)
+function (obj::AugLag2Obj)(x::AbstractVector, λ::AbstractVector; penalise=true)
     if debugging[]
         #@show x
     end
@@ -76,7 +73,7 @@ Evaluates the augmented Lagrangian at the dual solution `λ` where `primaloptimi
  - The original objective value at the optimal `x` and the current `λ`, and
  - The original constraint values at the optimal `x` and the current `λ`,
 """
-function (obj::AugLag2Obj)(primaloptimizer::Function, λ::AbstractVector; penalise = true)
+function (obj::AugLag2Obj)(primaloptimizer::Function, λ::AbstractVector; penalise=true)
     parent = getparent(obj)
     x, origobjval, origconstrval = nogradcall(primaloptimizer, λ)
     savexλ!(obj, x, λ)
@@ -105,9 +102,7 @@ function savexλ!(obj::AugLag2Obj, x::AbstractVector, λ::AbstractVector)
     return obj
 end
 ChainRulesCore.@non_differentiable savexλ!(
-    obj::AugLag2Obj,
-    x::AbstractVector,
-    λ::AbstractVector,
+    obj::AugLag2Obj, x::AbstractVector, λ::AbstractVector
 )
 
 getparent(f::AugLag2Obj) = f.model
@@ -117,12 +112,14 @@ getparent(f::AugLag2Obj) = f.model
 getprimalobjective(f::AugLag2Obj; kwargs...) = FunctionWrapper(x -> f(x, f.λ; kwargs...), 1)
 
 # To be maximized
-getdualobjective(f::AugLag2Obj, primaloptimizer::Function) = FunctionWrapper(λ -> begin
-    if debugging[]
-        #@show λ
-    end
-    f(primaloptimizer, λ)
-end, 1)
+function getdualobjective(f::AugLag2Obj, primaloptimizer::Function)
+    return FunctionWrapper(λ -> begin
+        if debugging[]
+            #@show λ
+        end
+        f(primaloptimizer, λ)
+    end, 1)
+end
 
 getorigobjval(f::AugLag2Obj) = f.f[]
 
@@ -184,14 +181,17 @@ getmax(model::AugLag2Model) = getmax(getparent(model))
 
 getobjective(model::AugLag2Model) = model.objective
 
-getineqconstraints(::AugLag2Model) =
-    throw("`getineqconstraints` is not defined for `AugLag2Model`.")
+function getineqconstraints(::AugLag2Model)
+    return throw("`getineqconstraints` is not defined for `AugLag2Model`.")
+end
 
-geteqconstraints(::AugLag2Model) =
-    throw("`geteqconstraints` is not defined for `AugLag2Model`.")
+function geteqconstraints(::AugLag2Model)
+    return throw("`geteqconstraints` is not defined for `AugLag2Model`.")
+end
 
-getobjectiveconstraints(::AugLag2Model) =
-    throw("`getobjectiveconstraints` is not defined for `AugLag2Model`.")
+function getobjectiveconstraints(::AugLag2Model)
+    return throw("`getobjectiveconstraints` is not defined for `AugLag2Model`.")
+end
 
 getlinweights(model::AugLag2Model) = getlinweights(getobjective(model))
 
@@ -237,7 +237,7 @@ end
 
 function getresiduals(solution::Solution, model::AugLag2Model, ::GenericCriteria)
     @unpack prevx, x, prevf, f, g = solution
-    Δx = maximum(abs(x[j] - prevx[j]) for j = 1:length(x))
+    Δx = maximum(abs(x[j] - prevx[j]) for j in 1:length(x))
     Δf = abs(f - prevf)
     infeas = isempty(g) ? 0.0 : max(0, maximum(g))
     return Δx, Δf, infeas, f
@@ -247,7 +247,7 @@ function getresiduals(solution::Solution, model::AugLag2Model, ::KKTCriteria)
     xmin, xmax = getmin(model), getmax(model)
     T = eltype(x)
     auglag = getobjective(model)
-    _, ∇L = value_gradient(getprimalobjective(auglag, penalise = true), solution.x)
+    _, ∇L = value_gradient(getprimalobjective(auglag; penalise=true), solution.x)
     res = maximum(1:length(x)) do j
         temp = ∇L[j]
         if xmin[j] >= x[j]
@@ -279,7 +279,7 @@ function getresiduals(solution::Solution, model::AugLag2Model, ::IpoptCriteria)
     T = eltype(x)
     n, m, s = length(x), length(λ), zero(T)
     auglag = getobjective(model)
-    _, ∇L = value_gradient(getprimalobjective(auglag, penalise = true), solution.x)
+    _, ∇L = value_gradient(getprimalobjective(auglag; penalise=true), solution.x)
     res = maximum(1:n) do j
         temp = ∇L[j]
         if xmin[j] >= x[j]
