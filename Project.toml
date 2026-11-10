@@ -1,6 +1,6 @@
 name = "NonconvexAugLagLab"
 uuid = "bd7bc4c3-5181-47e7-9a4c-580310605fa6"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Mohamed Tarek <mohdibntarek@gmail.com> and contributors"]
 
 [deps]
