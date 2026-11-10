@@ -422,7 +422,9 @@ function optimize!(workspace::QuasiNewtonWorkspace)
     n = length(x)
     init!(approx, n, x)
     # objective and gradient closure (function may be an Objective or plain function)
-    fobj = model.objective
+    obj = model.objective
+    obj === nothing && throw(ArgumentError("The model has no objective."))
+    fobj = obj
     gradfun = y -> begin
         _, gg = NonconvexCore.value_gradient(fobj, y)
         return gg

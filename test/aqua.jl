@@ -1,4 +1,4 @@
-using Aqua, NonconvexAugLagLab
-
-# All Aqua quality gates are enabled. No tests are skipped.
-Aqua.test_all(NonconvexAugLagLab)
+@testitem "Aqua" begin
+    using Aqua, NonconvexAugLagLab
+    Aqua.test_all(NonconvexAugLagLab)
+end

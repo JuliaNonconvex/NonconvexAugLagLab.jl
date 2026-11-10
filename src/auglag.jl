@@ -311,6 +311,7 @@ function _auglag_objective(
 )
     eq_rel, ineq_rel, _, _ = _subproblem(model, sel, nothing)
     objective0 = model.objective
+    objective0 === nothing && throw(ArgumentError("The model has no objective."))
     w_eq = _unit_weights(weights, eq_rel)
     w_ineq = _unit_weights(weights, ineq_rel)
     function _objective(x)
@@ -376,6 +377,8 @@ function optimize!(workspace::AugLagWorkspace)
     @unpack model, x0, options, sub_alg = workspace
     @unpack relaxed, penalty, max_iter, ctol, η₀, ω₀ = options
     @unpack lsq_multipliers, keep_all = options
+    obj = model.objective
+    obj === nothing && throw(ArgumentError("The model has no objective."))
     ρ = Float64(options.ρ_init)
     x = copy(x0)
     eq_rel, ineq_rel, sd_rel, submodel0 = _subproblem(model, relaxed, options.weights)
@@ -394,7 +397,7 @@ function optimize!(workspace::AugLagWorkspace)
     ω = max(ω₀, sqrt(eps(Float64)))
     Y = _sd_init(model, sd_rel, ρ)
     trajectory = Tuple{typeof(x),Real,Real}[]
-    fx = model.objective(x)
+    fx = obj(x)
     vnorm = Inf
     for iter in 1:max_iter
         alg = sub_alg === nothing ? QuasiNewtonAlg() : sub_alg
@@ -422,7 +425,7 @@ function optimize!(workspace::AugLagWorkspace)
         x = copy(result_i.minimizer)
         v = _relaxed_violation(model, relaxed, x)
         vnorm = norm(v, Inf)
-        fx = model.objective(x)
+        fx = obj(x)
         push!(trajectory, (copy(x), fx, vnorm))
 
         if vnorm <= η
