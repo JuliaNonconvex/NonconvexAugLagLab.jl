@@ -1,0 +1,15 @@
+name = "AugLagLab"
+modules = ["NonconvexAugLagLab"]
+doctest_setup = "using NonconvexAugLagLab"
+
+[[pages]]
+title = "Augmented Lagrangian"
+file = "index.md"
+
+[[pages]]
+title = "Theory"
+file = "theory.md"
+
+[[pages]]
+title = "Docstrings"
+file = "docstrings.md"
