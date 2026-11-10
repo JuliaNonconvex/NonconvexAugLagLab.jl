@@ -22,7 +22,7 @@ struct RelaxConstraintSelection
     ineq::Union{Bool,AbstractVector{Int}}
     sd::Union{Bool,AbstractVector{Int}}
 end
-function RelaxConstraintSelection(; eq = true, ineq = true, sd = true)
+function RelaxConstraintSelection(; eq=true, ineq=true, sd=true)
     return RelaxConstraintSelection(eq, ineq, sd)
 end
 
@@ -33,7 +33,7 @@ function _relaxed_indices(sel::AbstractVector{Int}, n::Int)
     return sel
 end
 function _relaxed_indices(sel, n::Int)
-    throw(
+    return throw(
         ArgumentError(
             "Relaxation selection entries must be `true`, `false` or a vector of " *
             "constraint indices; got $(typeof(sel)).",
@@ -57,29 +57,37 @@ end
 AugLagAlg() = AugLagAlg(nothing)
 AugLagAlg(sub_alg::AbstractOptimizer) = AugLagAlg{typeof(sub_alg)}(sub_alg)
 
-function _optimize_precheck(
-    model::AbstractModel,
-    optimizer::AugLagAlg,
-    args...;
-    kwargs...,
-)
-    nothing
+function _optimize_precheck(model::AbstractModel, optimizer::AugLagAlg, args...; kwargs...)
+    return nothing
 end
 
 function NonconvexCore.solver_capabilities(alg::AugLagAlg)
     if alg.sub_alg === nothing
         # the built-in QuasiNewtonAlg handles box-constrained subproblems
-        return ConstraintCapabilities(
-            eq = true,
-            ineq = true,
-            sd = true,
-            box = true,
-            integer = false,
-            infinite_bounds = true,
+        return ConstraintCapabilities(;
+            linear_eq=true,
+            nonlinear_eq=true,
+            linear_ineq=true,
+            nonlinear_ineq=true,
+            linear_sd=true,
+            nonlinear_sd=true,
+            box=true,
+            continuous=true,
+            binary=false,
+            integer=false,
+            infinite_bounds=true,
         )
     end
     sub = solver_capabilities(alg.sub_alg)
-    return merge_capabilities(sub; eq = true, ineq = true, sd = true)
+    return merge_capabilities(
+        sub;
+        linear_eq=true,
+        nonlinear_eq=true,
+        linear_ineq=true,
+        nonlinear_ineq=true,
+        linear_sd=true,
+        nonlinear_sd=true,
+    )
 end
 
 """
@@ -117,20 +125,20 @@ mutable struct AugLagOptions{S,R,W}
     keep_all::Bool
 end
 function AugLagOptions(;
-    sub_options = nothing,
-    relaxed = RelaxConstraintSelection(),
-    penalty::Symbol = :quadratic,
-    ρ_init::Real = 10.0,
-    ρ_max::Real = 1e10,
-    ρ_incr::Real = 10.0,
-    ρ_decr::Real = 10.0,
-    max_iter::Int = 1000,
-    ctol::Real = 1e-6,
-    η₀::Real = 0.5,
-    ω₀::Real = 1.0,
-    weights = nothing,
-    lsq_multipliers::Bool = false,
-    keep_all::Bool = false,
+    sub_options=nothing,
+    relaxed=RelaxConstraintSelection(),
+    penalty::Symbol=:quadratic,
+    ρ_init::Real=10.0,
+    ρ_max::Real=1e10,
+    ρ_incr::Real=10.0,
+    ρ_decr::Real=10.0,
+    max_iter::Int=1000,
+    ctol::Real=1e-6,
+    η₀::Real=0.5,
+    ω₀::Real=1.0,
+    weights=nothing,
+    lsq_multipliers::Bool=false,
+    keep_all::Bool=false,
 )
     penalty in (:quadratic, :pbm, :mixed) ||
         throw(ArgumentError("penalty must be :quadratic, :pbm or :mixed"))
@@ -163,10 +171,7 @@ struct AugLagResult{TM1,TM2,R,TR} <: AbstractResult
 end
 
 mutable struct AugLagWorkspace{
-    M<:VecModel,
-    X<:AbstractVector,
-    O<:AugLagOptions,
-    S<:Union{Nothing,AbstractOptimizer},
+    M<:VecModel,X<:AbstractVector,O<:AugLagOptions,S<:Union{Nothing,AbstractOptimizer}
 } <: Workspace
     model::M
     x0::X
@@ -179,7 +184,7 @@ function Workspace(
     optimizer::AugLagAlg,
     x0::AbstractVector,
     args...;
-    options::AugLagOptions = AugLagOptions(),
+    options::AugLagOptions=AugLagOptions(),
     kwargs...,
 )
     if optimizer.sub_alg === nothing
@@ -188,9 +193,10 @@ function Workspace(
             length(_relaxed_indices(sel.eq, length(model.eq_constraints.fs))) +
             length(_relaxed_indices(sel.ineq, length(model.ineq_constraints.fs))) +
             length(_relaxed_indices(sel.sd, length(model.sd_constraints.fs)))
-        ntotal = length(model.eq_constraints.fs) +
-                 length(model.ineq_constraints.fs) +
-                 length(model.sd_constraints.fs)
+        ntotal =
+            length(model.eq_constraints.fs) +
+            length(model.ineq_constraints.fs) +
+            length(model.sd_constraints.fs)
         nrelax == ntotal || throw(
             ArgumentError(
                 "AugLagAlg() uses the built-in QuasiNewtonAlg which only handles " *
@@ -206,23 +212,23 @@ end
 # Subproblem construction
 # ------------------------------------------------------------------
 function _subproblem(
-    model::VecModel,
-    sel::RelaxConstraintSelection,
-    weights::Union{Nothing,AbstractVector},
+    model::VecModel, sel::RelaxConstraintSelection, weights::Union{Nothing,AbstractVector}
 )
     eq_rel = _relaxed_indices(sel.eq, length(model.eq_constraints.fs))
     ineq_rel = _relaxed_indices(sel.ineq, length(model.ineq_constraints.fs))
     sd_rel = _relaxed_indices(sel.sd, length(model.sd_constraints.fs))
-    kept_eq = VectorOfFunctions(
-        [c for (i, c) in enumerate(model.eq_constraints.fs) if !(i in eq_rel)],
-    )
-    kept_ineq = VectorOfFunctions(
-        [c for (i, c) in enumerate(model.ineq_constraints.fs) if !(i in ineq_rel)],
-    )
-    kept_sd = VectorOfFunctions(
-        [c for (i, c) in enumerate(model.sd_constraints.fs) if !(i in sd_rel)],
-    )
-    return eq_rel, ineq_rel, sd_rel, VecModel(
+    kept_eq = VectorOfFunctions([
+        c for (i, c) in enumerate(model.eq_constraints.fs) if !(i in eq_rel)
+    ],)
+    kept_ineq = VectorOfFunctions([
+        c for (i, c) in enumerate(model.ineq_constraints.fs) if !(i in ineq_rel)
+    ],)
+    kept_sd = VectorOfFunctions([
+        c for (i, c) in enumerate(model.sd_constraints.fs) if !(i in sd_rel)
+    ],)
+    return eq_rel,
+    ineq_rel, sd_rel,
+    VecModel(
         model.objective,
         kept_eq,
         kept_ineq,
@@ -257,7 +263,7 @@ end
 
 # Extension hook (overridden by NonconvexAugLagLabSDPExt)
 function _sd_violation(model, i, x)
-    throw(
+    return throw(
         ArgumentError(
             "Semidefinite constraints are selected for relaxation but " *
             "NonconvexSemidefinite is not loaded; load it to enable the " *
@@ -387,10 +393,10 @@ function optimize!(workspace::AugLagWorkspace)
     η = max(η₀, ctol)
     ω = max(ω₀, sqrt(eps(Float64)))
     Y = _sd_init(model, sd_rel, ρ)
-    trajectory = Tuple{typeof(x), Real, Real}[]
+    trajectory = Tuple{typeof(x),Real,Real}[]
     fx = model.objective(x)
     vnorm = Inf
-    for iter = 1:max_iter
+    for iter in 1:max_iter
         alg = sub_alg === nothing ? QuasiNewtonAlg() : sub_alg
         sd_terms = _sd_terms(model, sd_rel, ρ, x, Y)
         obj = _auglag_objective(model, relaxed, options.weights, ρ, y, λ, sd_terms, penalty)
@@ -409,10 +415,10 @@ function optimize!(workspace::AugLagWorkspace)
         checksubproblem!(
             submodel,
             alg;
-            context = "the augmented Lagrangian subproblem",
-            hint = "relax the constraint in `RelaxConstraintSelection` or choose a sub-solver that supports it.",
+            context="the augmented Lagrangian subproblem",
+            hint="relax the constraint in `RelaxConstraintSelection` or choose a sub-solver that supports it.",
         )
-        result_i = optimize(submodel, alg, x; options = options.sub_options)
+        result_i = optimize(submodel, alg, x; options=options.sub_options)
         x = copy(result_i.minimizer)
         v = _relaxed_violation(model, relaxed, x)
         vnorm = norm(v, Inf)
@@ -460,7 +466,7 @@ end
 # Extension hooks for semidefinite constraints (see ext/NonconvexAugLagLabSDPExt.jl)
 function _sd_init(model, sd_rel, ρ)
     isempty(sd_rel) && return nothing
-    _sd_violation(model, first(sd_rel), model.init) # throws when the extension is missing
+    return _sd_violation(model, first(sd_rel), model.init) # throws when the extension is missing
 end
 function _sd_terms(model, sd_rel, ρ, x, Y)
     return x -> 0.0

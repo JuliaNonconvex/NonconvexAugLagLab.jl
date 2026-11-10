@@ -68,7 +68,7 @@ mutable struct LBFGSApprox{P<:AbstractPreconditioner} <: AbstractHessianApprox
     ρ::Vector{Float64}
     α::Vector{Float64}
 end
-function LBFGSApprox(memory::Int = 10; H0 = IdentityPreconditioner())
+function LBFGSApprox(memory::Int=10; H0=IdentityPreconditioner())
     return LBFGSApprox(
         memory,
         H0,
@@ -93,12 +93,12 @@ function solve!(d, H::LBFGSApprox, g)
     resize!(H.α, m)
     m == 1 && println("  solve! state: s=", H.s, " ρ=", H.ρ, " g=", g)
     q = copy(g)
-    for i = m:-1:1
+    for i in m:-1:1
         H.α[i] = H.ρ[i] * dot(H.s[i], q)
         q .-= H.α[i] .* H.y[i]
     end
     solve!(d, H.H0, q)
-    for i = 1:m
+    for i in 1:m
         β = H.ρ[i] * dot(H.y[i], d)
         d .+= (H.α[i] - β) .* H.s[i]
     end
@@ -110,12 +110,12 @@ function apply!(Bv, H::LBFGSApprox, v)
     m = length(H.s)
     resize!(H.α, m)
     q = copy(v)
-    for i = m:-1:1
+    for i in m:-1:1
         H.α[i] = H.ρ[i] * dot(H.s[i], q)
         q .-= H.α[i] .* H.y[i]
     end
     apply!(Bv, H.H0, q)
-    for i = 1:m
+    for i in 1:m
         β = H.ρ[i] * dot(H.y[i], Bv)
         Bv .+= (H.α[i] - β) .* H.s[i]
     end
@@ -152,13 +152,13 @@ mutable struct DenseBFGSApprox{T<:AbstractMatrix} <: AbstractHessianApprox
     H::T
     form::Symbol
 end
-DenseBFGSApprox(; form::Symbol = :inverse) = DenseBFGSApprox(zeros(0, 0), form)
+DenseBFGSApprox(; form::Symbol=:inverse) = DenseBFGSApprox(zeros(0, 0), form)
 
 function init!(H::DenseBFGSApprox, n::Int, x0)
     H.H = Matrix{Float64}(I, n, n)
     return H
 end
-reset!(H::DenseBFGSApprox) = (H.H = Matrix{Float64}(I, size(H.H, 1), size(H.H, 1)); H)
+reset!(H::DenseBFGSApprox) = (H.H=Matrix{Float64}(I, size(H.H, 1), size(H.H, 1)); H)
 
 function update!(H::DenseBFGSApprox, s, y)
     B = H.H
@@ -184,7 +184,7 @@ function solve!(d, H::DenseBFGSApprox, g)
         return mul!(d, H.H, g)
     else
         # factorization-free robust solve: Cholesky of the SPD approximation
-        F = cholesky(Symmetric(H.H), check = false)
+        F = cholesky(Symmetric(H.H); check=false)
         if issuccess(F)
             return copyto!(d, F \ g)
         else
@@ -210,8 +210,9 @@ mutable struct StructuredBFGSApprox{T<:AbstractMatrix} <: AbstractHessianApprox
     B::T
     form::Symbol
 end
-StructuredBFGSApprox(B::AbstractMatrix; form::Symbol = :hessian) =
-    StructuredBFGSApprox(B, form)
+function StructuredBFGSApprox(B::AbstractMatrix; form::Symbol=:hessian)
+    return StructuredBFGSApprox(B, form)
+end
 
 function init!(H::StructuredBFGSApprox, n::Int, x0)
     H.B .= 0
@@ -260,7 +261,7 @@ end
 apply!(Bv, H::StructuredBFGSApprox, v) = mul!(Bv, H.B, v)
 function solve!(d, H::StructuredBFGSApprox, g)
     Bm = Symmetric(Matrix(H.B))
-    F = cholesky(Bm, check = false)
+    F = cholesky(Bm; check=false)
     if issuccess(F)
         return copyto!(d, F \ g)
     else
@@ -322,22 +323,29 @@ struct QuasiNewtonAlg{A<:AbstractHessianApprox} <: AbstractOptimizer
 end
 # The quasi-Newton driver solves smooth box-constrained (possibly unbounded)
 # problems; it handles no other constraint kinds.
-NonconvexCore.solver_capabilities(::QuasiNewtonAlg) = ConstraintCapabilities(
-    eq = false,
-    ineq = false,
-    sd = false,
-    box = true,
-    integer = false,
-    infinite_bounds = true,
-)
+function NonconvexCore.solver_capabilities(::QuasiNewtonAlg)
+    return ConstraintCapabilities(;
+        linear_eq=false,
+        nonlinear_eq=false,
+        linear_ineq=false,
+        nonlinear_ineq=false,
+        linear_sd=false,
+        nonlinear_sd=false,
+        box=true,
+        continuous=true,
+        binary=false,
+        integer=false,
+        infinite_bounds=true,
+    )
+end
 
 function QuasiNewtonAlg(
-    approx::AbstractHessianApprox = LBFGSApprox(10);
-    linesearch::Symbol = :backtracking,
-    max_iter::Int = 200,
-    tol::Real = 1e-6,
-    damping::Bool = true,
-    Δ0::Real = 1.0,
+    approx::AbstractHessianApprox=LBFGSApprox(10);
+    linesearch::Symbol=:backtracking,
+    max_iter::Int=200,
+    tol::Real=1e-6,
+    damping::Bool=true,
+    Δ0::Real=1.0,
 )
     linesearch in (:backtracking, :wolfe, :trustregion) ||
         throw(ArgumentError("linesearch must be :backtracking, :wolfe or :trustregion"))
@@ -358,13 +366,15 @@ mutable struct QuasiNewtonWorkspace{
     counter::R
 end
 
-function Workspace(model::VecModel, optimizer::QuasiNewtonAlg, x0::AbstractVector; kwargs...)
+function Workspace(
+    model::VecModel, optimizer::QuasiNewtonAlg, x0::AbstractVector; kwargs...
+)
     return QuasiNewtonWorkspace(model, optimizer.approx, copy(x0), optimizer, Ref(0))
 end
 
 # Powell damping: blend y towards Bs so the updated approximation stays
 # positive definite when the secant condition sᵀy > 0 fails.
-function _damped_secant(y, s, Bs; η = 0.2)
+function _damped_secant(y, s, Bs; η=0.2)
     sy = dot(s, y)
     sBs = dot(s, Bs)
     if sBs > 0 && sy >= η * sBs
@@ -378,11 +388,11 @@ function _damped_secant(y, s, Bs; η = 0.2)
 end
 
 # strong Wolfe line search along the projected path
-function _backtracking_linesearch(f, x, d, fx, gx, α₀ = 1.0; c1 = 1e-4)
+function _backtracking_linesearch(f, x, d, fx, gx, α₀=1.0; c1=1e-4)
     α = α₀
     dg = dot(gx, d)
     dg < 0 || return 0.0, fx
-    for _ = 1:30
+    for _ in 1:30
         xt = x .+ α .* d
         fxt = f(xt)
         if isfinite(fxt) && fxt <= fx + c1 * α * dg
@@ -428,7 +438,7 @@ function optimize!(workspace::QuasiNewtonWorkspace)
     # out immediately, never hold a reference across another gradient call.
     g = copy(gradfun(x))
     Δ = optimizer.Δ0
-    for iter = 1:optimizer.max_iter
+    for iter in 1:optimizer.max_iter
         counter[] += 1
         d = similar(x)
         if optimizer.linesearch === :trustregion
@@ -490,7 +500,7 @@ function optimize!(workspace::QuasiNewtonWorkspace)
         fx,
         counter[],
         false,
-        Tolerance(kkt = optimizer.tol),
+        Tolerance(; kkt=optimizer.tol),
         nothing,
         counter[],
     )
@@ -510,7 +520,7 @@ function _steihaug(approx, g, Δ)
     p = .-g
     rnorm2 = dot(r, r)
     rnorm2 < 1e-14 && return d
-    for _ = 1:n
+    for _ in 1:n
         Bp = _hessmatvec(approx, p)
         pBp = dot(p, Bp)
         if pBp <= 0
@@ -546,5 +556,11 @@ function _root_of_quadratic(a, b, c)
     disc = max(disc, 0.0)
     τ1 = (-b + sqrt(disc)) / (2a)
     τ2 = (-b - sqrt(disc)) / (2a)
-    return max(τ1, τ2) > 0 ? max(τ1, τ2) : min(τ1, τ2) > 0 ? min(τ1, τ2) : 0.0
+    return if max(τ1, τ2) > 0
+        max(τ1, τ2)
+    elseif min(τ1, τ2) > 0
+        min(τ1, τ2)
+    else
+        0.0
+    end
 end

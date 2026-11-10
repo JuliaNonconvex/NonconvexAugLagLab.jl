@@ -7,7 +7,15 @@ export IdentityPreconditioner, DiagonalPreconditioner
 
 using Reexport, Parameters, LinearAlgebra, SparseArrays
 @reexport using NonconvexCore
-using NonconvexCore: VecModel, AbstractOptimizer, AbstractModel, Objective, VectorOfFunctions, AbstractResult, GenericResult, Tolerance
+using NonconvexCore:
+    VecModel,
+    AbstractOptimizer,
+    AbstractModel,
+    Objective,
+    VectorOfFunctions,
+    AbstractResult,
+    GenericResult,
+    Tolerance
 import NonconvexCore: Workspace, optimize!, _optimize_precheck
 
 include("qn.jl")

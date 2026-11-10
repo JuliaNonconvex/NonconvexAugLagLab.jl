@@ -15,7 +15,7 @@ end
 @testset "QuasiNewtonAlg: L-BFGS with a diagonal preconditioner" begin
     m = Model(x -> (1 - x[1])^2 + 100 * (x[2] - x[1]^2)^2)
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
-    alg = QuasiNewtonAlg(LBFGSApprox(10; H0 = DiagonalPreconditioner([1.0, 100.0])))
+    alg = QuasiNewtonAlg(LBFGSApprox(10; H0=DiagonalPreconditioner([1.0, 100.0])))
     r = optimize(m, alg, [-1.2, 1.0])
     @test norm(r.minimizer - [1.0, 1.0]) < 1e-3
 end
@@ -24,7 +24,7 @@ end
     for form in (:inverse, :hessian)
         m = Model(x -> (1 - x[1])^2 + 100 * (x[2] - x[1]^2)^2)
         addvar!(m, [-5.0, -5.0], [5.0, 5.0])
-        r = optimize(m, QuasiNewtonAlg(DenseBFGSApprox(form = form)), [-1.2, 1.0])
+        r = optimize(m, QuasiNewtonAlg(DenseBFGSApprox(form=form)), [-1.2, 1.0])
         @test norm(r.minimizer - [1.0, 1.0]) < 1e-3
     end
 end
@@ -34,23 +34,14 @@ end
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
     # diagonal sparsity pattern: only the diagonal of the Hessian model is kept
     B = spdiagm(ones(2))
-    r = optimize(
-        m,
-        QuasiNewtonAlg(StructuredBFGSApprox(B)),
-        [-1.2, 1.0];
-        options = nothing,
-    )
+    r = optimize(m, QuasiNewtonAlg(StructuredBFGSApprox(B)), [-1.2, 1.0]; options=nothing)
     @test norm(r.minimizer - [1.0, 1.0]) < 5e-2
 end
 
 @testset "QuasiNewtonAlg: Newton trust region" begin
     m = Model(x -> (1 - x[1])^2 + 100 * (x[2] - x[1]^2)^2)
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
-    r = optimize(
-        m,
-        QuasiNewtonAlg(NewtonTRApprox(); linesearch = :trustregion),
-        [-1.2, 1.0],
-    )
+    r = optimize(m, QuasiNewtonAlg(NewtonTRApprox(); linesearch=:trustregion), [-1.2, 1.0])
     @test norm(r.minimizer - [1.0, 1.0]) < 1e-3
 end
 
@@ -118,8 +109,8 @@ end
     m = Model(x -> sum(x .^ 2))
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
     add_ineq_constraint!(m, x -> 2 - x[1] - x[2])
-    options = AugLagOptions(penalty = :pbm)
-    r = optimize(m, AugLagAlg(), [1.5, 1.5], options = options)
+    options = AugLagOptions(penalty=:pbm)
+    r = optimize(m, AugLagAlg(), [1.5, 1.5], options=options)
     @test norm(r.minimizer - [1.0, 1.0]) < 1e-4
 end
 
@@ -130,10 +121,10 @@ end
     add_eq_constraint!(m, x -> x[1] + x[2] - 1)
     alg = AugLagAlg(IpoptAlg())
     options = AugLagOptions(
-        relaxed = RelaxConstraintSelection(eq = false, ineq = true, sd = true),
-        sub_options = IpoptOptions(max_iter = 100),
+        relaxed=RelaxConstraintSelection(eq=false, ineq=true, sd=true),
+        sub_options=IpoptOptions(max_iter=100),
     )
-    r = optimize(m, alg, [0.0, 0.0], options = options)
+    r = optimize(m, alg, [0.0, 0.0], options=options)
     @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
 end
 
@@ -141,16 +132,16 @@ end
     m = Model(x -> sum(x .^ 2))
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
     add_eq_constraint!(m, x -> x[1] + x[2] - 1)
-    options = AugLagOptions(relaxed = RelaxConstraintSelection(eq = false))
-    @test_throws ArgumentError optimize(m, AugLagAlg(), [0.0, 0.0], options = options)
+    options = AugLagOptions(relaxed=RelaxConstraintSelection(eq=false))
+    @test_throws ArgumentError optimize(m, AugLagAlg(), [0.0, 0.0], options=options)
 end
 
 @testset "AugLagAlg: keep_all trajectory" begin
     m = Model(x -> sum(x .^ 2))
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
     add_eq_constraint!(m, x -> x[1] + x[2] - 1)
-    options = AugLagOptions(keep_all = true)
-    r = optimize(m, AugLagAlg(), [0.0, 0.0], options = options)
+    options = AugLagOptions(keep_all=true)
+    r = optimize(m, AugLagAlg(), [0.0, 0.0], options=options)
     @test r.trajectory !== nothing
     @test length(r.trajectory) >= 1
 end
@@ -178,24 +169,23 @@ end
     addvar!(m, [-5.0], [5.0])
     add_sd_constraint!(m, x -> [x[1] - 2.0;;])
     options = AugLagOptions(
-        relaxed = RelaxConstraintSelection(sd = false),
-        sub_options = IpoptOptions(max_iter = 10),
+        relaxed=RelaxConstraintSelection(sd=false), sub_options=IpoptOptions(max_iter=10)
     )
     # Ipopt does not support sd constraints; the strict capability check errors.
-    @test_throws ArgumentError optimize(
-        m,
-        AugLagAlg(IpoptAlg()),
-        [0.0];
-        options = options,
-    )
+    @test_throws ArgumentError optimize(m, AugLagAlg(IpoptAlg()), [0.0]; options=options)
 end
 
 @testset "solver capabilities" begin
     caps = solver_capabilities(AugLagAlg())
-    @test caps.eq === true
-    @test caps.ineq === true
-    @test caps.sd === true
+    @test caps.linear_eq === true
+    @test caps.nonlinear_eq === true
+    @test caps.linear_ineq === true
+    @test caps.nonlinear_ineq === true
+    @test caps.linear_sd === true
+    @test caps.nonlinear_sd === true
     @test caps.box === true
     @test caps.integer === false
     @test caps.infinite_bounds === true
 end
+
+include("aqua.jl")

@@ -17,6 +17,10 @@ NonconvexSemidefinite = "9e21ff56-eb25-42d3-b86f-5b0612f555e7"
 NonconvexAugLagLabSDPExt = "NonconvexSemidefinite"
 
 [compat]
+Aqua = "0.8, 0.9"
+JET = "0.9, 0.10, 0.11, 0.12, 0.13"
+NonconvexIpopt = "0.7"
+Test = "1"
 LinearAlgebra = "1"
 NonconvexCore = "2"
 NonconvexSemidefinite = "0.3"
@@ -26,9 +30,11 @@ SparseArrays = "1"
 julia = "1.10"
 
 [extras]
+Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
+JET = "c3a54625-cd67-489e-a8e7-0a5a0ff4e31b"
 NonconvexIpopt = "bf347577-a06d-49ad-a669-8c0e005493b8"
 NonconvexSemidefinite = "9e21ff56-eb25-42d3-b86f-5b0612f555e7"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["NonconvexIpopt", "NonconvexSemidefinite", "Test"]
+test = ["NonconvexIpopt", "NonconvexSemidefinite", "Test", "Aqua", "JET"]
