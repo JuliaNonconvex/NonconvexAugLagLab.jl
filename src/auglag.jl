@@ -163,6 +163,15 @@ function AugLagOptions(;
     )
 end
 
+"""
+    AugLagResult
+
+The result of an [`AugLagAlg`](@ref) optimization: the `GenericResult`-style
+fields `minimizer` and `minimum`, the (currently `nothing`) sub-solver
+`results`, and `trajectory` — the vector of outer-loop iterates
+`(x, f(x), ‖v(x)‖∞)` when `AugLagOptions(keep_all = true)`, `nothing`
+otherwise.
+"""
 struct AugLagResult{TM1,TM2,R,TR} <: AbstractResult
     minimizer::TM1
     minimum::TM2

@@ -91,7 +91,6 @@ end
 function solve!(d, H::LBFGSApprox, g)
     m = length(H.s)
     resize!(H.α, m)
-    m == 1 && println("  solve! state: s=", H.s, " ρ=", H.ρ, " g=", g)
     q = copy(g)
     for i in m:-1:1
         H.α[i] = H.ρ[i] * dot(H.s[i], q)
@@ -124,7 +123,6 @@ end
 
 function update!(H::LBFGSApprox, s, y)
     sy = dot(s, y)
-    length(H.s) < 2 && println("  update!: s=", s, " y=", y, " sy=", sy)
     sy > 0 || return H
     push!(H.s, copy(s))
     push!(H.y, copy(y))
@@ -470,20 +468,14 @@ function optimize!(workspace::QuasiNewtonWorkspace)
             continue
         end
         solve!(d, approx, g)
-        iter == 1 && println("  chk1 g=", g)
         d .= .-d
-        iter == 1 && println("  chk2 g=", g)
         d = _project(x, d, lb, ub)
-        iter == 1 && println("  chk3 g=", g)
         norm(d) < 1e-12 && break
         α, fxnew = _backtracking_linesearch(fobj, x, d, fx, g)
-        iter == 1 && println("  chk4 g=", g, " α=", α)
         α <= 0 && break
         xnew = x .+ α .* d
         s = xnew .- x
-        iter == 1 && println("  chk5 g=", g)
         y = gradfun(xnew) .- g
-        iter == 1 && println("  chk6 g=", g, " y=", y)
         if optimizer.damping && !(approx isa NewtonTRApprox)
             Bs = similar(y)
             apply!(Bs, approx, s)
