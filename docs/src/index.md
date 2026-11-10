@@ -1,5 +1,7 @@
 # Augmented Lagrangian in pure Julia
 
+![JuliaNonconvex logo](https://raw.githubusercontent.com/JuliaNonconvex/NonconvexAugLagLab.jl/master/docs/src/assets/logo.png)
+
 ## Description
 
 `NonconvexAugLagLab.jl` provides [`AugLagAlg`](@ref), an augmented
