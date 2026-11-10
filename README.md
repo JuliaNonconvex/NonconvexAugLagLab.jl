@@ -1,5 +1,7 @@
 # NonconvexAugLagLab
 
+<img src="https://raw.githubusercontent.com/JuliaNonconvex/NonconvexAugLagLab.jl/master/docs/src/assets/logo.png" width="120" align="right"/>
+
 [![Documentation (stable)](https://img.shields.io/badge/docs-stable-blue.svg)](https://julianonconvex.github.io/NonconvexAugLagLab.jl/stable)
 [![Documentation (dev)](https://img.shields.io/badge/docs-dev-blue.svg)](https://julianonconvex.github.io/NonconvexAugLagLab.jl/dev)
 [![Build Status](https://github.com/JuliaNonconvex/NonconvexAugLagLab.jl/actions/workflows/CI.yml/badge.svg?branch=master)](https://github.com/JuliaNonconvex/NonconvexAugLagLab.jl/actions)
