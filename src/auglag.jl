@@ -93,7 +93,10 @@ end
 """
     AugLagOptions(; kwargs...)
 
-- `sub_options`: options for the sub-solver (or the built-in `QuasiNewtonAlg`).
+- `sub_options`: options for the sub-solver. For the built-in
+  `QuasiNewtonAlg` this is a named tuple of its keyword arguments (default:
+  `(; max_iter = 800, tol = 1e-8)`); for a custom `sub_alg` it is forwarded
+  as its `options`.
 - `relaxed`: a [`RelaxConstraintSelection`](@ref) (default: relax everything).
 - `penalty`: `:quadratic` (classical ALM), `:pbm` (penalty-barrier-multiplier
   for inequalities, quadratic for equalities) or `:mixed` (PBM for
@@ -105,7 +108,11 @@ end
 - `η₀`, `ω₀`: initial feasibility/optimality targets of the subproblems.
 - `weights`: per-constraint-group penalty weights (default: all ones).
 - `lsq_multipliers`: initialize equality multipliers from the least-squares
-  stationarity residual.
+  stationarity residual (default `true`).
+- `scaling`: normalize the relaxed constraints by their gradient magnitudes
+  and the objective by its initial magnitude (Curtis–Jiang–Robinson style
+  scaling), so the penalty applies to balanced, unit-scaled constraint
+  violations (default `true`).
 - `keep_all`: keep the trajectory of outer iterates in the result.
 """
 mutable struct AugLagOptions{S,R,W}
@@ -122,6 +129,7 @@ mutable struct AugLagOptions{S,R,W}
     ω₀::Real
     weights::W
     lsq_multipliers::Bool
+    scaling::Bool
     keep_all::Bool
 end
 function AugLagOptions(;
@@ -137,7 +145,8 @@ function AugLagOptions(;
     η₀::Real=0.5,
     ω₀::Real=1.0,
     weights=nothing,
-    lsq_multipliers::Bool=false,
+    lsq_multipliers::Bool=true,
+    scaling::Bool=true,
     keep_all::Bool=false,
 )
     penalty in (:quadratic, :pbm, :mixed) ||
@@ -159,6 +168,7 @@ function AugLagOptions(;
         ω₀,
         weights,
         lsq_multipliers,
+        scaling,
         keep_all,
     )
 end
@@ -380,18 +390,144 @@ function _lsq_multipliers(model, eq_rel, x)
 end
 
 # ------------------------------------------------------------------
+# Problem scaling (Curtis, Jiang & Robinson style)
+# ------------------------------------------------------------------
+# The augmented Lagrangian penalty multiplies squared constraint values, so
+# constraint groups with very different gradient magnitudes get very different
+# curvatures and the subproblems become ill-conditioned (this is what breaks
+# the classical scheme on problems like AC-OPF). Scale each relaxed group by
+# the largest gradient magnitude at the initial point (capped below at 1) and
+# the objective by its initial magnitude, then run the classical algorithm on
+# the balanced problem; the returned objective is unscaled.
+function _group_scales(model::VecModel, sel, x0)
+    eq_rel, ineq_rel, _, _ = _subproblem(model, sel, nothing)
+    scales = Float64[]
+    for (kind, rel) in (("eq", eq_rel), ("ineq", ineq_rel))
+        fs = kind == "eq" ? model.eq_constraints.fs : model.ineq_constraints.fs
+        for i in rel
+            c = fs[i]
+            d = 1.0
+            try
+                _, J = NonconvexCore.value_jacobian(x -> _vecval(c(x)), x0)
+                d = max(1.0, maximum(abs, Matrix(J)))
+            catch
+                d = 1.0
+            end
+            push!(scales, d)
+        end
+    end
+    return eq_rel, ineq_rel, scales
+end
+
+function _scaled_problem(model::VecModel, sel, x0)
+    eq_rel, ineq_rel, scales = _group_scales(model, sel, x0)
+    # Scaled constraint functions: c̃(x) = c(x) / d.
+    eq_fs = [
+        (x -> _vecval(model.eq_constraints.fs[eq_rel[i]](x)) ./ scales[i]) for
+        i in eachindex(eq_rel)
+    ]
+    ineq_fs = [
+        (
+            x ->
+                _vecval(model.ineq_constraints.fs[ineq_rel[i]](x)) ./
+                scales[length(eq_rel) + i]
+        ) for i in eachindex(ineq_rel)
+    ]
+    return eq_fs, ineq_fs, scales
+end
+
+# Scaled augmented Lagrangian objective: same structure as the classical one,
+# evaluated on the pre-scaled constraint functions and scaled objective.
+function _auglag_objective_scaled(
+    model::VecModel,
+    sel,
+    weights,
+    ρ::Real,
+    y,
+    λ,
+    sd_terms::Function,
+    penalty::Symbol,
+    objective0,
+    eq_fs,
+    ineq_fs,
+)
+    w_eq = _unit_weights(weights, 1:length(eq_fs))
+    w_ineq = _unit_weights(weights, 1:length(ineq_fs))
+    function _objective(x)
+        target = objective0(x)
+        for (kk, c) in enumerate(eq_fs)
+            cv = _vecval(c(x))
+            r = ρ * w_eq[kk]
+            target += dot(y[kk], cv) + r / 2 * dot(cv, cv)
+        end
+        for (kk, c) in enumerate(ineq_fs)
+            g = _vecval(c(x))
+            r = ρ * w_ineq[kk]
+            if penalty === :pbm || penalty === :mixed
+                # PBM barrier on the feasible side, classical quadratic
+                # augmented Lagrangian on the infeasible side.
+                feas = g .<= 0
+                target += _pbm_barrier(g[feas], λ[kk][feas], r)
+                if any(.!feas)
+                    gp = max.(g, 0.0)
+                    target += dot(λ[kk], gp) + r / 2 * dot(gp, gp)
+                end
+            else
+                gp = max.(g, 0.0)
+                target += dot(λ[kk], gp) + r / 2 * dot(gp, gp)
+            end
+        end
+        target += sd_terms(x)
+        return target
+    end
+    return _objective
+end
+
+# Violation measure of the relaxed constraints on the scaled functions.
+function _scaled_violation(eq_fs, ineq_fs, model, sel, x)
+    v = Float64[]
+    for c in eq_fs
+        append!(v, abs.(_vecval(c(x))))
+    end
+    for c in ineq_fs
+        append!(v, max.(_vecval(c(x)), 0.0))
+    end
+    _, _, sd_rel, _ = _subproblem(model, sel, nothing)
+    for i in sd_rel
+        append!(v, _sd_violation(model, i, x))
+    end
+    return v
+end
+
+# ------------------------------------------------------------------
 # Outer loop
 # ------------------------------------------------------------------
 function optimize!(workspace::AugLagWorkspace)
     @unpack model, x0, options, sub_alg = workspace
     @unpack relaxed, penalty, max_iter, ctol, η₀, ω₀ = options
-    @unpack lsq_multipliers, keep_all = options
+    @unpack lsq_multipliers, scaling, keep_all, sub_options = options
     obj = model.objective
     obj === nothing && throw(ArgumentError("The model has no objective."))
     ρ = Float64(options.ρ_init)
     x = copy(x0)
     eq_rel, ineq_rel, sd_rel, submodel0 = _subproblem(model, relaxed, options.weights)
+    # Objective scale: minimize f/s_f so the AL objective terms are O(1).
+    # (The PBM barrier parameters are calibrated to the unscaled objective,
+    # so only the classical quadratic mode scales f.)
+    fscale = 1.0
+    if scaling && penalty === :quadratic
+        f0 = obj(x)
+        fscale = max(1.0, abs(f0))
+    end
+    scaled_obj = fscale == 1.0 ? obj : (x -> obj(x) / fscale)
     y, λ = _init_multipliers(model, relaxed)
+    if scaling
+        eq_fs, ineq_fs, scales = _scaled_problem(model, relaxed, x)
+    else
+        eq_fs = [model.eq_constraints.fs[i] for i in eq_rel]
+        ineq_fs = [model.ineq_constraints.fs[i] for i in ineq_rel]
+        scales = ones(length(eq_rel) + length(ineq_rel))
+    end
     if penalty === :pbm || penalty === :mixed
         # the PBM barrier term (u/c) log(1 + c g) is inactive for u = 0;
         # initialize the barrier multipliers positive
@@ -400,20 +536,40 @@ function optimize!(workspace::AugLagWorkspace)
         end
     end
     if lsq_multipliers && !isempty(eq_rel)
-        y = _lsq_multipliers(model, eq_rel, x)
+        y = _lsq_multipliers_scaled(scaled_obj, eq_fs, x)
     end
     η = max(η₀, ctol)
-    ω = max(ω₀, sqrt(eps(Float64)))
+    ω = max(ω₀, 1 / ρ^0.1)
     Y = _sd_init(model, sd_rel, ρ)
     trajectory = Tuple{typeof(x),Real,Real}[]
     fx = obj(x)
-    vnorm = Inf
+    vprev = Inf
     for iter in 1:max_iter
-        alg = sub_alg === nothing ? QuasiNewtonAlg() : sub_alg
+        # The built-in quasi-Newton subsolver: thorough by default (the
+        # augmented Lagrangian outer loop converges faster with accurate
+        # subproblem solutions than with frequent, cheap ones).
+        alg, sub_opts = if sub_alg === nothing
+            qn_opts = sub_options === nothing ? (; max_iter=800, tol=1e-8) : sub_options
+            QuasiNewtonAlg(; qn_opts...), nothing
+        else
+            sub_alg, options.sub_options
+        end
         sd_terms = _sd_terms(model, sd_rel, ρ, x, Y)
-        obj = _auglag_objective(model, relaxed, options.weights, ρ, y, λ, sd_terms, penalty)
+        al_obj = _auglag_objective_scaled(
+            model,
+            relaxed,
+            options.weights,
+            ρ,
+            y,
+            λ,
+            sd_terms,
+            penalty,
+            scaled_obj,
+            eq_fs,
+            ineq_fs,
+        )
         submodel = VecModel(
-            Objective(obj),
+            Objective(al_obj),
             submodel0.eq_constraints,
             submodel0.ineq_constraints,
             submodel0.sd_constraints,
@@ -422,37 +578,49 @@ function optimize!(workspace::AugLagWorkspace)
             submodel0.init,
             submodel0.integer,
         )
-        # validate the subproblem against the sub-solver's declared
-        # capabilities before solving (informative errors)
         checksubproblem!(
             submodel,
             alg;
             context="the augmented Lagrangian subproblem",
             hint="relax the constraint in `RelaxConstraintSelection` or choose a sub-solver that supports it.",
         )
-        result_i = optimize(submodel, alg, x; options=options.sub_options)
-        x = copy(result_i.minimizer)
-        v = _relaxed_violation(model, relaxed, x)
+        result_i = if sub_opts === nothing
+            optimize(submodel, alg, x)
+        else
+            optimize(submodel, alg, x; options=sub_opts)
+        end
+        x_new = copy(result_i.minimizer)
+        v = _scaled_violation(eq_fs, ineq_fs, model, relaxed, x_new)
         vnorm = norm(v, Inf)
-        fx = obj(x)
+        f_new = obj(x_new)
+        ok = isfinite(vnorm) && isfinite(f_new) && vnorm < 1e3 * max(vprev, 1.0)
+        if !ok
+            # The subproblem blew up (typical of an over-aggressive penalty):
+            # discard the iterate, escalate the penalty and retry.
+            x_new = copy(x)
+            vnorm = vprev
+            f_new = fx
+        end
+        x = x_new
+        fx = f_new
         push!(trajectory, (copy(x), fx, vnorm))
 
-        if vnorm <= η
-            # multiplier updates
+        if vnorm <= η || vnorm <= ω * vprev
+            # Multiplier updates (the practical ALM condition: update whenever
+            # feasibility improved sufficiently, not only once η is reached —
+            # this stops the penalty from escalating unnecessarily).
             k = 1
-            for i in eq_rel
-                c = _vecval(model.eq_constraints.fs[i](x))
+            for i in eachindex(eq_rel)
+                c = _vecval(eq_fs[i](x))
                 w = options.weights === nothing ? 1.0 : options.weights[k]
                 y[k] .= y[k] .+ (ρ * w) .* c
                 k += 1
             end
             k = 1
-            for i in ineq_rel
-                g = _vecval(model.ineq_constraints.fs[i](x))
+            for i in eachindex(ineq_rel)
+                g = _vecval(ineq_fs[i](x))
                 w = options.weights === nothing ? 1.0 : options.weights[k]
                 if penalty === :pbm || penalty === :mixed
-                    # PBM update u⁺ = u / (1 + u g / c) on the feasible side,
-                    # classical multiplier update on the infeasible side
                     feas = g .<= 0
                     λ[k][feas] .= λ[k][feas] ./ (1 .+ λ[k][feas] .* g[feas] ./ (ρ * w))
                     λ[k][.!feas] .= max.(λ[k][.!feas] .+ (ρ * w) .* g[.!feas], 0.0)
@@ -463,16 +631,38 @@ function optimize!(workspace::AugLagWorkspace)
             end
             _sd_multiplier_update!(model, sd_rel, ρ, x, Y)
             η = max(η / ρ^0.9, ctol)
-            ω = max(ω / ρ, sqrt(eps(Float64)))
+            ω = max(ω / ρ^0.1, sqrt(eps(Float64)))
+            # Two-way update (Curtis, Jiang & Robinson): once feasibility is
+            # nearly attained, back the penalty down so the subproblems stay
+            # well conditioned.
+            if vnorm <= η && ρ > options.ρ_init
+                ρ = max(ρ / options.ρ_decr, options.ρ_init)
+            end
         else
-            # penalty increase + tolerance reset (Birgin-Martínez style)
             ρ = min(options.ρ_max, ρ * options.ρ_incr)
             η = max(η₀ / ρ^0.1, ctol)
-            ω = max(1 / ρ, sqrt(eps(Float64)))
+            ω = max(1 / ρ^0.1, sqrt(eps(Float64)))
         end
+        vprev = vnorm
         vnorm <= ctol && break
     end
     return AugLagResult(copy(x), fx, nothing, keep_all ? trajectory : nothing)
+end
+
+# Least-squares multiplier initialization over the scaled equality functions.
+function _lsq_multipliers_scaled(obj, eq_fs, x)
+    _, ∇f = NonconvexCore.value_gradient(obj, x)
+    ∇f = copy(∇f)
+    y = Vector{Vector{Float64}}()
+    for c in eq_fs
+        vi, Ji = NonconvexCore.value_jacobian(x -> _vecval(c(x)), x)
+        m = length(_vecval(vi))
+        J = Matrix(Ji)
+        δ = 1e-8
+        A = J * J' + δ * I
+        push!(y, -(A \ (J * ∇f)))
+    end
+    return y
 end
 
 # Extension hooks for semidefinite constraints (see ext/NonconvexAugLagLabSDPExt.jl)
