@@ -351,8 +351,8 @@ function QuasiNewtonAlg(
     nonmonotone::Bool=false,
     soc::Bool=false,
 )
-    linesearch in (:backtracking, :wolfe, :trustregion) ||
-        throw(ArgumentError("linesearch must be :backtracking, :wolfe or :trustregion"))
+    linesearch in (:backtracking, :wolfe, :trustregion, :tron) ||
+        throw(ArgumentError("linesearch must be :backtracking, :wolfe, :trustregion or :tron"))
     return QuasiNewtonAlg(
         approx, linesearch, max_iter, tol, damping, Δ0, reset, nonmonotone, soc
     )
@@ -454,6 +454,36 @@ function optimize!(workspace::QuasiNewtonWorkspace)
     for iter in 1:optimizer.max_iter
         counter[] += 1
         d = similar(x)
+        if optimizer.linesearch === :tron
+            # TRON: projected-CG trust-region step with active-set tracking.
+            d = _tron_subproblem(v -> _hessmatvec(approx, v), g, x, lb, ub, Δ, τ)
+            d = _project(x, d, lb, ub)
+            norm(d) < 1e-12 && break
+            xnew = x .+ d
+            fnew = fobj(xnew)
+            ared = fx - fnew
+            pred = -(dot(g, d) + dot(d, _hessmatvec(approx, d)) / 2)
+            push!(merits, fx)
+            length(merits) > M && popfirst!(merits)
+            fref = maximum(merits)
+            if pred > 0 && (
+                ared / pred > 0.1 ||
+                (optimizer.nonmonotone && fnew < fref - 1e-2 * pred)
+            )
+                s = d
+                y = copy(gradfun(xnew)) .- g
+                update!(approx, s, y)
+                x .= xnew
+                fx = fnew
+                g .= gradfun(x)
+                Δ = min(10Δ, optimizer.Δ0 * 10)
+                τ = max(τ / 2, 1e-10)
+            else
+                Δ = max(Δ / 2, 1e-10)
+                τ = min(τ * 2, 1e4)
+            end
+            continue
+        end
         if optimizer.linesearch === :trustregion
             # Steihaug-Toint CG with the current Hessian model
             Hmat = approx isa NewtonTRApprox ? approx.hessfun(x) : nothing
@@ -547,6 +577,86 @@ function optimize!(workspace::QuasiNewtonWorkspace)
         nothing,
         counter[],
     )
+end
+
+# TRON (Lin & Moré 1999): projected conjugate gradients on the free-variable
+# subspace of the bounded trust-region subproblem
+#   min gᵀd + ½ dᵀ(B + τI)d   s.t.  ‖d‖ ≤ Δ  and  l ≤ x + d ≤ u.
+# Variables that hit a bound during the CG sweep are fixed for the rest of
+# the sweep (active-set identification).
+function _tron_subproblem(Bv, g, x, lb, ub, Δ, τ)
+    n = length(g)
+    d = zeros(n)
+    free = trues(n)
+    gp = copy(g)
+    for i in 1:n
+        (x[i] <= lb[i] && g[i] > 0) && (gp[i] = 0.0)
+        (x[i] >= ub[i] && g[i] < 0) && (gp[i] = 0.0)
+    end
+    r = copy(gp)
+    p = .-gp
+    rr = dot(r, r)
+    rr < 1e-20 && return d
+    for _ in 1:n
+        Bp = Bv(p)
+        Bp .+= τ .* p
+        pBp = dot(p, Bp)
+        if pBp <= 0
+            # Negative curvature: ride p to the trust-region boundary (or a
+            # bound, whichever comes first).
+            return _tron_truncate(d, p, x, lb, ub, free, Δ)
+        end
+        α = rr / pBp
+        t = α
+        for i in 1:n
+            free[i] || continue
+            p[i] == 0 && continue
+            t = min(t, p[i] > 0 ? (ub[i] - x[i] - d[i]) / p[i] : (lb[i] - x[i] - d[i]) / p[i])
+        end
+        dnew = d .+ t .* p
+        if dot(dnew, dnew) >= Δ^2
+            return _tron_truncate(d, p, x, lb, ub, free, Δ)
+        end
+        d .= dnew
+        r .+= t .* Bp
+        # fix variables that reached a bound and zero their residual
+        hitbound = false
+        for i in 1:n
+            free[i] || continue
+            if (x[i] + d[i] <= lb[i] + 1e-12 || x[i] + d[i] >= ub[i] - 1e-12)
+                free[i] = false
+                r[i] = 0.0
+                hitbound = true
+            end
+        end
+        rnew2 = dot(r, r)
+        rnew2 < 1e-20 && return d
+        β = rnew2 / rr
+        rr = rnew2
+        p .= .-r .+ β .* p
+        for i in 1:n
+            free[i] || (p[i] = 0.0)
+        end
+    end
+    return d
+end
+
+# Largest step along p from d that stays inside the bounds and reaches the
+# trust-region boundary.
+function _tron_truncate(d, p, x, lb, ub, free, Δ)
+    τb = Inf
+    for i in eachindex(p)
+        free[i] || continue
+        p[i] == 0 && continue
+        τb = min(τb, p[i] > 0 ? (ub[i] - x[i] - d[i]) / p[i] : (lb[i] - x[i] - d[i]) / p[i])
+    end
+    a = dot(p, p)
+    b = 2 * dot(d, p)
+    c = dot(d, d) - Δ^2
+    disc = max(b^2 - 4a * c, 0.0)
+    τq = (-b + sqrt(disc)) / (2a)
+    τ = min(τq, τb)
+    return d .+ τ .* p
 end
 
 # Whether the approximation already holds usable curvature for dimension `n`
