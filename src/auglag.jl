@@ -95,8 +95,10 @@ end
 
 - `sub_options`: options for the sub-solver. For the built-in
   `QuasiNewtonAlg` this is a named tuple of its keyword arguments (default:
-  `(; max_iter = 800, tol = 1e-8)`); for a custom `sub_alg` it is forwarded
-  as its `options`.
+  `(; max_iter = 800, tol = 1e-8, linesearch = :trustregion)` — trust-region
+  Steihaug–Toint steps are substantially more robust than backtracking on
+  the nonconvex augmented Lagrangian subproblems); for a custom `sub_alg`
+  it is forwarded as its `options`.
 - `relaxed`: a [`RelaxConstraintSelection`](@ref) (default: relax everything).
 - `penalty`: `:quadratic` (classical ALM), `:pbm` (penalty-barrier-multiplier
   for inequalities, quadratic for equalities) or `:mixed` (PBM for
@@ -549,7 +551,13 @@ function optimize!(workspace::AugLagWorkspace)
         # augmented Lagrangian outer loop converges faster with accurate
         # subproblem solutions than with frequent, cheap ones).
         alg, sub_opts = if sub_alg === nothing
-            qn_opts = sub_options === nothing ? (; max_iter=800, tol=1e-8) : sub_options
+            qn_opts = if sub_options === nothing
+                # Trust-region (Steihaug-Toint) is substantially more robust
+                # than backtracking on the nonconvex AL subproblems.
+                (; max_iter=800, tol=1e-8, linesearch=:trustregion)
+            else
+                sub_options
+            end
             QuasiNewtonAlg(; qn_opts...), nothing
         else
             sub_alg, options.sub_options
