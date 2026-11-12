@@ -319,6 +319,8 @@ struct QuasiNewtonAlg{A<:AbstractHessianApprox} <: AbstractOptimizer
     damping::Bool
     Δ0::Real
     reset::Bool
+    nonmonotone::Bool
+    soc::Bool
 end
 # The quasi-Newton driver solves smooth box-constrained (possibly unbounded)
 # problems; it handles no other constraint kinds.
@@ -346,10 +348,14 @@ function QuasiNewtonAlg(
     damping::Bool=true,
     Δ0::Real=1.0,
     reset::Bool=true,
+    nonmonotone::Bool=false,
+    soc::Bool=false,
 )
     linesearch in (:backtracking, :wolfe, :trustregion) ||
         throw(ArgumentError("linesearch must be :backtracking, :wolfe or :trustregion"))
-    return QuasiNewtonAlg(approx, linesearch, max_iter, tol, damping, Δ0, reset)
+    return QuasiNewtonAlg(
+        approx, linesearch, max_iter, tol, damping, Δ0, reset, nonmonotone, soc
+    )
 end
 
 mutable struct QuasiNewtonWorkspace{
@@ -442,6 +448,9 @@ function optimize!(workspace::QuasiNewtonWorkspace)
     # out immediately, never hold a reference across another gradient call.
     g = copy(gradfun(x))
     Δ = optimizer.Δ0
+    τ = 1e-8
+    merits = Float64[]
+    M = 5
     for iter in 1:optimizer.max_iter
         counter[] += 1
         d = similar(x)
@@ -451,14 +460,25 @@ function optimize!(workspace::QuasiNewtonWorkspace)
             if approx isa NewtonTRApprox
                 approx.H .= Hmat
             end
-            d = _steihaug(approx, g, Δ)
+            d = _steihaug(approx, g, Δ, τ)
             d = _project(x, d, lb, ub)
             norm(d) < 1e-12 && break
             xnew = x .+ d
             fnew = fobj(xnew)
             ared = fx - fnew
             pred = -(dot(g, d) + dot(d, _hessmatvec(approx, d)) / 2)
-            if pred > 0 && ared / pred > 0.1
+            # Optional nonmonotone acceptance (Grippo-Lampariello-Lucidi):
+            # accept if the reduction beats the best of the last M merits,
+            # which lets the iterate escape flat local traps of nonconvex
+            # subproblems. Off by default: it changed the outer trajectories
+            # on AC-OPF-style problems.
+            push!(merits, fx)
+            length(merits) > M && popfirst!(merits)
+            fref = maximum(merits)
+            if pred > 0 && (
+                ared / pred > 0.1 ||
+                (optimizer.nonmonotone && fnew < fref - 1e-2 * pred)
+            )
                 s = d
                 y = copy(gradfun(xnew)) .- g
                 update!(approx, s, y)
@@ -466,8 +486,33 @@ function optimize!(workspace::QuasiNewtonWorkspace)
                 fx = fnew
                 g .= gradfun(x)
                 Δ = min(10Δ, optimizer.Δ0 * 10)
+                τ = max(τ / 2, 1e-10)
+            elseif optimizer.soc
+                # Second-order correction (Ipopt, opt-in): re-solve the model
+                # with the gradient evaluated at the rejected trial point.
+                gsoc = gradfun(xnew)
+                dsoc = _steihaug(approx, gsoc, Δ, τ)
+                dsoc = _project(x, dsoc, lb, ub)
+                xnsoc = x .+ dsoc
+                fnsoc = fobj(xnsoc)
+                ared_soc = fx - fnsoc
+                pred_soc = -(dot(gsoc, dsoc) + dot(dsoc, _hessmatvec(approx, dsoc)) / 2)
+                if pred_soc > 0 && ared_soc / pred_soc > 0.1
+                    s = dsoc
+                    y = copy(gradfun(xnsoc)) .- g
+                    update!(approx, s, y)
+                    x .= xnsoc
+                    fx = fnsoc
+                    g .= gradfun(x)
+                    Δ = min(10Δ, optimizer.Δ0 * 10)
+                    τ = max(τ / 2, 1e-10)
+                else
+                    Δ = max(Δ / 2, 1e-10)
+                    τ = min(τ * 2, 1e4)
+                end
             else
                 Δ = max(Δ / 2, 1e-10)
+                τ = min(τ * 2, 1e4)
             end
             continue
         end
@@ -515,8 +560,9 @@ function _hessmatvec(approx::AbstractHessianApprox, v)
     return Hv
 end
 
-# Steihaug–Toint CG for the trust-region subproblem min ⟨g,d⟩ + ½ dᵀBd, ‖d‖ ≤ Δ
-function _steihaug(approx, g, Δ)
+# Steihaug–Toint CG for the trust-region subproblem
+# min ⟨g,d⟩ + ½ dᵀ(B + τI)d, ‖d‖ ≤ Δ (Levenberg dual regularization)
+function _steihaug(approx, g, Δ, τ=0.0)
     n = length(g)
     d = zeros(n)
     r = copy(g)
@@ -524,7 +570,7 @@ function _steihaug(approx, g, Δ)
     rnorm2 = dot(r, r)
     rnorm2 < 1e-14 && return d
     for _ in 1:n
-        Bp = _hessmatvec(approx, p)
+        Bp = _hessmatvec(approx, p) .+ τ .* p
         pBp = dot(p, Bp)
         if pBp <= 0
             # negative curvature: hit the boundary along p

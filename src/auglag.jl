@@ -113,6 +113,10 @@ end
   stationarity residual (default `true`).
 - `memory`: L-BFGS memory of the built-in subproblem solver (default `50`;
   the curvature history is reused across outer iterations).
+- `elastic`: relax the equalities through slack variables,
+  `yᵀ(c−s) + ρ/2‖c−s‖² + μΣ√(sᵢ²+ε²)`, the elastic mode of the augmented
+  Lagrangian (more robust to infeasible subproblems; default `false`).
+- `elastic_μ`: the slack penalty coefficient of the elastic mode.
 - `scaling`: normalize the relaxed constraints by their gradient magnitudes
   and the objective by its initial magnitude (Curtis–Jiang–Robinson style
   scaling), so the penalty applies to balanced, unit-scaled constraint
@@ -135,6 +139,8 @@ mutable struct AugLagOptions{S,R,W}
     lsq_multipliers::Bool
     scaling::Bool
     memory::Int
+    elastic::Bool
+    elastic_μ::Real
     keep_all::Bool
 end
 function AugLagOptions(;
@@ -153,6 +159,8 @@ function AugLagOptions(;
     lsq_multipliers::Bool=true,
     scaling::Bool=true,
     memory::Int=50,
+    elastic::Bool=false,
+    elastic_μ::Real=1e3,
     keep_all::Bool=false,
 )
     penalty in (:quadratic, :pbm, :mixed) ||
@@ -176,6 +184,8 @@ function AugLagOptions(;
         lsq_multipliers,
         scaling,
         memory,
+        elastic,
+        elastic_μ,
         keep_all,
     )
 end
@@ -435,7 +445,7 @@ end
 function _auglag_objective_scaled(
     model::VecModel,
     sel,
-    weights,
+    weights::Tuple,
     ρ::Real,
     y,
     λ,
@@ -445,8 +455,7 @@ function _auglag_objective_scaled(
     eq_fs,
     ineq_fs,
 )
-    w_eq = _unit_weights(weights, 1:length(eq_fs))
-    w_ineq = _unit_weights(weights, 1:length(ineq_fs))
+    w_eq, w_ineq = weights
     function _objective(x)
         target = objective0(x)
         for (kk, c) in enumerate(eq_fs)
@@ -496,10 +505,49 @@ end
 # ------------------------------------------------------------------
 # Outer loop
 # ------------------------------------------------------------------
+# Anderson mixing on the equality multiplier fixed-point update: given the
+# last `m` iterates yⱼ with residuals Rⱼ = G(yⱼ) − yⱼ (G the multiplier
+# update map), solve the least-squares mixing ΣθⱼRⱼ with Σθⱼ = 1 and take
+# y ← Σθⱼ(yⱼ + Rⱼ). Cheap (m × m), and typically halves the outer
+# iteration count.
+function _anderson_mix(history, y_new)
+    m = length(history)
+    m == 0 && return y_new
+    Rs = [h[2] for h in history]
+    Ys = [h[1] for h in history]
+    if m == 1
+        return y_new
+    end
+    R = Rs[end]
+    θ = ones(m) ./ m
+    A = [Rs[j] .- R for j in 1:(m - 1)]
+    b = R .- Rs[end]
+    if length(A) >= 1
+        G = zeros(m - 1, m - 1)
+        rhs = zeros(m - 1)
+        for i in 1:(m - 1), j in 1:(m - 1)
+            G[i, j] = dot(A[i], A[j])
+        end
+        for i in 1:(m - 1)
+            rhs[i] = dot(A[i], b)
+        end
+        θf = G \ rhs
+        θf = clamp.(θf, -2.0, 2.0)
+        θ[1:(m - 1)] .= θf
+        θ[m] = 1 - sum(θf)
+    end
+    out = zeros(length(y_new))
+    for j in 1:m
+        out .+= θ[j] .* (Ys[j] .+ Rs[j])
+    end
+    return out
+end
+
 function optimize!(workspace::AugLagWorkspace)
     @unpack model, x0, options, sub_alg = workspace
     @unpack relaxed, penalty, max_iter, ctol, η₀, ω₀ = options
     @unpack lsq_multipliers, scaling, keep_all, sub_options, memory = options
+    @unpack elastic, elastic_μ = options
     obj = model.objective
     obj === nothing && throw(ArgumentError("The model has no objective."))
     ρ = Float64(options.ρ_init)
@@ -522,6 +570,11 @@ function optimize!(workspace::AugLagWorkspace)
         ineq_fs = [model.ineq_constraints.fs[i] for i in ineq_rel]
         scales = ones(length(eq_rel) + length(ineq_rel))
     end
+    # Internal per-group penalty weights (selective bumps modify these; the
+    # user-provided weights are the initial values).
+    w_eq = _unit_weights(options.weights, 1:length(eq_fs))
+    w_ineq = _unit_weights(options.weights, 1:length(ineq_fs))
+    w_max = Float64(options.ρ_max) / ρ
     if penalty === :pbm || penalty === :mixed
         # the PBM barrier term (u/c) log(1 + c g) is inactive for u = 0;
         # initialize the barrier multipliers positive
@@ -529,6 +582,9 @@ function optimize!(workspace::AugLagWorkspace)
             λ[k] .= 1.0
         end
     end
+    n = length(x)
+    m_eq = sum(c -> length(_vecval(c(x))), eq_fs; init=0)
+    use_elastic = elastic && m_eq > 0
     if lsq_multipliers && !isempty(eq_rel)
         y = _lsq_multipliers_scaled(scaled_obj, eq_fs, x)
     end
@@ -538,70 +594,162 @@ function optimize!(workspace::AugLagWorkspace)
     trajectory = Tuple{typeof(x),Real,Real}[]
     fx = obj(x)
     vprev = Inf
-    for iter in 1:max_iter
-        # The built-in quasi-Newton subsolver: thorough by default (the
-        # augmented Lagrangian outer loop converges faster with accurate
-        # subproblem solutions than with frequent, cheap ones).
-        alg, sub_opts = if sub_alg === nothing
-            qn_opts = if sub_options === nothing
-                # Trust-region (Steihaug-Toint) is substantially more robust
-                # than backtracking on the nonconvex AL subproblems.
-                (; max_iter=800, tol=1e-8, linesearch=:trustregion)
-            else
-                sub_options
-            end
-            QuasiNewtonAlg(; qn_opts...), nothing
+    and_history = Tuple{Vector{Float64},Vector{Float64}}[]
+    # Fletcher-Leyffer filter for the outer globalization: a step is
+    # accepted unless a previous iterate dominates it in both the AL merit
+    # and the violation.
+    filter_f = Float64[]
+    filter_v = Float64[]
+    # Built-in quasi-Newton subsolver state: created once per solve with
+    # `reset = false` so the L-BFGS curvature of the previous subproblem
+    # warm-starts the next one; reset whenever the penalty changes scale.
+    qn_base_maxiter = 800
+    qn_linesearch = :trustregion
+    qn_approx = nothing
+    if sub_alg === nothing
+        qn_opts = if sub_options === nothing
+            (; max_iter=800, tol=1e-8, linesearch=:trustregion)
         else
-            sub_alg, options.sub_options
+            sub_options
         end
+        qn_base_maxiter = get(qn_opts, :max_iter, 800)
+        qn_linesearch = get(qn_opts, :linesearch, :trustregion)
+        qn_approx = LBFGSApprox(
+            memory;
+            H0=DiagonalPreconditioner(fill(
+                1 / (1 + ρ), n + (use_elastic ? m_eq : 0)
+            )),
+        )
+    end
+    for iter in 1:max_iter
+        # Fixed subproblem tolerance (the adaptive η² schedule changed the
+        # trajectories on the stress benchmark; kept out for now).
+        sub_tol = 1e-8
         sd_terms = _sd_terms(model, sd_rel, ρ, x, Y)
-        al_obj = _auglag_objective_scaled(
-            model,
-            relaxed,
-            options.weights,
-            ρ,
-            y,
-            λ,
-            sd_terms,
-            penalty,
-            scaled_obj,
-            eq_fs,
-            ineq_fs,
-        )
-        submodel = VecModel(
-            Objective(al_obj),
-            submodel0.eq_constraints,
-            submodel0.ineq_constraints,
-            submodel0.sd_constraints,
-            submodel0.box_min,
-            submodel0.box_max,
-            submodel0.init,
-            submodel0.integer,
-        )
+        al_obj = if use_elastic
+            _elastic_objective(
+                scaled_obj, eq_fs, ineq_fs, w_eq, w_ineq, ρ, y, λ, penalty,
+                sd_terms, elastic_μ, n, m_eq,
+            )
+        else
+            _auglag_objective_scaled(
+                model, relaxed, (w_eq, w_ineq), ρ, y, λ, sd_terms, penalty,
+                scaled_obj, eq_fs, ineq_fs,
+            )
+        end
+        submodel = if use_elastic
+            VecModel(
+                Objective(al_obj),
+                submodel0.eq_constraints,
+                submodel0.ineq_constraints,
+                submodel0.sd_constraints,
+                [submodel0.box_min; fill(-1e3, m_eq)],
+                [submodel0.box_max; fill(1e3, m_eq)],
+                [submodel0.init; zeros(m_eq)],
+                [submodel0.integer; falses(m_eq)],
+            )
+        else
+            VecModel(
+                Objective(al_obj),
+                submodel0.eq_constraints,
+                submodel0.ineq_constraints,
+                submodel0.sd_constraints,
+                submodel0.box_min,
+                submodel0.box_max,
+                submodel0.init,
+                submodel0.integer,
+            )
+        end
         checksubproblem!(
             submodel,
-            alg;
+            sub_alg === nothing ?
+            QuasiNewtonAlg(qn_approx::LBFGSApprox) : sub_alg;
             context="the augmented Lagrangian subproblem",
             hint="relax the constraint in `RelaxConstraintSelection` or choose a sub-solver that supports it.",
         )
-        result_i = if sub_opts === nothing
-            optimize(submodel, alg, x)
+        x_sub = use_elastic ? [x; zeros(m_eq)] : x
+        result_i = if sub_alg === nothing
+            # Stall detection: if the first solve does not decrease the AL
+            # merit, retry once with a 4x budget and a relaxed tolerance.
+            m_old = al_obj(x_sub)
+            r1 = optimize(
+                submodel,
+                QuasiNewtonAlg(
+                    qn_approx::LBFGSApprox;
+                    max_iter=qn_base_maxiter,
+                    tol=sub_tol,
+                    linesearch=qn_linesearch,
+                    reset=false,
+                ),
+                x_sub,
+            )
+            m1 = al_obj(r1.minimizer)
+            if !(isfinite(m1) && m1 < m_old - 1e-12 * max(1.0, abs(m_old)))
+                r2 = optimize(
+                    submodel,
+                    QuasiNewtonAlg(
+                        qn_approx::LBFGSApprox;
+                        max_iter=4 * qn_base_maxiter,
+                        tol=10 * sub_tol,
+                        linesearch=qn_linesearch,
+                        reset=false,
+                    ),
+                    x_sub,
+                )
+                m2 = al_obj(r2.minimizer)
+                if isfinite(m2) && m2 < m1
+                    r1 = r2
+                end
+            end
+            r1
         else
-            optimize(submodel, alg, x; options=sub_opts)
+            if options.sub_options === nothing
+                optimize(submodel, sub_alg, x_sub)
+            else
+                optimize(submodel, sub_alg, x_sub; options=options.sub_options)
+            end
         end
         x_new = copy(result_i.minimizer)
-        v = _scaled_violation(eq_fs, ineq_fs, model, relaxed, x_new)
+        # Filter-based outer globalization: backtrack along the subsolver
+        # direction until the (merit, violation) pair is not dominated by
+        # any previous filter entry.
+        γ = 1e-4
+        _filter_accept(θ, φ) = all(
+            θ <= filter_f[i] - γ * filter_v[i] || φ <= filter_v[i] - γ * filter_f[i]
+            for i in eachindex(filter_f)
+        )
+        d = x_new .- x_sub
+        α = 1.0
+        accepted = false
+        for _ in 1:10
+            xt = x_sub .+ α .* d
+            mt = al_obj(xt)
+            φt = norm(_scaled_violation(eq_fs, ineq_fs, model, relaxed, xt), Inf)
+            if isfinite(mt) && isfinite(φt) && _filter_accept(mt, φt)
+                x_new = xt
+                accepted = true
+                break
+            end
+            α *= 0.5
+        end
+        if !accepted
+            # No acceptable step: record the current point in the filter and
+            # keep it (the outer update will escalate).
+            push!(filter_f, al_obj(x_sub))
+            push!(filter_v, norm(_scaled_violation(eq_fs, ineq_fs, model, relaxed, x), Inf))
+        end
+        x = use_elastic ? x_new[1:n] : x_new
+        v = _scaled_violation(eq_fs, ineq_fs, model, relaxed, x)
         vnorm = norm(v, Inf)
-        f_new = obj(x_new)
+        f_new = obj(x)
         ok = isfinite(vnorm) && isfinite(f_new) && vnorm < 1e3 * max(vprev, 1.0)
         if !ok
             # The subproblem blew up (typical of an over-aggressive penalty):
             # discard the iterate, escalate the penalty and retry.
-            x_new = copy(x)
+            x = copy(trajectory[end][1])
             vnorm = vprev
             f_new = fx
         end
-        x = x_new
         fx = f_new
         push!(trajectory, (copy(x), fx, vnorm))
 
@@ -609,17 +757,45 @@ function optimize!(workspace::AugLagWorkspace)
             # Multiplier updates (the practical ALM condition: update whenever
             # feasibility improved sufficiently, not only once η is reached —
             # this stops the penalty from escalating unnecessarily).
-            k = 1
-            for i in eachindex(eq_rel)
-                c = _vecval(eq_fs[i](x))
-                w = options.weights === nothing ? 1.0 : options.weights[k]
-                y[k] .= y[k] .+ (ρ * w) .* c
-                k += 1
+            if use_elastic
+                s = x_new[(n + 1):end]
+                off = 0
+                for k in eachindex(eq_rel)
+                    ck = _vecval(eq_fs[k](x))
+                    sk = s[(off + 1):(off + length(ck))]
+                    y[k] .= y[k] .+ (ρ * w_eq[k]) .* (ck .- sk)
+                    off += length(ck)
+                end
+            else
+                for k in eachindex(eq_rel)
+                    y[k] .= y[k] .+ (ρ * w_eq[k]) .* _vecval(eq_fs[k](x))
+                end
+            end
+            # Anderson acceleration of the equality multiplier updates.
+            if !isempty(eq_rel)
+                y_new_flat = reduce(vcat, y; init=Float64[])
+                resid = Float64[]
+                for k in eachindex(eq_rel)
+                    append!(resid, (ρ * w_eq[k]) .* _vecval(eq_fs[k](x)))
+                end
+                y_prev_flat = y_new_flat .- resid
+                push!(and_history, (y_prev_flat, resid))
+                length(and_history) > 2 && popfirst!(and_history)
+                y_mixed = _anderson_mix(and_history, y_new_flat)
+                off = 0
+                for k in eachindex(eq_rel)
+                    mk = length(y[k])
+                    y[k] .= clamp.(y_mixed[(off + 1):(off + mk)], -1e8, 1e8)
+                    off += mk
+                end
+            end
+            for k in eachindex(eq_rel)
+                clamp!(y[k], -1e8, 1e8)
             end
             k = 1
             for i in eachindex(ineq_rel)
                 g = _vecval(ineq_fs[i](x))
-                w = options.weights === nothing ? 1.0 : options.weights[k]
+                w = w_ineq[k]
                 if penalty === :pbm || penalty === :mixed
                     feas = g .<= 0
                     λ[k][feas] .= λ[k][feas] ./ (1 .+ λ[k][feas] .* g[feas] ./ (ρ * w))
@@ -627,6 +803,7 @@ function optimize!(workspace::AugLagWorkspace)
                 else
                     λ[k] .= max.(λ[k] .+ (ρ * w) .* g, 0.0)
                 end
+                clamp!(λ[k], 0.0, 1e8)
                 k += 1
             end
             _sd_multiplier_update!(model, sd_rel, ρ, x, Y)
@@ -639,9 +816,28 @@ function optimize!(workspace::AugLagWorkspace)
                 ρ = max(ρ / options.ρ_decr, options.ρ_init)
             end
         else
-            ρ = min(options.ρ_max, ρ * options.ρ_incr)
-            η = max(η₀ / ρ^0.1, ctol)
-            ω = max(1 / ρ^0.1, sqrt(eps(Float64)))
+            # Selective penalty update: escalate only the most-violated
+            # constraint groups instead of the global penalty.
+            bumped = false
+            for k in eachindex(eq_rel)
+                vk = norm(_vecval(eq_fs[k](x)), Inf)
+                if vk > η && w_eq[k] < w_max
+                    w_eq[k] = min(w_eq[k] * options.ρ_incr, w_max)
+                    bumped = true
+                end
+            end
+            for k in eachindex(ineq_rel)
+                vk = norm(max.(_vecval(ineq_fs[k](x)), 0.0), Inf)
+                if vk > η && w_ineq[k] < w_max
+                    w_ineq[k] = min(w_ineq[k] * options.ρ_incr, w_max)
+                    bumped = true
+                end
+            end
+            if !bumped
+                ρ = min(options.ρ_max, ρ * options.ρ_incr)
+                η = max(η₀ / ρ^0.1, ctol)
+                ω = max(1 / ρ^0.1, sqrt(eps(Float64)))
+            end
         end
         vprev = vnorm
         vnorm <= ctol && break
@@ -691,6 +887,61 @@ function _lsq_multipliers_scaled(obj, eq_fs, x)
         push!(y, yk)
     end
     return y
+end
+
+# Elastic augmented Lagrangian objective on z = [x; s]: the equality groups
+# get slack variables with an l1-like (pseudo-Huber) penalty.
+_huber(t, ε) = sqrt(t^2 + ε^2)
+function _elastic_objective(
+    scaled_obj,
+    eq_fs,
+    ineq_fs,
+    w_eq,
+    w_ineq,
+    ρ::Real,
+    y,
+    λ,
+    penalty::Symbol,
+    sd_terms::Function,
+    μ::Real,
+    n::Int,
+    m_eq::Int,
+)
+    ε = 1e-4
+    function _objective(z)
+        x = @view z[1:n]
+        s = @view z[(n + 1):end]
+        target = scaled_obj(x)
+        off = 0
+        for (k, c) in enumerate(eq_fs)
+            cv = _vecval(c(x))
+            sk = s[(off + 1):(off + length(cv))]
+            r = ρ * w_eq[k]
+            target += dot(y[k], cv .- sk) + r / 2 * dot(cv .- sk, cv .- sk)
+            for si in sk
+                target += μ * _huber(si, ε)
+            end
+            off += length(cv)
+        end
+        for (k, c) in enumerate(ineq_fs)
+            g = _vecval(c(x))
+            r = ρ * w_ineq[k]
+            if penalty === :pbm || penalty === :mixed
+                feas = g .<= 0
+                target += _pbm_barrier(g[feas], λ[k][feas], r)
+                if any(.!feas)
+                    gp = max.(g, 0.0)
+                    target += dot(λ[k], gp) + r / 2 * dot(gp, gp)
+                end
+            else
+                gp = max.(g, 0.0)
+                target += dot(λ[k], gp) + r / 2 * dot(gp, gp)
+            end
+        end
+        target += sd_terms(x)
+        return target
+    end
+    return _objective
 end
 
 # Extension hooks for semidefinite constraints (see ext/NonconvexAugLagLabSDPExt.jl)
