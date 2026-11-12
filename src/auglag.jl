@@ -111,6 +111,8 @@ end
 - `weights`: per-constraint-group penalty weights (default: all ones).
 - `lsq_multipliers`: initialize equality multipliers from the least-squares
   stationarity residual (default `true`).
+- `memory`: L-BFGS memory of the built-in subproblem solver (default `50`;
+  the curvature history is reused across outer iterations).
 - `scaling`: normalize the relaxed constraints by their gradient magnitudes
   and the objective by its initial magnitude (Curtis–Jiang–Robinson style
   scaling), so the penalty applies to balanced, unit-scaled constraint
@@ -132,6 +134,7 @@ mutable struct AugLagOptions{S,R,W}
     weights::W
     lsq_multipliers::Bool
     scaling::Bool
+    memory::Int
     keep_all::Bool
 end
 function AugLagOptions(;
@@ -149,6 +152,7 @@ function AugLagOptions(;
     weights=nothing,
     lsq_multipliers::Bool=true,
     scaling::Bool=true,
+    memory::Int=50,
     keep_all::Bool=false,
 )
     penalty in (:quadratic, :pbm, :mixed) ||
@@ -171,6 +175,7 @@ function AugLagOptions(;
         weights,
         lsq_multipliers,
         scaling,
+        memory,
         keep_all,
     )
 end
@@ -494,7 +499,7 @@ end
 function optimize!(workspace::AugLagWorkspace)
     @unpack model, x0, options, sub_alg = workspace
     @unpack relaxed, penalty, max_iter, ctol, η₀, ω₀ = options
-    @unpack lsq_multipliers, scaling, keep_all, sub_options = options
+    @unpack lsq_multipliers, scaling, keep_all, sub_options, memory = options
     obj = model.objective
     obj === nothing && throw(ArgumentError("The model has no objective."))
     ρ = Float64(options.ρ_init)

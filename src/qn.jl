@@ -318,6 +318,7 @@ struct QuasiNewtonAlg{A<:AbstractHessianApprox} <: AbstractOptimizer
     tol::Real
     damping::Bool
     Δ0::Real
+    reset::Bool
 end
 # The quasi-Newton driver solves smooth box-constrained (possibly unbounded)
 # problems; it handles no other constraint kinds.
@@ -344,10 +345,11 @@ function QuasiNewtonAlg(
     tol::Real=1e-6,
     damping::Bool=true,
     Δ0::Real=1.0,
+    reset::Bool=true,
 )
     linesearch in (:backtracking, :wolfe, :trustregion) ||
         throw(ArgumentError("linesearch must be :backtracking, :wolfe or :trustregion"))
-    return QuasiNewtonAlg(approx, linesearch, max_iter, tol, damping, Δ0)
+    return QuasiNewtonAlg(approx, linesearch, max_iter, tol, damping, Δ0, reset)
 end
 
 mutable struct QuasiNewtonWorkspace{
@@ -418,7 +420,9 @@ function optimize!(workspace::QuasiNewtonWorkspace)
     counter[] = 0
     lb, ub = model.box_min, model.box_max
     n = length(x)
-    init!(approx, n, x)
+    if optimizer.reset || !_initialized(approx, n)
+        init!(approx, n, x)
+    end
     # objective and gradient closure (function may be an Objective or plain function)
     obj = model.objective
     obj === nothing && throw(ArgumentError("The model has no objective."))
@@ -499,6 +503,11 @@ function optimize!(workspace::QuasiNewtonWorkspace)
         counter[],
     )
 end
+
+# Whether the approximation already holds usable curvature for dimension `n`
+# (warm-starting across augmented Lagrangian subproblems).
+_initialized(::AbstractHessianApprox, n::Int) = false
+_initialized(H::LBFGSApprox, n::Int) = !isempty(H.s) && length(H.s[1]) == n
 
 function _hessmatvec(approx::AbstractHessianApprox, v)
     Hv = similar(v)
