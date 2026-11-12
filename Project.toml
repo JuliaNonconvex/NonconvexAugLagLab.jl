@@ -17,7 +17,7 @@ NonconvexSemidefinite = "9e21ff56-eb25-42d3-b86f-5b0612f555e7"
 NonconvexAugLagLabSDPExt = "NonconvexSemidefinite"
 
 [compat]
-NonconvexIpopt = "0.7"
+NonconvexIpopt = "0.7, 0.8"
 Test = "1"
 LinearAlgebra = "1"
 NonconvexCore = "2"

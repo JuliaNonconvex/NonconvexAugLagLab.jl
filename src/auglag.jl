@@ -375,21 +375,6 @@ function _init_multipliers(model, sel)
     return y, λ
 end
 
-function _lsq_multipliers(model, eq_rel, x)
-    _, ∇f = NonconvexCore.value_gradient(model.objective, x)
-    ∇f = copy(∇f)
-    y = Vector{Vector{Float64}}()
-    for i in eq_rel
-        ci = model.eq_constraints.fs[i]
-        vi, Ji = NonconvexCore.value_jacobian(x -> _vecval(ci(x)), x)
-        m = length(_vecval(vi))
-        J = Matrix(Ji)
-        δ = 1e-8
-        A = J * J' + δ * I
-        push!(y, -(A \ (J * ∇f)))
-    end
-    return y
-end
 
 # ------------------------------------------------------------------
 # Problem scaling (Curtis, Jiang & Robinson style)
@@ -404,18 +389,20 @@ end
 function _group_scales(model::VecModel, sel, x0)
     eq_rel, ineq_rel, _, _ = _subproblem(model, sel, nothing)
     scales = Float64[]
+    # Gradient-magnitude scale from one finite-difference probe per group:
+    # ‖c(x₀ + δ) - c(x₀)‖ / ‖δ‖ estimates the group's gradient magnitude
+    # without materializing any Jacobian (a full Jacobian of a large
+    # vector-valued constraint would be an N×N dense matrix).
+    δ = 1e-6 .* (1 .+ abs.(x0))
+    δnorm = norm(δ)
     for (kind, rel) in (("eq", eq_rel), ("ineq", ineq_rel))
         fs = kind == "eq" ? model.eq_constraints.fs : model.ineq_constraints.fs
         for i in rel
             c = fs[i]
-            d = 1.0
-            try
-                _, J = NonconvexCore.value_jacobian(x -> _vecval(c(x)), x0)
-                d = max(1.0, maximum(abs, Matrix(J)))
-            catch
-                d = 1.0
-            end
-            push!(scales, d)
+            c0 = _vecval(c(x0))
+            c1 = _vecval(c(x0 .+ δ))
+            d = norm(c1 .- c0) / δnorm
+            push!(scales, max(1.0, d))
         end
     end
     return eq_rel, ineq_rel, scales
@@ -657,18 +644,46 @@ function optimize!(workspace::AugLagWorkspace)
     return AugLagResult(copy(x), fx, nothing, keep_all ? trajectory : nothing)
 end
 
-# Least-squares multiplier initialization over the scaled equality functions.
+# Least-squares multiplier initialization over the scaled equality
+# functions, solved matrix-free with conjugate gradients: the algorithm only
+# ever needs Jacobian-vector products (Jv and Jᵀv), never a full Jacobian.
+function _cg_solve!(y, A, b; max_cg=min(length(b), 50), rtol=1e-2)
+    r = b .- A(y)
+    p = copy(r)
+    rsold = dot(r, r)
+    iszero(rsold) && (y .= 0; return y)
+    for _ in 1:max_cg
+        Ap = A(p)
+        α = rsold / dot(p, Ap)
+        y .+= α .* p
+        r .-= α .* Ap
+        rsnew = dot(r, r)
+        rsnew <= rtol^2 * dot(b, b) && break
+        p .= r .+ (rsnew / rsold) .* p
+        rsold = rsnew
+    end
+    return y
+end
+
 function _lsq_multipliers_scaled(obj, eq_fs, x)
     _, ∇f = NonconvexCore.value_gradient(obj, x)
     ∇f = copy(∇f)
     y = Vector{Vector{Float64}}()
+    ε = sqrt(eps(Float64)) * (1 + norm(x))
     for c in eq_fs
-        vi, Ji = NonconvexCore.value_jacobian(x -> _vecval(c(x)), x)
-        m = length(_vecval(vi))
-        J = Matrix(Ji)
-        δ = 1e-8
-        A = J * J' + δ * I
-        push!(y, -(A \ (J * ∇f)))
+        c0 = _vecval(c(x))
+        m = length(c0)
+        # Jv: one finite-difference directional derivative per CG iteration
+        # (this is a warm start, so FD precision is more than adequate and no
+        # full Jacobian is ever formed).
+        Jv(v) = (_vecval(c(x .+ (ε / max(norm(v), 1e-12)) .* v)) .- c0) ./ (ε / max(norm(v), 1e-12))
+        # Jᵀv: one reverse pass (adjoint product).
+        Jtv(v) = NonconvexCore.value_gradient(x -> dot(_vecval(c(x)), v), x)[2]
+        b = -Jv(∇f)
+        A(y) = Jv(Jtv(y)) .+ 1e-8 .* y
+        yk = zeros(m)
+        _cg_solve!(yk, A, b)
+        push!(y, yk)
     end
     return y
 end
