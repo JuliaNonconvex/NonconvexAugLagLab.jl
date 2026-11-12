@@ -16,7 +16,7 @@ Augmented Lagrangian laboratory
 
 Classical ALM and penalty-barrier-multiplier methods with pluggable quasi-Newton sub-solvers.
 
-NonconvexAugLagLab.jl is part of the [JuliaNonconvex](https://github.com/JuliaNonconvex) ecosystem built on [NonconvexCore.jl](https://github.com/JuliaNonconvex/NonconvexCore.jl).
+NonconvexAugLagLab.jl is part of the [JuliaNonconvex](https://github.com/JuliaNonconvex) ecosystem built on [NonconvexCore.jl](https://github.com/JuliaNonconvex/NonconvexCore.jl) under the [Nonconvex.jl](https://github.com/JuliaNonconvex/Nonconvex.jl) umbrella.
 
 ## Quick start
 
