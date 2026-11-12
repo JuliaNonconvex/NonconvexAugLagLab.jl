@@ -117,6 +117,13 @@ end
   `yᵀ(c−s) + ρ/2‖c−s‖² + μΣ√(sᵢ²+ε²)`, the elastic mode of the augmented
   Lagrangian (more robust to infeasible subproblems; default `false`).
 - `elastic_μ`: the slack penalty coefficient of the elastic mode.
+- `warm_continue`: reuse the previous run's final iterate, multipliers,
+  per-group weights and quasi-Newton curvature when `optimize!` is called
+  again on the same workspace (e.g. across the stages of a SIMP
+  continuation, where the model or the hyper-parameters change between
+  solves); the multipliers are rescaled to the new constraint scales, while
+  `ρ`, `η`, `ω`, the filter and the Anderson history are re-initialized from
+  the new options.
 - `scaling`: normalize the relaxed constraints by their gradient magnitudes
   and the objective by its initial magnitude (Curtis–Jiang–Robinson style
   scaling), so the penalty applies to balanced, unit-scaled constraint
@@ -141,6 +148,7 @@ mutable struct AugLagOptions{S,R,W}
     memory::Int
     elastic::Bool
     elastic_μ::Real
+    warm_continue::Bool
     keep_all::Bool
 end
 function AugLagOptions(;
@@ -161,6 +169,7 @@ function AugLagOptions(;
     memory::Int=50,
     elastic::Bool=false,
     elastic_μ::Real=1e3,
+    warm_continue::Bool=false,
     keep_all::Bool=false,
 )
     penalty in (:quadratic, :pbm, :mixed) ||
@@ -186,6 +195,7 @@ function AugLagOptions(;
         memory,
         elastic,
         elastic_μ,
+        warm_continue,
         keep_all,
     )
 end
@@ -213,6 +223,7 @@ mutable struct AugLagWorkspace{
     x0::X
     options::O
     sub_alg::S
+    state::Any
 end
 
 function Workspace(
@@ -241,7 +252,7 @@ function Workspace(
             ),
         )
     end
-    return AugLagWorkspace(model, copy(x0), options, optimizer.sub_alg)
+    return AugLagWorkspace(model, copy(x0), options, optimizer.sub_alg, nothing)
 end
 
 # ------------------------------------------------------------------
@@ -547,11 +558,17 @@ function optimize!(workspace::AugLagWorkspace)
     @unpack model, x0, options, sub_alg = workspace
     @unpack relaxed, penalty, max_iter, ctol, η₀, ω₀ = options
     @unpack lsq_multipliers, scaling, keep_all, sub_options, memory = options
-    @unpack elastic, elastic_μ = options
+    @unpack elastic, elastic_μ, warm_continue = options
     obj = model.objective
     obj === nothing && throw(ArgumentError("The model has no objective."))
     ρ = Float64(options.ρ_init)
     x = copy(x0)
+    # Warm continuation restarts from the previous final iterate so the
+    # constraint scales and multipliers are computed at the carried-over
+    # design rather than the original x0.
+    if warm_continue && workspace.state !== nothing && workspace.state.n == length(x)
+        x = copy(workspace.state.x)
+    end
     eq_rel, ineq_rel, sd_rel, submodel0 = _subproblem(model, relaxed, options.weights)
     # Objective scale: minimize f/s_f so the AL objective terms are O(1).
     # (The PBM barrier parameters are calibrated to the unscaled objective,
@@ -574,22 +591,46 @@ function optimize!(workspace::AugLagWorkspace)
     # user-provided weights are the initial values).
     w_eq = _unit_weights(options.weights, 1:length(eq_fs))
     w_ineq = _unit_weights(options.weights, 1:length(ineq_fs))
-    w_max = Float64(options.ρ_max) / ρ
-    if penalty === :pbm || penalty === :mixed
-        # the PBM barrier term (u/c) log(1 + c g) is inactive for u = 0;
-        # initialize the barrier multipliers positive
-        for k in eachindex(λ)
-            λ[k] .= 1.0
-        end
-    end
     n = length(x)
     m_eq = sum(c -> length(_vecval(c(x))), eq_fs; init=0)
     use_elastic = elastic && m_eq > 0
-    if lsq_multipliers && !isempty(eq_rel)
-        y = _lsq_multipliers_scaled(scaled_obj, eq_fs, x)
+    # Warm continuation: reuse the previous run's multipliers (rescaled to
+    # the new constraint scales), per-group penalty weights and quasi-Newton
+    # curvature when the structure matches (e.g. across SIMP continuation
+    # stages where the model or the AL hyper-parameters change between
+    # solves). ρ, η, ω, the filter and the Anderson history are re-initialized
+    # from the new options.
+    warm = warm_continue && workspace.state !== nothing
+    if warm
+        st = workspace.state
+        (st.n == n && st.m_eq == m_eq && st.neq == length(eq_fs) &&
+            st.nineq == length(ineq_fs) && st.elastic == use_elastic) || (warm = false)
+    end
+    if warm
+        st = workspace.state
+        for k in eachindex(eq_rel)
+            y[k] = st.y[k] .* (scales[k] / st.scales[k])
+        end
+        for k in eachindex(ineq_rel)
+            λ[k] = st.λ[k] .* (scales[length(eq_rel) + k] / st.scales[length(eq_rel) + k])
+        end
+        w_eq .= st.w_eq
+        w_ineq .= st.w_ineq
+    else
+        if penalty === :pbm || penalty === :mixed
+            # the PBM barrier term (u/c) log(1 + c g) is inactive for u = 0;
+            # initialize the barrier multipliers positive
+            for k in eachindex(λ)
+                λ[k] .= 1.0
+            end
+        end
+        if lsq_multipliers && !isempty(eq_rel)
+            y = _lsq_multipliers_scaled(scaled_obj, eq_fs, x)
+        end
     end
     η = max(η₀, ctol)
     ω = max(ω₀, 1 / ρ^0.1)
+    w_max = Float64(options.ρ_max) / ρ
     Y = _sd_init(model, sd_rel, ρ)
     trajectory = Tuple{typeof(x),Real,Real}[]
     fx = obj(x)
@@ -614,12 +655,16 @@ function optimize!(workspace::AugLagWorkspace)
         end
         qn_base_maxiter = get(qn_opts, :max_iter, 800)
         qn_linesearch = get(qn_opts, :linesearch, :trustregion)
-        qn_approx = LBFGSApprox(
-            memory;
-            H0=DiagonalPreconditioner(fill(
-                1 / (1 + ρ), n + (use_elastic ? m_eq : 0)
-            )),
-        )
+        qn_approx = if warm && workspace.state.approx !== nothing
+            workspace.state.approx
+        else
+            LBFGSApprox(
+                memory;
+                H0=DiagonalPreconditioner(fill(
+                    1 / (1 + ρ), n + (use_elastic ? m_eq : 0)
+                )),
+            )
+        end
     end
     for iter in 1:max_iter
         # Fixed subproblem tolerance (the adaptive η² schedule changed the
@@ -842,6 +887,26 @@ function optimize!(workspace::AugLagWorkspace)
         vprev = vnorm
         vnorm <= ctol && break
     end
+    workspace.state = (
+        n=n,
+        m_eq=m_eq,
+        neq=length(eq_fs),
+        nineq=length(ineq_fs),
+        elastic=use_elastic,
+        x=copy(x),
+        y=[copy(yk) for yk in y],
+        λ=[copy(λk) for λk in λ],
+        scales=copy(scales),
+        w_eq=copy(w_eq),
+        w_ineq=copy(w_ineq),
+        ρ=ρ,
+        η=η,
+        ω=ω,
+        and_history=copy(and_history),
+        filter_f=copy(filter_f),
+        filter_v=copy(filter_v),
+        approx=qn_approx,
+    )
     return AugLagResult(copy(x), fx, nothing, keep_all ? trajectory : nothing)
 end
 

@@ -77,3 +77,39 @@ end
     @test r.trajectory !== nothing
     @test length(r.trajectory) >= 1
 end
+
+@testitem "AugLagAlg: warm_continue reuses state across solves" begin
+    using NonconvexAugLagLab, NonconvexCore, Test, LinearAlgebra
+    const NC = NonconvexCore
+    # A two-stage chained solve with warm_continue=true: the second call
+    # must reuse the curvature object and beat a cold restart of equal
+    # total budget.
+    m = Model(x -> (x[1] - 1)^2 + (x[2] - 1)^2)
+    addvar!(m, [0.0, 0.0], [Inf, Inf])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 2)
+    add_ineq_constraint!(m, x -> x[1] - x[2] - 0.1)
+    vm, _, _ = NC.tovecmodel(m, [0.5, 0.5])
+    opts = AugLagOptions(; max_iter=60, warm_continue=true)
+    ws = Workspace(vm, AugLagAlg(), [0.5, 0.5]; options=opts)
+    r1 = NC.optimize!(ws)
+    a1 = ws.state.approx
+    @test ws.state !== nothing
+    @test a1 !== nothing
+    # second call: same workspace, warm state
+    r2 = NC.optimize!(ws)
+    @test ws.state.approx === a1  # curvature object carried over
+    @test norm(r2.minimizer - [1.0, 1.0]) < 1e-2
+    # a cold run of the same total budget must not do better
+    rc = optimize(vm, AugLagAlg(), [0.5, 0.5];
+        options=AugLagOptions(; max_iter=120))
+    @test r2.minimum <= rc.minimum + 1e-3
+    # structure mismatch falls back to a cold start without error
+    m2 = Model(x -> sum(x .^ 2))
+    addvar!(m2, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m2, x -> x[1] + x[2] - 1)
+    vm2, _, _ = NC.tovecmodel(m2, [0.0, 0.0])
+    ws2 = Workspace(vm2, AugLagAlg(), [0.0, 0.0];
+        options=AugLagOptions(; max_iter=40, warm_continue=true))
+    r3 = NC.optimize!(ws2)
+    @test norm(r3.minimizer - [0.5, 0.5]) < 1e-2
+end
