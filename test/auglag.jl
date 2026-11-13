@@ -219,9 +219,8 @@ end
     struct _AlwaysFailAlg <: NonconvexCore.AbstractOptimizer
         calls::Base.RefValue{Int}
     end
-    NonconvexCore.solver_capabilities(::_AlwaysFailAlg) = ConstraintCapabilities(;
-        box=true, continuous=true, infinite_bounds=true
-    )
+    NonconvexCore.solver_capabilities(::_AlwaysFailAlg) =
+        ConstraintCapabilities(; box=true, continuous=true, infinite_bounds=true)
     struct _AlwaysFailWorkspace <: NonconvexCore.Workspace
         model::NonconvexCore.VecModel
         alg::_AlwaysFailAlg

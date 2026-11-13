@@ -626,7 +626,7 @@ end
 # the run's initial point when the very first iteration fails (the trajectory
 # is still empty then and `trajectory[end]` would throw a BoundsError).
 function _failed_iterate_fallback(trajectory, x_init)
-    isempty(trajectory) ? copy(x_init) : copy(trajectory[end][1])
+    return isempty(trajectory) ? copy(x_init) : copy(trajectory[end][1])
 end
 
 function optimize!(workspace::AugLagWorkspace)
