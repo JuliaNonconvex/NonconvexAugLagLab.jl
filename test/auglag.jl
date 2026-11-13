@@ -247,3 +247,16 @@ end
     @test all(isfinite, rf.minimizer)
     @test isfinite(rf.minimum)
 end
+
+@testitem "AugLagAlg: elastic mode with position-indexing constraint functions" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra
+    # The filter backtrack evaluates the constraint violation on the
+    # slack-augmented vector; the functions index the variable vector by
+    # position, so elastic mode used to throw a DimensionMismatch here.
+    m = Model(x -> sum(x .^ 2))
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+    options = AugLagOptions(; max_iter=30, elastic=true)
+    r = optimize(m, AugLagAlg(), [0.0, 0.0]; options=options)
+    @test norm(r.minimizer - [0.5, 0.5]) < 1e-2
+end
