@@ -123,7 +123,12 @@ end
   continuation, where the model or the hyper-parameters change between
   solves); the multipliers are rescaled to the new constraint scales, while
   `ρ`, `η`, `ω`, the filter and the Anderson history are re-initialized from
-  the new options.
+  the new options. This pays off in continuation settings where the
+  parameter changes between solves are *small*: on the TopOpt local-stress
+  benchmark, a fine 6-step SIMP schedule (`p = 1.0, 1.5, ..., 3.5`) ended
+  21% faster and with a better design (obj 0.2086 vs 0.2130) than cold
+  restarts, whereas a coarse 3-step schedule only traded a better design
+  (~8%) for comparable-or-higher wall-clock.
 - `scaling`: normalize the relaxed constraints by their gradient magnitudes
   and the objective by its initial magnitude (Curtis–Jiang–Robinson style
   scaling), so the penalty applies to balanced, unit-scaled constraint

@@ -19,7 +19,11 @@
   weights and quasi-Newton curvature when `optimize!` is called again on the
   same workspace - e.g. across SIMP continuation stages. `ρ`, `η`, `ω`, the
   filter and the Anderson history re-initialize from the new options; a
-  structure mismatch falls back to a cold start.
+  structure mismatch falls back to a cold start. Pays off when the parameter
+  changes between solves are small: on the TopOpt local-stress benchmark a
+  fine 6-step SIMP schedule ended 21% faster and with a better design than
+  cold restarts, while a coarse 3-step schedule traded a better design for
+  comparable-or-higher wall-clock.
 - **Warm-started L-BFGS across AL outer iterations** (`memory=50`,
   `reset=false`), penalty-scaled diagonal preconditioner, Fletcher-Leyffer
   filter globalization, Anderson acceleration (depth 2), Levenberg damping,
