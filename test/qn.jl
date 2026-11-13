@@ -153,11 +153,13 @@ end
     struct TwiceIdentityApprox <: AbstractHessianApprox end
     NonconvexAugLagLab.init!(::TwiceIdentityApprox, n, x0) = TwiceIdentityApprox()
     NonconvexAugLagLab.update!(H::TwiceIdentityApprox, s, y) = H
-    NonconvexAugLagLab.apply!(Hv, ::TwiceIdentityApprox, v) = (Hv .= 2 .* v; Hv)
-    NonconvexAugLagLab.solve!(d, ::TwiceIdentityApprox, g) = (d .= g ./ 2; d)
+    NonconvexAugLagLab.apply!(Hv, ::TwiceIdentityApprox, v) = (Hv.=2 .* v; Hv)
+    NonconvexAugLagLab.solve!(d, ::TwiceIdentityApprox, g) = (d.=g ./ 2; d)
     m = Model(x -> sum(x .^ 2))
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
-    rtr = optimize(m, QuasiNewtonAlg(TwiceIdentityApprox(); linesearch=:trustregion), [0.5, 0.5])
+    rtr = optimize(
+        m, QuasiNewtonAlg(TwiceIdentityApprox(); linesearch=:trustregion), [0.5, 0.5]
+    )
     @test norm(rtr.minimizer) < 1e-8
     @test rtr.iter == 1
     rtron = optimize(m, QuasiNewtonAlg(TwiceIdentityApprox(); linesearch=:tron), [0.5, 0.5])
