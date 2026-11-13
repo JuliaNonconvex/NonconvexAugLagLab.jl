@@ -105,7 +105,12 @@ r = optimize(m, alg, [0.0, 0.0], options = options)
 | `η₀` | `0.5` | initial feasibility target of the subproblems |
 | `ω₀` | `1.0` | initial optimality target of the subproblems |
 | `weights` | `nothing` | per-constraint-group penalty weights (default: all ones) |
-| `lsq_multipliers` | `false` | initialize equality multipliers from the least-squares stationarity residual |
+| `lsq_multipliers` | `true` | initialize equality multipliers from the least-squares stationarity residual (matrix-free CGLS on `Jv`/`Jᵀv` products only) |
+| `scaling` | `true` | normalize relaxed constraints by their gradient magnitudes and the objective by its initial magnitude |
+| `memory` | `50` | L-BFGS memory of the built-in sub-solver (one warm-started history across outer iterations) |
+| `elastic` | `false` | elastic ALM: relax equalities through slack variables |
+| `elastic_μ` | `1e3` | slack penalty coefficient of the elastic mode |
+| `warm_continue` | `false` | reuse the previous run's iterate, rescaled multipliers, weights and curvature when `optimize!` is called again on the same workspace |
 | `keep_all` | `false` | keep the trajectory of outer iterates in the result |
 
 ### Penalty modes
@@ -148,6 +153,30 @@ When `AugLagAlg()` is used without a sub-solver, every constraint must be
 relaxed: the built-in `QuasiNewtonAlg` only handles smooth box-constrained
 subproblems.
 
+## Continuation (`warm_continue`)
+
+A SIMP-style continuation — solve, change a model parameter, solve again —
+can reuse the whole optimization state through one workspace:
+
+```julia
+using NonconvexAugLagLab, NonconvexCore
+vm, x0, _ = NonconvexCore.tovecmodel(m, init)
+options = AugLagOptions(max_iter = 100, warm_continue = true)
+ws = Workspace(vm, AugLagAlg(), x0; options = options)
+
+r1 = NonconvexCore.optimize!(ws)     # stage 1
+setpenalty!(penalty, p)              # e.g. TopOpt: change the SIMP exponent
+r2 = NonconvexCore.optimize!(ws)     # continues from r1's state and curvature
+```
+
+The second call restarts from the previous final iterate and reuses the
+multipliers (rescaled to the new constraint scales), the per-group penalty
+weights and the L-BFGS curvature; `ρ`, `η`, `ω`, the filter and the Anderson
+history re-initialize from the new options, and a structure mismatch falls
+back to a cold start. This pays off when the parameter change between
+solves is small — measured on the TopOpt local-stress SIMP continuation, a
+fine 6-step schedule ends both faster and better than cold restarts.
+
 ## Result
 
 `optimize` returns an [`AugLagResult`](@ref) with the usual
@@ -187,9 +216,11 @@ alg = QuasiNewtonAlg(NewtonTRApprox(); linesearch = :trustregion)
 ```
 
 The `linesearch` keyword is `:backtracking` (Armijo, default), `:wolfe`
-(strong Wolfe) or `:trustregion` (Steihaug–Toint with a projected step,
-needed for `NewtonTRApprox`); `max_iter`, `tol`, `damping` (Powell damping)
-and `Δ0` (initial trust-region radius) tune the driver.
+(strong Wolfe), `:trustregion` (Steihaug–Toint with a projected step,
+needed for `NewtonTRApprox`) or `:tron` (Lin–Moré projected CG with
+active-set identification — see [Theory](theory.md)); `max_iter`, `tol`,
+`damping` (Powell damping) and `Δ0` (initial trust-region radius) tune the
+driver.
 
 ### Preconditioners
 

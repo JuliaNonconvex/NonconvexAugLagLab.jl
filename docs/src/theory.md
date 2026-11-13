@@ -49,6 +49,126 @@ with the update $\lambda^{k+1} = \max(0, \lambda^k + \rho_k g(x^{k+1}))$.
   solve $\min_\lambda \lVert \nabla f(x^0) + J(x^0)^\top \lambda \rVert^2$,
   a far better estimate than zero for equality-constrained problems.
 
+## The hardening stack (defaults in `AugLagAlg`)
+
+On top of the Birgin–Martínez loop, [`AugLagAlg`](@ref) enables a set of
+hardening devices, each benchmark-gated on the TopOpt local-stress and
+Rosetta AC-OPF problems. They are the defaults because the measurements
+favored them; several (marked *opt-in*) are available but off by default
+because they trade one benchmark against the other.
+
+### Jacobian-free constraint scaling (`scaling = true`)
+
+Before the ALM starts, each relaxed constraint is normalized by the
+magnitude of its gradient at the initial point,
+$\tilde c_i(x) = c_i(x)/\lVert\nabla c_i(x^0)\rVert$, and the objective by its
+initial magnitude. The penalty then acts on *balanced, unit-scaled*
+violations, so a single $\rho$ makes sense for all constraints — without the
+scaling, constraint groups with wildly different gradient scales need
+wildly different penalties, which is the classic source of ALM divergence
+on problems like AC-OPF (Curtis–Jiang–Robinson). The scaling uses only
+$Jv$ products (finite-difference), never a materialized Jacobian.
+
+### Matrix-free CG least-squares multiplier initialization (`lsq_multipliers = true`)
+
+The first equality multipliers solve
+$\min_\lambda \lVert \nabla f(x^0) + J(x^0)^\top \lambda\rVert^2$ — the
+stationarity residual in multiplier space — by CGLS on the normal
+equations, again using only $Jv$ and $J^\top v$ products. The cost is a
+handful of constraint evaluations and the payoff is a multiplier estimate
+orders of magnitude better than zero, which removes the first many
+expensive outer iterations.
+
+### Safeguarded multipliers and selective penalty weights
+
+The multiplier update is clamped ($|y|, \lambda \le 10^8$) so a poorly
+solved subproblem cannot poison the next one with a huge multiplier.
+Instead of escalating the *global* penalty when a single constraint group
+is violated, the **selective** update (`weights`) bumps only the weights of
+the most-violated groups (by `ρ_incr`, capped at `ρ_max/ρ`), escalating
+$\rho$ itself only when no single group stands out. This keeps the
+well-behaved groups' subproblems well-conditioned while the offender is
+penalized harder — the per-group generalization of the Birgin–Martínez
+feasibility-driven update.
+
+### Fletcher–Leyffer filter
+
+The outer loop is globalized by a **filter**, not a merit function: a
+candidate step is rejected only if a previous iterate dominates it in
+*both* the AL merit and the constraint violation. This avoids the classic
+failure where a single scalar merit value misweights feasibility against
+optimality and rejects perfectly good steps (Fletcher–Leyffer 2002). The
+filter is reset when the penalty changes scale.
+
+### Anderson acceleration on the multiplier map (depth 2)
+
+The multiplier update $y^{k+1} = y^k + \rho\, c(x^{k+1})$ is a fixed-point
+iteration, and near a solution its Jacobian is contractive (its spectral
+radius shrinks like $O(1/\rho)$). Anderson acceleration mixes the last $m$
+fixed-point iterates, $y^{k+1} = \sum_j \theta_j (y^j + R^j)$ with the
+least-squares weights $\theta$ minimizing $\lVert\sum_j \theta_j R^j\rVert$,
+$R^j = (y^{j+1} - y^j)$ — an $m \times m$ solve per outer iteration that
+typically halves the outer count. The depth (2) and weight clamping
+($\theta \in [-2, 2]$) are conservative defaults.
+
+### Penalty-scaled, warm-started L-BFGS (`memory = 50`)
+
+The built-in sub-solver keeps *one* L-BFGS history across the whole outer
+loop (`reset = false`): the sequence of subproblems is a homotopy in
+$\rho$, so the secant pairs of the previous subproblem are excellent
+curvature for the next one. The two-loop base operator is the
+**penalty-scaled diagonal** $H_0 = (1+\rho)^{-1} I$: the AL objective's
+curvature grows like $\rho$ on the constraint subspace, and an $H_0$ that
+shrinks with $1/(1+\rho)$ keeps the first CG steps of each subproblem on
+the right scale. The memory is a deliberate default of 50 — a small memory
+(5) takes the compliant-design path on the stress benchmark but ~6×
+slower, and a larger one (100) changes nothing (measured).
+
+### Levenberg damping and stall retry
+
+Inside the Steihaug–Toint solve the curvature is damped $B + \tau I$ with
+$\tau$ adapted by the trust-region ratio (Levenberg regularization): when
+steps are rejected, $\tau$ grows and the model becomes more conservative;
+when they succeed, $\tau$ shrinks back toward the secant curvature. A
+**stall retry** detects a subproblem that stopped progressing (the
+projected gradient no longer decreases) and restarts it with a relaxed
+tolerance rather than burning the outer budget on a dead solve.
+
+### TRON inner solver (`linesearch = :tron`, *opt-in*)
+
+As an alternative to the Steihaug–Toint trust-region step, the subproblem
+$\min_{l \le x \le u,\; \lVert d\rVert \le \Delta} g^\top d + \frac12 d^\top B d$
+can be solved by **TRON** (Lin & Moré 1999): projected conjugate gradients
+on the free-variable subspace with active-set identification — a variable
+that hits a bound mid-sweep is fixed for the rest of the sweep, negative
+curvature rides to the trust-region boundary, and the step respects both
+the bounds and the radius at every CG iterate. On the TopOpt local-stress
+benchmark it is ~32% faster than the default; on Rosetta AC-OPF it reaches
+better feasibility but a worse objective, so it stays opt-in.
+
+### Elastic mode (`elastic = true`, *opt-in*)
+
+For equality-constrained problems whose subproblems risk infeasibility,
+the equalities are relaxed through slack variables,
+$y^\top(c - s) + \frac{\rho}{2}\lVert c - s\rVert^2 + \mu\sum_i\sqrt{s_i^2 + \epsilon^2}$,
+the elastic ALM: $s$ is solved along with $x$ in every subproblem, and the
+slack penalty $\mu$ absorbs constraint infeasibility. Off by default
+because the measured benchmarks do not need it.
+
+### Warm continuation (`warm_continue = true`, *opt-in*)
+
+`optimize!` can be called repeatedly on the same `Workspace`, reusing the
+previous run's final iterate, multipliers (rescaled to the new constraint
+scales), per-group weights and the L-BFGS curvature object — exactly the
+state a continuation scheme needs. $\rho$, $\eta$, $\omega$, the filter and
+the Anderson history re-initialize from the new options, and a structure
+mismatch falls back to a cold start. Measured on the TopOpt local-stress
+SIMP continuation: a coarse 3-step schedule trades a better final design
+(~8%) for comparable wall-clock, while a fine 6-step schedule
+($p = 1.0, 1.5, \dots, 3.5$) is both 21% faster and better (obj 0.2086 vs
+0.2130) than cold restarts — the carried state stays relevant when the
+parameter change between solves is small.
+
 ## The penalty-barrier-multiplier method (PBM)
 
 The classical ALM treats violations quadratically. The PBM of Ben-Tal &

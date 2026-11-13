@@ -74,3 +74,29 @@ end
     r = optimize(m, QuasiNewtonAlg(FixedDiagonalApprox([1.0, 1.0])), [3.0, 4.0])
     @test norm(r.minimizer) < 1e-3
 end
+
+@testitem "QuasiNewtonAlg: TRON projected trust region" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra
+    # Box-constrained quadratic with the optimum on a bound.
+    m = Model(x -> (x[1] - 1)^2 + 2 * (x[2] - 2)^2)
+    addvar!(m, [0.0, 0.0], [1.0, Inf])
+    r = optimize(m, QuasiNewtonAlg(; linesearch=:tron, max_iter=500), [0.1, 0.1])
+    @test norm(r.minimizer - [1.0, 2.0]) < 1e-4
+    # Nonconvex objective with a saddle at the origin.
+    m2 = Model(x -> x[1]^4 - 2 * x[1]^2)
+    addvar!(m2, [-2.0], [2.0])
+    r2 = optimize(m2, QuasiNewtonAlg(; linesearch=:tron, max_iter=500), [0.1])
+    @test abs(abs(r2.minimizer[1]) - 1.0) < 1e-3
+    @test abs(r2.minimum + 1.0) < 1e-4
+    # The AL wrapper accepts :tron through sub_options.
+    m3 = Model(x -> sum(x .^ 2))
+    addvar!(m3, [-5.0, -5.0], [5.0, 5.0])
+    add_ineq_constraint!(m3, x -> 2 - x[1] - x[2])
+    r3 = optimize(
+        m3,
+        AugLagAlg(),
+        [1.5, 1.5];
+        options=AugLagOptions(sub_options=(; max_iter=200, tol=1e-6, linesearch=:tron)),
+    )
+    @test norm(r3.minimizer - [1.0, 1.0]) < 1e-3
+end
