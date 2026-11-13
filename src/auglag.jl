@@ -871,7 +871,8 @@ function optimize!(workspace::AugLagWorkspace)
         for _ in 1:10
             xt = x_sub .+ α .* d
             mt = al_obj(xt)
-            φt = norm(_scaled_violation(eq_fs, ineq_fs, model, relaxed, xt), Inf)
+            xt_orig = use_elastic ? @view(xt[1:n]) : xt
+            φt = norm(_scaled_violation(eq_fs, ineq_fs, model, relaxed, xt_orig), Inf)
             if isfinite(mt) && isfinite(φt) && _filter_accept(mt, φt)
                 x_new = xt
                 accepted = true
