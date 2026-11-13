@@ -7,6 +7,13 @@
   Julia 1.10/1.11 (users silently resolved to 0.1.2).
 - Requires Julia 1.10+.
 
+## v0.2.5
+
+- Fix the elastic-mode filter backtrack: it evaluated the constraint
+  violation on the slack-augmented vector, crashing any model whose
+  constraint functions index the variable vector by position
+  (e.g. the TopOpt SAND tutorial model).
+
 ## v0.2.4
 
 - **Label-based relaxation selection:** `RelaxConstraintSelection(labels = ...)`
