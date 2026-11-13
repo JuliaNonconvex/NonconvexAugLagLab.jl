@@ -26,20 +26,39 @@
 # one workspace (`warm_continue = true`). See docs/theory for the details.
 
 """
-    RelaxConstraintSelection(; eq = true, ineq = true, sd = true)
+    RelaxConstraintSelection(; eq = true, ineq = true, sd = true, labels = nothing)
 
 Selects which constraints are relaxed into the augmented Lagrangian. Each
-entry is `true` (relax all of that kind), `false` (keep all hard) or a vector
-of constraint indices (relax those only). Box constraints are always handled
-by the sub-solver.
+kind entry is `true` (relax all of that kind), `false` (keep all hard) or a
+vector of constraint indices (relax those only). In addition, `labels`
+(a `Symbol` or a collection of `Symbol`s) relaxes every constraint whose
+`flags` (set with `add_ineq_constraint!(m, f, s; flags = [:relax])` and
+friends) contain one of the given labels — independently of the kind
+selection. Box constraints are always handled by the sub-solver.
+
+```julia
+# relax every constraint carrying the :relax flag, keep the rest hard
+RelaxConstraintSelection(eq = false, ineq = false, sd = false, labels = [:relax])
+
+# all equalities, plus anything flagged :relax
+RelaxConstraintSelection(labels = :relax)
+```
 """
 struct RelaxConstraintSelection
     eq::Union{Bool,AbstractVector{Int}}
     ineq::Union{Bool,AbstractVector{Int}}
     sd::Union{Bool,AbstractVector{Int}}
+    labels::Union{Nothing,Set{Symbol}}
 end
-function RelaxConstraintSelection(; eq=true, ineq=true, sd=true)
-    return RelaxConstraintSelection(eq, ineq, sd)
+function RelaxConstraintSelection(; eq=true, ineq=true, sd=true, labels=nothing)
+    lbls = if labels === nothing
+        nothing
+    elseif labels isa Symbol
+        Set([labels])
+    else
+        Set(Symbol.(labels))
+    end
+    return RelaxConstraintSelection(eq, ineq, sd, lbls)
 end
 
 function _relaxed_indices(sel::Bool, n::Int)
@@ -55,6 +74,27 @@ function _relaxed_indices(sel, n::Int)
             "constraint indices; got $(typeof(sel)).",
         ),
     )
+end
+
+# The flags (labels) of a constraint, or the empty set for constraint types
+# that do not carry flags (e.g. JuMP-converted DictModel constraints).
+function _flags(c)
+    return hasfield(typeof(c), :flags) ? c.flags : Set{Symbol}()
+end
+
+# Relaxation indices of a constraint list: the kind-based selection plus
+# every constraint carrying one of the selected labels. NB: the count is
+# `length(fs.fs)` — `length(::VectorOfFunctions)` is its dimension
+# (`Base.length(::AbstractFunction) = getdim`), not the number of constraints.
+function _relaxed_indices(sel, fs::VectorOfFunctions, labels::Union{Nothing,Set{Symbol}})
+    idx = _relaxed_indices(sel, length(fs.fs))
+    labels === nothing && return idx
+    for (i, c) in enumerate(fs.fs)
+        if !(i in idx) && !isempty(intersect(_flags(c), labels))
+            push!(idx, i)
+        end
+    end
+    return sort!(idx)
 end
 
 """
@@ -258,9 +298,9 @@ function Workspace(
     if optimizer.sub_alg === nothing
         sel = options.relaxed
         nrelax =
-            length(_relaxed_indices(sel.eq, length(model.eq_constraints.fs))) +
-            length(_relaxed_indices(sel.ineq, length(model.ineq_constraints.fs))) +
-            length(_relaxed_indices(sel.sd, length(model.sd_constraints.fs)))
+            length(_relaxed_indices(sel.eq, model.eq_constraints, sel.labels)) +
+            length(_relaxed_indices(sel.ineq, model.ineq_constraints, sel.labels)) +
+            length(_relaxed_indices(sel.sd, model.sd_constraints, sel.labels))
         ntotal =
             length(model.eq_constraints.fs) +
             length(model.ineq_constraints.fs) +
@@ -282,9 +322,9 @@ end
 function _subproblem(
     model::VecModel, sel::RelaxConstraintSelection, weights::Union{Nothing,AbstractVector}
 )
-    eq_rel = _relaxed_indices(sel.eq, length(model.eq_constraints.fs))
-    ineq_rel = _relaxed_indices(sel.ineq, length(model.ineq_constraints.fs))
-    sd_rel = _relaxed_indices(sel.sd, length(model.sd_constraints.fs))
+    eq_rel = _relaxed_indices(sel.eq, model.eq_constraints, sel.labels)
+    ineq_rel = _relaxed_indices(sel.ineq, model.ineq_constraints, sel.labels)
+    sd_rel = _relaxed_indices(sel.sd, model.sd_constraints, sel.labels)
     kept_eq = VectorOfFunctions([
         c for (i, c) in enumerate(model.eq_constraints.fs) if !(i in eq_rel)
     ],)
@@ -628,7 +668,10 @@ function optimize!(workspace::AugLagWorkspace)
             st.m_eq == m_eq &&
             st.neq == length(eq_fs) &&
             st.nineq == length(ineq_fs) &&
-            st.elastic == use_elastic
+            st.elastic == use_elastic &&
+            st.eq_rel == eq_rel &&
+            st.ineq_rel == ineq_rel &&
+            st.sd_rel == sd_rel
         ) || (warm = false)
     end
     if warm
@@ -934,6 +977,9 @@ function optimize!(workspace::AugLagWorkspace)
         m_eq=m_eq,
         neq=length(eq_fs),
         nineq=length(ineq_fs),
+        eq_rel=copy(eq_rel),
+        ineq_rel=copy(ineq_rel),
+        sd_rel=copy(sd_rel),
         elastic=use_elastic,
         x=copy(x),
         y=[copy(yk) for yk in y],
