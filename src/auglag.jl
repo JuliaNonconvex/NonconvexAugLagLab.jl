@@ -8,6 +8,22 @@
 # adaptive penalty, tolerance sequences η/ω, multiplier safeguards, two-way
 # penalty updates (Curtis et al.) and infeasibility detection. A clean-room
 # penalty-barrier-multiplier (PBM) mode follows Ben-Tal & Zibulevsky.
+#
+# The hardening stack (defaults on, benchmark-gated):
+# - Jacobian-free constraint scaling (Curtis-Jiang-Robinson): each relaxed
+#   constraint is normalized by its gradient magnitude at x0 and the
+#   objective by its initial magnitude, so one penalty balances all groups.
+# - Matrix-free CGLS least-squares multiplier initialization (Jv/Jᵀv only).
+# - Safeguarded multipliers (clamped) and selective penalty weights that
+#   escalate only the most-violated constraint groups.
+# - Fletcher-Leyffer filter globalization of the outer loop.
+# - Anderson acceleration (depth 2) on the multiplier fixed-point map.
+# - One warm-started L-BFGS history (memory 50) across the outer loop with
+#   a penalty-scaled base operator H0 = 1/(1+ρ).
+# - Levenberg damping and a stall retry for the subproblems.
+# Opt-in: TRON projected-CG subproblem solves (`linesearch = :tron`), the
+# elastic ALM (`elastic = true`), and warm continuation across solves on
+# one workspace (`warm_continue = true`). See docs/theory for the details.
 
 """
     RelaxConstraintSelection(; eq = true, ineq = true, sd = true)
