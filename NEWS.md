@@ -7,6 +7,16 @@
   Julia 1.10/1.11 (users silently resolved to 0.1.2).
 - Requires Julia 1.10+.
 
+## v0.2.4
+
+- **Label-based relaxation selection:** `RelaxConstraintSelection(labels = ...)`
+  relaxes every constraint whose `flags` contain one of the given labels
+  (set with `add_ineq_constraint!(m, f, s; flags = [:relax])`), independently
+  of the kind selection.
+- Fixes: L-BFGS direct Hessian matvec, label normalization, Anderson residual
+  blending, first-iteration failure fallback, dense-BFGS nonpositive sᵀBs
+  guard, early gradient-convergence stop in the sub-solver driver.
+
 ## v0.2.3
 
 - **TRON inner solver (`sub_options=(; linesearch=:tron)`, opt-in):** a

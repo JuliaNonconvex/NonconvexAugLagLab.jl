@@ -26,20 +26,41 @@
 # one workspace (`warm_continue = true`). See docs/theory for the details.
 
 """
-    RelaxConstraintSelection(; eq = true, ineq = true, sd = true)
+    RelaxConstraintSelection(; eq = true, ineq = true, sd = true, labels = nothing)
 
 Selects which constraints are relaxed into the augmented Lagrangian. Each
-entry is `true` (relax all of that kind), `false` (keep all hard) or a vector
-of constraint indices (relax those only). Box constraints are always handled
-by the sub-solver.
+kind entry is `true` (relax all of that kind), `false` (keep all hard) or a
+vector of constraint indices (relax those only). In addition, `labels`
+(a `Symbol` or a collection of `Symbol`s) relaxes every constraint whose
+`flags` (set with `add_ineq_constraint!(m, f, s; flags = [:relax])` and
+friends) contain one of the given labels — independently of the kind
+selection. Box constraints are always handled by the sub-solver.
+
+```julia
+# relax every constraint carrying the :relax flag, keep the rest hard
+RelaxConstraintSelection(eq = false, ineq = false, sd = false, labels = [:relax])
+
+# all equalities, plus anything flagged :relax
+RelaxConstraintSelection(labels = :relax)
+```
 """
 struct RelaxConstraintSelection
     eq::Union{Bool,AbstractVector{Int}}
     ineq::Union{Bool,AbstractVector{Int}}
     sd::Union{Bool,AbstractVector{Int}}
+    labels::Union{Nothing,Set{Symbol}}
 end
-function RelaxConstraintSelection(; eq=true, ineq=true, sd=true)
-    return RelaxConstraintSelection(eq, ineq, sd)
+function RelaxConstraintSelection(; eq=true, ineq=true, sd=true, labels=nothing)
+    lbls = if labels === nothing
+        nothing
+    elseif labels isa Union{AbstractVector,Tuple,AbstractSet}
+        Set(Symbol.(labels))
+    else
+        # a single label (Symbol or String): Symbol.(x) would broadcast
+        # (and a bare Set(x) cannot iterate a scalar), so wrap it first
+        Set([Symbol(labels)])
+    end
+    return RelaxConstraintSelection(eq, ineq, sd, lbls)
 end
 
 function _relaxed_indices(sel::Bool, n::Int)
@@ -55,6 +76,30 @@ function _relaxed_indices(sel, n::Int)
             "constraint indices; got $(typeof(sel)).",
         ),
     )
+end
+
+# The flags (labels) of a constraint, or the empty set for constraint types
+# that do not carry flags (e.g. JuMP-converted DictModel constraints).
+function _flags(c)
+    return hasfield(typeof(c), :flags) ? c.flags : Set{Symbol}()
+end
+
+# Relaxation indices of a constraint list: the kind-based selection plus
+# every constraint carrying one of the selected labels. NB: the count is
+# `length(fs.fs)` — `length(::VectorOfFunctions)` is its dimension
+# (`Base.length(::AbstractFunction) = getdim`), not the number of constraints.
+function _relaxed_indices(sel, fs::VectorOfFunctions, labels::Union{Nothing,Set{Symbol}})
+    idx = _relaxed_indices(sel, length(fs.fs))
+    labels === nothing && return idx
+    # copy before push!/sort!: `sel` may be the user's array (must not be
+    # mutated) or an AbstractRange (cannot be pushed to)
+    idx = collect(idx)
+    for (i, c) in enumerate(fs.fs)
+        if !(i in idx) && !isempty(intersect(_flags(c), labels))
+            push!(idx, i)
+        end
+    end
+    return sort!(idx)
 end
 
 """
@@ -258,9 +303,9 @@ function Workspace(
     if optimizer.sub_alg === nothing
         sel = options.relaxed
         nrelax =
-            length(_relaxed_indices(sel.eq, length(model.eq_constraints.fs))) +
-            length(_relaxed_indices(sel.ineq, length(model.ineq_constraints.fs))) +
-            length(_relaxed_indices(sel.sd, length(model.sd_constraints.fs)))
+            length(_relaxed_indices(sel.eq, model.eq_constraints, sel.labels)) +
+            length(_relaxed_indices(sel.ineq, model.ineq_constraints, sel.labels)) +
+            length(_relaxed_indices(sel.sd, model.sd_constraints, sel.labels))
         ntotal =
             length(model.eq_constraints.fs) +
             length(model.ineq_constraints.fs) +
@@ -282,9 +327,9 @@ end
 function _subproblem(
     model::VecModel, sel::RelaxConstraintSelection, weights::Union{Nothing,AbstractVector}
 )
-    eq_rel = _relaxed_indices(sel.eq, length(model.eq_constraints.fs))
-    ineq_rel = _relaxed_indices(sel.ineq, length(model.ineq_constraints.fs))
-    sd_rel = _relaxed_indices(sel.sd, length(model.sd_constraints.fs))
+    eq_rel = _relaxed_indices(sel.eq, model.eq_constraints, sel.labels)
+    ineq_rel = _relaxed_indices(sel.ineq, model.ineq_constraints, sel.labels)
+    sd_rel = _relaxed_indices(sel.sd, model.sd_constraints, sel.labels)
     kept_eq = VectorOfFunctions([
         c for (i, c) in enumerate(model.eq_constraints.fs) if !(i in eq_rel)
     ],)
@@ -538,40 +583,50 @@ end
 # ------------------------------------------------------------------
 # Anderson mixing on the equality multiplier fixed-point update: given the
 # last `m` iterates yⱼ with residuals Rⱼ = G(yⱼ) − yⱼ (G the multiplier
-# update map), solve the least-squares mixing ΣθⱼRⱼ with Σθⱼ = 1 and take
-# y ← Σθⱼ(yⱼ + Rⱼ). Cheap (m × m), and typically halves the outer
-# iteration count.
+# update map), pick the simplex weights θ (Σθⱼ = 1) minimizing the norm of
+# the mixed residual ΣθⱼRⱼ and take y ← Σθⱼ(yⱼ + Rⱼ). Cheap (m × m), and
+# typically halves the outer iteration count.
 function _anderson_mix(history, y_new)
     m = length(history)
     m == 0 && return y_new
     Rs = [h[2] for h in history]
     Ys = [h[1] for h in history]
-    if m == 1
-        return y_new
-    end
+    m == 1 && return y_new
     R = Rs[end]
-    θ = ones(m) ./ m
+    # With θₘ = 1 − Σ_{j<m} θⱼ the mixed residual is R + Σ_{j<m} θⱼ (Rⱼ − R),
+    # so the normal equations of min ‖ΣθⱼRⱼ‖² over the simplex are
+    #   G θ = b,  Gᵢⱼ = ⟨Rᵢ − R, Rⱼ − R⟩,  bᵢ = −⟨Rᵢ − R, R⟩.
     A = [Rs[j] .- R for j in 1:(m - 1)]
-    b = R .- Rs[end]
-    if length(A) >= 1
-        G = zeros(m - 1, m - 1)
-        rhs = zeros(m - 1)
-        for i in 1:(m - 1), j in 1:(m - 1)
-            G[i, j] = dot(A[i], A[j])
-        end
-        for i in 1:(m - 1)
-            rhs[i] = dot(A[i], b)
-        end
-        θf = G \ rhs
-        θf = clamp.(θf, -2.0, 2.0)
-        θ[1:(m - 1)] .= θf
-        θ[m] = 1 - sum(θf)
+    G = zeros(m - 1, m - 1)
+    rhs = zeros(m - 1)
+    for i in 1:(m - 1), j in 1:(m - 1)
+        G[i, j] = dot(A[i], A[j])
     end
+    for i in 1:(m - 1)
+        rhs[i] = -dot(A[i], R)
+    end
+    θf = try
+        clamp.(G \ rhs, -2.0, 2.0)
+    catch
+        # singular normal equations (e.g. identical residuals): keep the
+        # unaccelerated update
+        zeros(m - 1)
+    end
+    θ = ones(m) ./ m
+    θ[1:(m - 1)] .= θf
+    θ[m] = 1 - sum(θf)
     out = zeros(length(y_new))
     for j in 1:m
         out .+= θ[j] .* (Ys[j] .+ Rs[j])
     end
     return out
+end
+
+# Fallback for a rejected outer iterate: the previous trajectory point, or
+# the run's initial point when the very first iteration fails (the trajectory
+# is still empty then and `trajectory[end]` would throw a BoundsError).
+function _failed_iterate_fallback(trajectory, x_init)
+    return isempty(trajectory) ? copy(x_init) : copy(trajectory[end][1])
 end
 
 function optimize!(workspace::AugLagWorkspace)
@@ -589,6 +644,8 @@ function optimize!(workspace::AugLagWorkspace)
     if warm_continue && workspace.state !== nothing && workspace.state.n == length(x)
         x = copy(workspace.state.x)
     end
+    # The starting point of this run, for the first-iteration failure fallback.
+    x_init = copy(x)
     eq_rel, ineq_rel, sd_rel, submodel0 = _subproblem(model, relaxed, options.weights)
     # Objective scale: minimize f/s_f so the AL objective terms are O(1).
     # (The PBM barrier parameters are calibrated to the unscaled objective,
@@ -628,7 +685,10 @@ function optimize!(workspace::AugLagWorkspace)
             st.m_eq == m_eq &&
             st.neq == length(eq_fs) &&
             st.nineq == length(ineq_fs) &&
-            st.elastic == use_elastic
+            st.elastic == use_elastic &&
+            st.eq_rel == eq_rel &&
+            st.ineq_rel == ineq_rel &&
+            st.sd_rel == sd_rel
         ) || (warm = false)
     end
     if warm
@@ -833,7 +893,7 @@ function optimize!(workspace::AugLagWorkspace)
         if !ok
             # The subproblem blew up (typical of an over-aggressive penalty):
             # discard the iterate, escalate the penalty and retry.
-            x = copy(trajectory[end][1])
+            x = _failed_iterate_fallback(trajectory, x_init)
             vnorm = vprev
             f_new = fx
         end
@@ -934,6 +994,9 @@ function optimize!(workspace::AugLagWorkspace)
         m_eq=m_eq,
         neq=length(eq_fs),
         nineq=length(ineq_fs),
+        eq_rel=copy(eq_rel),
+        ineq_rel=copy(ineq_rel),
+        sd_rel=copy(sd_rel),
         elastic=use_elastic,
         x=copy(x),
         y=[copy(yk) for yk in y],
