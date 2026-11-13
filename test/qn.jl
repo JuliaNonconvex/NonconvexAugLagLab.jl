@@ -93,7 +93,9 @@ end
     addvar!(m3, [-5.0, -5.0], [5.0, 5.0])
     add_ineq_constraint!(m3, x -> 2 - x[1] - x[2])
     r3 = optimize(
-        m3, AugLagAlg(), [1.5, 1.5];
+        m3,
+        AugLagAlg(),
+        [1.5, 1.5];
         options=AugLagOptions(sub_options=(; max_iter=200, tol=1e-6, linesearch=:tron)),
     )
     @test norm(r3.minimizer - [1.0, 1.0]) < 1e-3

@@ -351,8 +351,9 @@ function QuasiNewtonAlg(
     nonmonotone::Bool=false,
     soc::Bool=false,
 )
-    linesearch in (:backtracking, :wolfe, :trustregion, :tron) ||
-        throw(ArgumentError("linesearch must be :backtracking, :wolfe, :trustregion or :tron"))
+    linesearch in (:backtracking, :wolfe, :trustregion, :tron) || throw(
+        ArgumentError("linesearch must be :backtracking, :wolfe, :trustregion or :tron")
+    )
     return QuasiNewtonAlg(
         approx, linesearch, max_iter, tol, damping, Δ0, reset, nonmonotone, soc
     )
@@ -466,10 +467,8 @@ function optimize!(workspace::QuasiNewtonWorkspace)
             push!(merits, fx)
             length(merits) > M && popfirst!(merits)
             fref = maximum(merits)
-            if pred > 0 && (
-                ared / pred > 0.1 ||
-                (optimizer.nonmonotone && fnew < fref - 1e-2 * pred)
-            )
+            if pred > 0 &&
+                (ared / pred > 0.1 || (optimizer.nonmonotone && fnew < fref - 1e-2 * pred))
                 s = d
                 y = copy(gradfun(xnew)) .- g
                 update!(approx, s, y)
@@ -505,10 +504,8 @@ function optimize!(workspace::QuasiNewtonWorkspace)
             push!(merits, fx)
             length(merits) > M && popfirst!(merits)
             fref = maximum(merits)
-            if pred > 0 && (
-                ared / pred > 0.1 ||
-                (optimizer.nonmonotone && fnew < fref - 1e-2 * pred)
-            )
+            if pred > 0 &&
+                (ared / pred > 0.1 || (optimizer.nonmonotone && fnew < fref - 1e-2 * pred))
                 s = d
                 y = copy(gradfun(xnew)) .- g
                 update!(approx, s, y)
@@ -611,7 +608,9 @@ function _tron_subproblem(Bv, g, x, lb, ub, Δ, τ)
         for i in 1:n
             free[i] || continue
             p[i] == 0 && continue
-            t = min(t, p[i] > 0 ? (ub[i] - x[i] - d[i]) / p[i] : (lb[i] - x[i] - d[i]) / p[i])
+            t = min(
+                t, p[i] > 0 ? (ub[i] - x[i] - d[i]) / p[i] : (lb[i] - x[i] - d[i]) / p[i]
+            )
         end
         dnew = d .+ t .* p
         if dot(dnew, dnew) >= Δ^2

@@ -100,16 +100,19 @@ end
     @test ws.state.approx === a1  # curvature object carried over
     @test norm(r2.minimizer - [1.0, 1.0]) < 1e-2
     # a cold run of the same total budget must not do better
-    rc = optimize(vm, AugLagAlg(), [0.5, 0.5];
-        options=AugLagOptions(; max_iter=120))
+    rc = optimize(vm, AugLagAlg(), [0.5, 0.5]; options=AugLagOptions(; max_iter=120))
     @test r2.minimum <= rc.minimum + 1e-3
     # structure mismatch falls back to a cold start without error
     m2 = Model(x -> sum(x .^ 2))
     addvar!(m2, [-5.0, -5.0], [5.0, 5.0])
     add_eq_constraint!(m2, x -> x[1] + x[2] - 1)
     vm2, _, _ = NC.tovecmodel(m2, [0.0, 0.0])
-    ws2 = Workspace(vm2, AugLagAlg(), [0.0, 0.0];
-        options=AugLagOptions(; max_iter=40, warm_continue=true))
+    ws2 = Workspace(
+        vm2,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options=AugLagOptions(; max_iter=40, warm_continue=true),
+    )
     r3 = NC.optimize!(ws2)
     @test norm(r3.minimizer - [0.5, 0.5]) < 1e-2
 end

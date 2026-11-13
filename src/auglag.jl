@@ -406,7 +406,6 @@ function _init_multipliers(model, sel)
     return y, λ
 end
 
-
 # ------------------------------------------------------------------
 # Problem scaling (Curtis, Jiang & Robinson style)
 # ------------------------------------------------------------------
@@ -608,8 +607,13 @@ function optimize!(workspace::AugLagWorkspace)
     warm = warm_continue && workspace.state !== nothing
     if warm
         st = workspace.state
-        (st.n == n && st.m_eq == m_eq && st.neq == length(eq_fs) &&
-            st.nineq == length(ineq_fs) && st.elastic == use_elastic) || (warm = false)
+        (
+            st.n == n &&
+            st.m_eq == m_eq &&
+            st.neq == length(eq_fs) &&
+            st.nineq == length(ineq_fs) &&
+            st.elastic == use_elastic
+        ) || (warm = false)
     end
     if warm
         st = workspace.state
@@ -665,9 +669,7 @@ function optimize!(workspace::AugLagWorkspace)
         else
             LBFGSApprox(
                 memory;
-                H0=DiagonalPreconditioner(fill(
-                    1 / (1 + ρ), n + (use_elastic ? m_eq : 0)
-                )),
+                H0=DiagonalPreconditioner(fill(1 / (1 + ρ), n + (use_elastic ? m_eq : 0))),
             )
         end
     end
@@ -678,13 +680,33 @@ function optimize!(workspace::AugLagWorkspace)
         sd_terms = _sd_terms(model, sd_rel, ρ, x, Y)
         al_obj = if use_elastic
             _elastic_objective(
-                scaled_obj, eq_fs, ineq_fs, w_eq, w_ineq, ρ, y, λ, penalty,
-                sd_terms, elastic_μ, n, m_eq,
+                scaled_obj,
+                eq_fs,
+                ineq_fs,
+                w_eq,
+                w_ineq,
+                ρ,
+                y,
+                λ,
+                penalty,
+                sd_terms,
+                elastic_μ,
+                n,
+                m_eq,
             )
         else
             _auglag_objective_scaled(
-                model, relaxed, (w_eq, w_ineq), ρ, y, λ, sd_terms, penalty,
-                scaled_obj, eq_fs, ineq_fs,
+                model,
+                relaxed,
+                (w_eq, w_ineq),
+                ρ,
+                y,
+                λ,
+                sd_terms,
+                penalty,
+                scaled_obj,
+                eq_fs,
+                ineq_fs,
             )
         end
         submodel = if use_elastic
@@ -712,8 +734,7 @@ function optimize!(workspace::AugLagWorkspace)
         end
         checksubproblem!(
             submodel,
-            sub_alg === nothing ?
-            QuasiNewtonAlg(qn_approx::LBFGSApprox) : sub_alg;
+            sub_alg === nothing ? QuasiNewtonAlg(qn_approx::LBFGSApprox) : sub_alg;
             context="the augmented Lagrangian subproblem",
             hint="relax the constraint in `RelaxConstraintSelection` or choose a sub-solver that supports it.",
         )
@@ -765,8 +786,8 @@ function optimize!(workspace::AugLagWorkspace)
         # any previous filter entry.
         γ = 1e-4
         _filter_accept(θ, φ) = all(
-            θ <= filter_f[i] - γ * filter_v[i] || φ <= filter_v[i] - γ * filter_f[i]
-            for i in eachindex(filter_f)
+            θ <= filter_f[i] - γ * filter_v[i] || φ <= filter_v[i] - γ * filter_f[i] for
+            i in eachindex(filter_f)
         )
         d = x_new .- x_sub
         α = 1.0
@@ -922,7 +943,7 @@ function _cg_solve!(y, A, b; max_cg=min(length(b), 50), rtol=1e-2)
     r = b .- A(y)
     p = copy(r)
     rsold = dot(r, r)
-    iszero(rsold) && (y .= 0; return y)
+    iszero(rsold) && (y.=0; return y)
     for _ in 1:max_cg
         Ap = A(p)
         α = rsold / dot(p, Ap)
@@ -947,7 +968,9 @@ function _lsq_multipliers_scaled(obj, eq_fs, x)
         # Jv: one finite-difference directional derivative per CG iteration
         # (this is a warm start, so FD precision is more than adequate and no
         # full Jacobian is ever formed).
-        Jv(v) = (_vecval(c(x .+ (ε / max(norm(v), 1e-12)) .* v)) .- c0) ./ (ε / max(norm(v), 1e-12))
+        Jv(v) =
+            (_vecval(c(x .+ (ε / max(norm(v), 1e-12)) .* v)) .- c0) ./
+            (ε / max(norm(v), 1e-12))
         # Jᵀv: one reverse pass (adjoint product).
         Jtv(v) = NonconvexCore.value_gradient(x -> dot(_vecval(c(x)), v), x)[2]
         b = -Jv(∇f)
