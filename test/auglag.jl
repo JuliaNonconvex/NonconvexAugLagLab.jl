@@ -186,6 +186,8 @@ end
     mixed = NonconvexAugLagLab._anderson_mix(hist, y_new)
     @test mixed != y_new
     @test mixed ≈ 0.5 .* ([0.0, 0.0] .+ [1.0, 0.0]) .+ 0.5 .* ([1.0, 1.0] .+ [0.0, 1.0])
+    # the mixed residual norm is smaller than the raw one
+    @test norm(0.5 .* hist[1][2] .+ 0.5 .* hist[2][2]) < norm(hist[2][2])
     # single-entry and empty histories fall back to the raw update
     @test NonconvexAugLagLab._anderson_mix([hist[1]], [1.0, 0.0]) == [1.0, 0.0]
     @test NonconvexAugLagLab._anderson_mix(
@@ -198,7 +200,7 @@ end
 end
 
 @testitem "AugLagAlg: first-iteration failure falls back to the initial point" begin
-    using NonconvexAugLagLab, Test, LinearAlgebra
+    using NonconvexAugLagLab, NonconvexCore, Test, LinearAlgebra
     fallback = NonconvexAugLagLab._failed_iterate_fallback
     T = Tuple{Vector{Float64},Real,Real}
     # empty trajectory (first iteration failed): use the initial point
@@ -210,4 +212,39 @@ end
     out = fallback(T[], x0)
     out[1] = 99.0
     @test x0 == [1.0, 2.0]
+    # end-to-end: a sub-solver whose subproblems always return non-finite
+    # iterates used to crash the outer loop with a BoundsError on the very
+    # first subproblem; the iterate is now discarded and the run finishes
+    # (escalating the penalty) from the initial point.
+    struct _AlwaysFailAlg <: NonconvexCore.AbstractOptimizer
+        calls::Base.RefValue{Int}
+    end
+    NonconvexCore.solver_capabilities(::_AlwaysFailAlg) = ConstraintCapabilities(;
+        box=true, continuous=true, infinite_bounds=true
+    )
+    struct _AlwaysFailWorkspace <: NonconvexCore.Workspace
+        model::NonconvexCore.VecModel
+        alg::_AlwaysFailAlg
+        x0::Vector{Float64}
+    end
+    function NonconvexCore.Workspace(
+        m::NonconvexCore.VecModel, a::_AlwaysFailAlg, x0; kwargs...
+    )
+        return _AlwaysFailWorkspace(m, a, copy(x0))
+    end
+    function NonconvexCore.optimize!(ws::_AlwaysFailWorkspace)
+        ws.alg.calls[] += 1
+        n = length(ws.x0)
+        return NonconvexCore.GenericResult(
+            ws.alg, copy(ws.x0), fill(NaN, n), NaN, 1, false, Tolerance(), nothing, 1
+        )
+    end
+    failalg = _AlwaysFailAlg(Ref(0))
+    mf = Model(x -> sum(x .^ 2))
+    addvar!(mf, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(mf, x -> x[1] + x[2] - 1)
+    rf = optimize(mf, AugLagAlg(failalg), [0.0, 0.0]; options=AugLagOptions(max_iter=3))
+    @test failalg.calls[] >= 3
+    @test all(isfinite, rf.minimizer)
+    @test isfinite(rf.minimum)
 end

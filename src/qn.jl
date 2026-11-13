@@ -180,14 +180,14 @@ function update!(H::DenseBFGSApprox, s, y)
     B = H.H
     sy = dot(s, y)
     sy > 0 || return H
-    Bs = B * s
-    sBs = dot(s, Bs)
-    sBs > 0 || return H
     if H.form === :inverse
         # inverse BFGS update
         ρ = inv(sy)
         H.H .= (I - ρ .* s .* y') * B * (I - ρ .* y .* s') .+ ρ .* s .* s'
     else
+        Bs = B * s
+        sBs = dot(s, Bs)
+        sBs > 0 || return H
         H.H .= B .+ (y .* y') ./ sy .- (Bs .* Bs') ./ sBs
     end
     return H

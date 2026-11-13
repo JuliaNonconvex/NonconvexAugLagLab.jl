@@ -106,6 +106,11 @@ end
     NonconvexAugLagLab.solve!(d, lb, v)
     @test !(d ≈ Bv_lb)
     @test d ≈ A \ v
+    # apply! and solve! are exact inverses: apply! ∘ solve! is the identity
+    # (the old code duplicated the inverse two-loop, making it the B⁻² map)
+    w = similar(v)
+    NonconvexAugLagLab.apply!(w, lb, d)
+    @test w ≈ v
     # DenseBFGS form=:inverse stores B⁻¹: apply! must solve with it, so the
     # direct matvec still equals A v
     dinv = DenseBFGSApprox(form=:inverse)
@@ -116,6 +121,48 @@ end
     Binv_v = similar(v)
     NonconvexAugLagLab.apply!(Binv_v, dinv, v)
     @test Binv_v ≈ A * v
+end
+
+@testitem "QuasiNewtonAlg: dense BFGS skips updates with nonpositive sᵀBs" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra
+    H = DenseBFGSApprox(form=:hessian)
+    NonconvexAugLagLab.init!(H, 2, nothing)
+    # an indefinite B: sy > 0 but sBs < 0 -> the direct BFGS update divides
+    # by sBs and must be skipped (like StructuredBFGS), not applied
+    H.H = [-1.0 0.0; 0.0 1.0]
+    s = [1.0, 0.2]
+    y = [0.5, 0.5]
+    @test dot(s, y) > 0
+    @test dot(s, H.H * s) < 0
+    Bbefore = copy(H.H)
+    NonconvexAugLagLab.update!(H, s, y)
+    @test H.H == Bbefore
+    # a positive-definite B still takes the update
+    H.H = Matrix{Float64}(I, 2, 2)
+    NonconvexAugLagLab.update!(H, s, y)
+    @test H.H != Matrix{Float64}(I, 2, 2)
+end
+
+@testitem "QuasiNewtonAlg: trust region and TRON stop at gradient convergence" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra
+    # A fixed 2I Hessian model (the exact Hessian of sum(x.^2)): the first
+    # step from [0.5, 0.5] lands exactly on the optimum and the gradient
+    # vanishes. The gradient check must stop the solver after that single
+    # accepted step (without it the next iteration only stops on the
+    # zero-step guard).
+    struct TwiceIdentityApprox <: AbstractHessianApprox end
+    NonconvexAugLagLab.init!(::TwiceIdentityApprox, n, x0) = TwiceIdentityApprox()
+    NonconvexAugLagLab.update!(H::TwiceIdentityApprox, s, y) = H
+    NonconvexAugLagLab.apply!(Hv, ::TwiceIdentityApprox, v) = (Hv .= 2 .* v; Hv)
+    NonconvexAugLagLab.solve!(d, ::TwiceIdentityApprox, g) = (d .= g ./ 2; d)
+    m = Model(x -> sum(x .^ 2))
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    rtr = optimize(m, QuasiNewtonAlg(TwiceIdentityApprox(); linesearch=:trustregion), [0.5, 0.5])
+    @test norm(rtr.minimizer) < 1e-8
+    @test rtr.iter == 1
+    rtron = optimize(m, QuasiNewtonAlg(TwiceIdentityApprox(); linesearch=:tron), [0.5, 0.5])
+    @test norm(rtron.minimizer) < 1e-8
+    @test rtron.iter == 1
 end
 
 @testitem "QuasiNewtonAlg: TRON projected trust region" begin
