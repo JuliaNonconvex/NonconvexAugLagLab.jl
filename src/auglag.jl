@@ -53,10 +53,12 @@ end
 function RelaxConstraintSelection(; eq=true, ineq=true, sd=true, labels=nothing)
     lbls = if labels === nothing
         nothing
-    elseif labels isa Symbol
-        Set([labels])
-    else
+    elseif labels isa Union{AbstractVector,Tuple,AbstractSet}
         Set(Symbol.(labels))
+    else
+        # a single label (Symbol or String): Symbol.(x) would broadcast
+        # (and a bare Set(x) cannot iterate a scalar), so wrap it first
+        Set([Symbol(labels)])
     end
     return RelaxConstraintSelection(eq, ineq, sd, lbls)
 end
@@ -89,6 +91,9 @@ end
 function _relaxed_indices(sel, fs::VectorOfFunctions, labels::Union{Nothing,Set{Symbol}})
     idx = _relaxed_indices(sel, length(fs.fs))
     labels === nothing && return idx
+    # copy before push!/sort!: `sel` may be the user's array (must not be
+    # mutated) or an AbstractRange (cannot be pushed to)
+    idx = collect(idx)
     for (i, c) in enumerate(fs.fs)
         if !(i in idx) && !isempty(intersect(_flags(c), labels))
             push!(idx, i)
@@ -578,40 +583,50 @@ end
 # ------------------------------------------------------------------
 # Anderson mixing on the equality multiplier fixed-point update: given the
 # last `m` iterates yⱼ with residuals Rⱼ = G(yⱼ) − yⱼ (G the multiplier
-# update map), solve the least-squares mixing ΣθⱼRⱼ with Σθⱼ = 1 and take
-# y ← Σθⱼ(yⱼ + Rⱼ). Cheap (m × m), and typically halves the outer
-# iteration count.
+# update map), pick the simplex weights θ (Σθⱼ = 1) minimizing the norm of
+# the mixed residual ΣθⱼRⱼ and take y ← Σθⱼ(yⱼ + Rⱼ). Cheap (m × m), and
+# typically halves the outer iteration count.
 function _anderson_mix(history, y_new)
     m = length(history)
     m == 0 && return y_new
     Rs = [h[2] for h in history]
     Ys = [h[1] for h in history]
-    if m == 1
-        return y_new
-    end
+    m == 1 && return y_new
     R = Rs[end]
-    θ = ones(m) ./ m
+    # With θₘ = 1 − Σ_{j<m} θⱼ the mixed residual is R + Σ_{j<m} θⱼ (Rⱼ − R),
+    # so the normal equations of min ‖ΣθⱼRⱼ‖² over the simplex are
+    #   G θ = b,  Gᵢⱼ = ⟨Rᵢ − R, Rⱼ − R⟩,  bᵢ = −⟨Rᵢ − R, R⟩.
     A = [Rs[j] .- R for j in 1:(m - 1)]
-    b = R .- Rs[end]
-    if length(A) >= 1
-        G = zeros(m - 1, m - 1)
-        rhs = zeros(m - 1)
-        for i in 1:(m - 1), j in 1:(m - 1)
-            G[i, j] = dot(A[i], A[j])
-        end
-        for i in 1:(m - 1)
-            rhs[i] = dot(A[i], b)
-        end
-        θf = G \ rhs
-        θf = clamp.(θf, -2.0, 2.0)
-        θ[1:(m - 1)] .= θf
-        θ[m] = 1 - sum(θf)
+    G = zeros(m - 1, m - 1)
+    rhs = zeros(m - 1)
+    for i in 1:(m - 1), j in 1:(m - 1)
+        G[i, j] = dot(A[i], A[j])
     end
+    for i in 1:(m - 1)
+        rhs[i] = -dot(A[i], R)
+    end
+    θf = try
+        clamp.(G \ rhs, -2.0, 2.0)
+    catch
+        # singular normal equations (e.g. identical residuals): keep the
+        # unaccelerated update
+        zeros(m - 1)
+    end
+    θ = ones(m) ./ m
+    θ[1:(m - 1)] .= θf
+    θ[m] = 1 - sum(θf)
     out = zeros(length(y_new))
     for j in 1:m
         out .+= θ[j] .* (Ys[j] .+ Rs[j])
     end
     return out
+end
+
+# Fallback for a rejected outer iterate: the previous trajectory point, or
+# the run's initial point when the very first iteration fails (the trajectory
+# is still empty then and `trajectory[end]` would throw a BoundsError).
+function _failed_iterate_fallback(trajectory, x_init)
+    isempty(trajectory) ? copy(x_init) : copy(trajectory[end][1])
 end
 
 function optimize!(workspace::AugLagWorkspace)
@@ -629,6 +644,8 @@ function optimize!(workspace::AugLagWorkspace)
     if warm_continue && workspace.state !== nothing && workspace.state.n == length(x)
         x = copy(workspace.state.x)
     end
+    # The starting point of this run, for the first-iteration failure fallback.
+    x_init = copy(x)
     eq_rel, ineq_rel, sd_rel, submodel0 = _subproblem(model, relaxed, options.weights)
     # Objective scale: minimize f/s_f so the AL objective terms are O(1).
     # (The PBM barrier parameters are calibrated to the unscaled objective,
@@ -876,7 +893,7 @@ function optimize!(workspace::AugLagWorkspace)
         if !ok
             # The subproblem blew up (typical of an over-aggressive penalty):
             # discard the iterate, escalate the penalty and retry.
-            x = copy(trajectory[end][1])
+            x = _failed_iterate_fallback(trajectory, x_init)
             vnorm = vprev
             f_new = fx
         end

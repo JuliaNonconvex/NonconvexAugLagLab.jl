@@ -104,19 +104,37 @@ function solve!(d, H::LBFGSApprox, g)
     return d
 end
 
-# Apply the direct approximation: B v (two-loop recursion with the H0 operator).
+# Apply the direct approximation: the Hessian matvec B v via the N&W (7.24)
+# compact representation. With S = [s₁ … sₘ], Y = [y₁ … yₘ] and SᵀY = L + D
+# (L strictly lower triangular, D = diag(sᵢᵀyᵢ)):
+#   B v = B0 v − [B0 S  Y] M⁻¹ [Sᵀ B0 v; Yᵀ v],  M = [SᵀB0S  L; Lᵀ  −D].
+# (The inverse approximation is `solve!`; `apply!` must give the direct
+# product or trust-region/damping quantities come out wrong.)
 function apply!(Bv, H::LBFGSApprox, v)
     m = length(H.s)
-    resize!(H.α, m)
-    q = copy(v)
-    for i in m:-1:1
-        H.α[i] = H.ρ[i] * dot(H.s[i], q)
-        q .-= H.α[i] .* H.y[i]
-    end
-    apply!(Bv, H.H0, q)
+    m == 0 && return apply!(Bv, H.H0, v)
+    B0v = similar(v, Float64)
+    apply!(B0v, H.H0, v)
+    B0S = [apply!(similar(v, Float64), H.H0, s) for s in H.s]
+    # rhs = [Sᵀ B0 v; Yᵀ v]
+    rhs = Vector{Float64}(undef, 2m)
     for i in 1:m
-        β = H.ρ[i] * dot(H.y[i], Bv)
-        Bv .+= (H.α[i] - β) .* H.s[i]
+        rhs[i] = dot(H.s[i], B0v)
+        rhs[m + i] = dot(H.y[i], v)
+    end
+    # M = [SᵀB0S  L; Lᵀ  −D]
+    M = Matrix{Float64}(undef, 2m, 2m)
+    for j in 1:m, i in 1:m
+        M[i, j] = dot(H.s[i], B0S[j])
+        M[i, m + j] = i > j ? dot(H.s[i], H.y[j]) : 0.0
+        M[m + i, j] = j > i ? dot(H.s[j], H.y[i]) : 0.0
+        M[m + i, m + j] = i == j ? -dot(H.s[i], H.y[i]) : 0.0
+    end
+    w = M \ rhs
+    Bv .= B0v
+    for i in 1:m
+        Bv .-= w[i] .* B0S[i]
+        Bv .-= w[m + i] .* H.y[i]
     end
     return Bv
 end
@@ -162,20 +180,28 @@ function update!(H::DenseBFGSApprox, s, y)
     B = H.H
     sy = dot(s, y)
     sy > 0 || return H
+    Bs = B * s
+    sBs = dot(s, Bs)
+    sBs > 0 || return H
     if H.form === :inverse
         # inverse BFGS update
         ρ = inv(sy)
-        Bs = B * s
         H.H .= (I - ρ .* s .* y') * B * (I - ρ .* y .* s') .+ ρ .* s .* s'
     else
-        Bs = B * s
-        sBs = dot(s, Bs)
         H.H .= B .+ (y .* y') ./ sy .- (Bs .* Bs') ./ sBs
     end
     return H
 end
 
-apply!(Bv, H::DenseBFGSApprox, v) = mul!(Bv, H.H, v)
+function apply!(Bv, H::DenseBFGSApprox, v)
+    if H.form === :inverse
+        # the stored matrix is B⁻¹, so the direct matvec must solve with it
+        copyto!(Bv, v)
+        return ldiv!(lu(H.H), Bv)
+    else
+        return mul!(Bv, H.H, v)
+    end
+end
 
 function solve!(d, H::DenseBFGSApprox, g)
     if H.form === :inverse
@@ -475,6 +501,7 @@ function optimize!(workspace::QuasiNewtonWorkspace)
                 x .= xnew
                 fx = fnew
                 g .= gradfun(x)
+                norm(g, Inf) < optimizer.tol && break
                 Δ = min(10Δ, optimizer.Δ0 * 10)
                 τ = max(τ / 2, 1e-10)
             else
@@ -512,6 +539,7 @@ function optimize!(workspace::QuasiNewtonWorkspace)
                 x .= xnew
                 fx = fnew
                 g .= gradfun(x)
+                norm(g, Inf) < optimizer.tol && break
                 Δ = min(10Δ, optimizer.Δ0 * 10)
                 τ = max(τ / 2, 1e-10)
             elseif optimizer.soc
@@ -531,6 +559,7 @@ function optimize!(workspace::QuasiNewtonWorkspace)
                     x .= xnsoc
                     fx = fnsoc
                     g .= gradfun(x)
+                    norm(g, Inf) < optimizer.tol && break
                     Δ = min(10Δ, optimizer.Δ0 * 10)
                     τ = max(τ / 2, 1e-10)
                 else

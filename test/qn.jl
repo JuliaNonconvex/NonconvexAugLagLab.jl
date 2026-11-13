@@ -75,6 +75,49 @@ end
     @test norm(r.minimizer) < 1e-3
 end
 
+@testitem "QuasiNewtonAlg: L-BFGS apply! is the direct Hessian matvec" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra
+    # Fixed SPD quadratic Hessian. With A-conjugate secant pairs (y = A s,
+    # s₁ᵀAs₂ = 0) BFGS reproduces A exactly after the two updates, so the
+    # L-BFGS compact direct form, the dense :hessian matvec and A * v must
+    # all agree.
+    A = [2.0 0.5; 0.5 1.0]
+    s1 = [1.0, 0.0]
+    s2 = [1.0, -4.0]   # s2ᵀ * A * s1 = 0
+    @test dot(s2, A * s1) == 0.0
+    pairs = [(s1, A * s1), (s2, A * s2)]
+    dense = DenseBFGSApprox(form=:hessian)
+    NonconvexAugLagLab.init!(dense, 2, nothing)
+    lb = LBFGSApprox(5)
+    NonconvexAugLagLab.init!(lb, 2, nothing)
+    v = [0.7, -1.1]
+    Bv_dense = similar(v)
+    Bv_lb = similar(v)
+    for (s, y) in pairs
+        NonconvexAugLagLab.update!(dense, s, y)
+        NonconvexAugLagLab.update!(lb, s, y)
+        NonconvexAugLagLab.apply!(Bv_dense, dense, v)
+        NonconvexAugLagLab.apply!(Bv_lb, lb, v)
+        @test Bv_lb ≈ Bv_dense   # matches the dense BFGS :hessian matvec
+    end
+    @test Bv_lb ≈ A * v          # and the true Hessian product
+    # with the identity H0 the direct product differs from the inverse solve
+    d = similar(v)
+    NonconvexAugLagLab.solve!(d, lb, v)
+    @test !(d ≈ Bv_lb)
+    @test d ≈ A \ v
+    # DenseBFGS form=:inverse stores B⁻¹: apply! must solve with it, so the
+    # direct matvec still equals A v
+    dinv = DenseBFGSApprox(form=:inverse)
+    NonconvexAugLagLab.init!(dinv, 2, nothing)
+    for (s, y) in pairs
+        NonconvexAugLagLab.update!(dinv, s, y)
+    end
+    Binv_v = similar(v)
+    NonconvexAugLagLab.apply!(Binv_v, dinv, v)
+    @test Binv_v ≈ A * v
+end
+
 @testitem "QuasiNewtonAlg: TRON projected trust region" begin
     using NonconvexAugLagLab, Test, LinearAlgebra
     # Box-constrained quadratic with the optimum on a bound.
