@@ -209,7 +209,6 @@ end
   on the measured benchmarks (kept as safety nets).
 - `sub_tol_schedule`: `:fixed` (the default `1e-8`) or `:eta2` (adaptive,
   clamped to `[1e-10, 1e-8]`).
- (Default h0 to :identity; document the re-measured toggle verdicts)
 - `scaling`: normalize the relaxed constraints by their gradient magnitudes
   and the objective by its initial magnitude (Curtis–Jiang–Robinson style
   scaling), so the penalty applies to balanced, unit-scaled constraint
