@@ -771,6 +771,9 @@ function optimize!(workspace::AugLagWorkspace)
         end
         qn_base_maxiter = get(qn_opts, :max_iter, 800)
         qn_linesearch = get(qn_opts, :linesearch, :trustregion)
+        qn_reset = get(qn_opts, :reset, false)
+        qn_nonmonotone = get(qn_opts, :nonmonotone, false)
+        qn_soc = get(qn_opts, :soc, false)
         h0_op = if h0 === :penalty
             DiagonalPreconditioner(fill(1 / (1 + ρ), n + (use_elastic ? m_eq : 0)))
         elseif h0 === :identity
@@ -867,9 +870,11 @@ function optimize!(workspace::AugLagWorkspace)
                     max_iter=qn_base_maxiter,
                     tol=sub_tol,
                     linesearch=qn_linesearch,
-                    reset=false,
+                    reset=qn_reset,
                     levenberg=levenberg,
                     tron_cauchy=tron_cauchy,
+                    nonmonotone=qn_nonmonotone,
+                    soc=qn_soc,
                 ),
                 x_sub,
             )
@@ -883,9 +888,11 @@ function optimize!(workspace::AugLagWorkspace)
                         max_iter=4 * qn_base_maxiter,
                         tol=10 * sub_tol,
                         linesearch=qn_linesearch,
-                        reset=false,
+                        reset=qn_reset,
                         levenberg=levenberg,
                         tron_cauchy=tron_cauchy,
+                        nonmonotone=qn_nonmonotone,
+                        soc=qn_soc,
                     ),
                     x_sub,
                 )
