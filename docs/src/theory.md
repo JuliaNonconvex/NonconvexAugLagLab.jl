@@ -116,11 +116,11 @@ typically halves the outer count. The depth (2) and weight clamping
 The built-in sub-solver keeps *one* L-BFGS history across the whole outer
 loop (`reset = false`): the sequence of subproblems is a homotopy in
 $\rho$, so the secant pairs of the previous subproblem are excellent
-curvature for the next one. The two-loop base operator is the
-**penalty-scaled diagonal** $H_0 = (1+\rho)^{-1} I$: the AL objective's
-curvature grows like $\rho$ on the constraint subspace, and an $H_0$ that
-shrinks with $1/(1+\rho)$ keeps the first CG steps of each subproblem on
-the right scale. The memory is a deliberate default of 50. Measured on the
+curvature for the next one. The two-loop base operator is $H_0 = I$
+(the default, re-measured on 0.2.5: slightly better TopOpt objective and
+PGLib case5 feasibility than the diagonal scaling); the **penalty-scaled
+diagonal** $H_0 = (1+\rho)^{-1} I$ remains available as `h0 = :penalty`
+and keeps the first CG steps of each subproblem on the penalty's scale. The memory is a deliberate default of 50. Measured on the
 released 0.2.5 code: a small memory (5) is comparable but never better; a
 larger memory (100) leaves the TopOpt stress design essentially unchanged
 (+0.7% objective, +47% time) but materially improves equality-heavy

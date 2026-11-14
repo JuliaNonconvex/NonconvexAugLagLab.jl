@@ -777,6 +777,9 @@ function optimize!(workspace::AugLagWorkspace)
     # warm-starts the next one; reset whenever the penalty changes scale.
     qn_base_maxiter = 800
     qn_linesearch = :trustregion
+    qn_reset = false
+    qn_nonmonotone = false
+    qn_soc = false
     qn_approx = nothing
     if sub_alg === nothing
         qn_opts = if sub_options === nothing
