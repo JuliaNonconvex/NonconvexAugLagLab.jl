@@ -120,9 +120,13 @@ curvature for the next one. The two-loop base operator is the
 **penalty-scaled diagonal** $H_0 = (1+\rho)^{-1} I$: the AL objective's
 curvature grows like $\rho$ on the constraint subspace, and an $H_0$ that
 shrinks with $1/(1+\rho)$ keeps the first CG steps of each subproblem on
-the right scale. The memory is a deliberate default of 50 — a small memory
-(5) takes the compliant-design path on the stress benchmark but ~6×
-slower, and a larger one (100) changes nothing (measured).
+the right scale. The memory is a deliberate default of 50. Measured on the
+released 0.2.5 code: a small memory (5) is comparable but never better; a
+larger memory (100) leaves the TopOpt stress design essentially unchanged
+(+0.7% objective, +47% time) but materially improves equality-heavy
+AC-OPF — on PGLib case5 the gap drops 0.12 → 0.067 and the max scaled
+violation 1.14 → 0.70 at ~5× the wall-clock. Use `memory = 100` when
+constraint feasibility dominates runtime.
 
 ### Levenberg damping and stall retry
 
