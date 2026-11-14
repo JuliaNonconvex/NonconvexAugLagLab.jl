@@ -897,8 +897,7 @@ function optimize!(workspace::AugLagWorkspace)
                 x_sub,
             )
             m1 = al_obj(r1.minimizer)
-            if stall_retry &&
-                !(isfinite(m1) && m1 < m_old - 1e-12 * max(1.0, abs(m_old)))
+            if stall_retry && !(isfinite(m1) && m1 < m_old - 1e-12 * max(1.0, abs(m_old)))
                 r2 = optimize(
                     submodel,
                     QuasiNewtonAlg(
@@ -934,10 +933,11 @@ function optimize!(workspace::AugLagWorkspace)
         if filter
             γ = 1e-4
         end
-        _filter_accept(θ, φ) = !filter || all(
-            θ <= filter_f[i] - γ * filter_v[i] || φ <= filter_v[i] - γ * filter_f[i] for
-            i in eachindex(filter_f)
-        )
+        _filter_accept(θ, φ) =
+            !filter || all(
+                θ <= filter_f[i] - γ * filter_v[i] || φ <= filter_v[i] - γ * filter_f[i] for
+                i in eachindex(filter_f)
+            )
         d = x_new .- x_sub
         α = 1.0
         accepted = false

@@ -7,6 +7,25 @@
   Julia 1.10/1.11 (users silently resolved to 0.1.2).
 - Requires Julia 1.10+.
 
+## v0.2.6
+
+- **L-BFGS base operator defaults to the identity** (`h0 = :identity`; the
+  penalty-scaled diagonal remains as `h0 = :penalty`). Re-measured on the
+  fixed 0.2.5 code: slightly better TopOpt stress objective (-0.23808 vs
+  -0.23559) and better PGLib case5 feasibility (gap 0.10 vs 0.12,
+  violation 1.02 vs 1.14) at +12% TopOpt wall-clock.
+- **New toggles for the accepted defaults** (each default `true` unless
+  noted): `filter`, `stall_retry`, `selective`, `safeguard`, `two_way`,
+  `levenberg`, plus `sub_tol_schedule = :fixed | :eta2` and
+  `tron_cauchy = false` (Lin-More Cauchy fallback for the TRON option).
+  Re-measured: removing the selective weights costs ~79% TopOpt
+  wall-clock, removing the safeguard degrades PGLib case14 (gap 0.19 ->
+  0.28), removing the Levenberg damping trades speed for quality; the
+  filter, stall retry and the two-way rho decrease are inert on the
+  measured benchmarks (kept as safety nets).
+- `sub_options` now forwards `reset`, `nonmonotone` and `soc` to the
+  built-in sub-solver.
+
 ## v0.2.5
 
 - Fix the elastic-mode filter backtrack: it evaluated the constraint

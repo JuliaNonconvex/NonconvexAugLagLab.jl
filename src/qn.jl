@@ -385,8 +385,17 @@ function QuasiNewtonAlg(
         ArgumentError("linesearch must be :backtracking, :wolfe, :trustregion or :tron")
     )
     return QuasiNewtonAlg(
-        approx, linesearch, max_iter, tol, damping, Δ0, reset, nonmonotone, soc,
-        levenberg, tron_cauchy,
+        approx,
+        linesearch,
+        max_iter,
+        tol,
+        damping,
+        Δ0,
+        reset,
+        nonmonotone,
+        soc,
+        levenberg,
+        tron_cauchy,
     )
 end
 
