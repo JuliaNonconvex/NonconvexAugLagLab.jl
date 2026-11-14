@@ -191,6 +191,21 @@ end
   steps, 0.003 vs 0.032 on 6 steps), while cold restarts end with a lighter
   objective but slightly violate the stress limit. Use it when feasibility
   or runtime dominate the continuation, not for a lower final objective.
+- `h0`: base operator of the built-in L-BFGS recursion, `:identity` (the
+  default) or `:penalty` (the diagonal `1/(1+ρ)` scaling). Re-measured on
+  0.2.5: identity gives a slightly better TopOpt stress objective
+  (−0.23808 vs −0.23559) and better PGLib case5 feasibility (gap 0.10 vs
+  0.12, violation 1.02 vs 1.14) at +12% TopOpt wall-clock.
+- `filter`, `stall_retry`, `selective`, `safeguard`, `two_way`, `levenberg`:
+  toggles for the corresponding defaults (all `true`). Re-measured on 0.2.5:
+  removing the selective weights costs ~79% TopOpt wall-clock, removing the
+  multiplier safeguard degrades PGLib case14 (gap 0.19 → 0.28), removing the
+  Levenberg damping trades ~30% TopOpt speed for a worse objective and
+  feasibility; the filter, stall retry and the two-way ρ decrease are inert
+  on the measured benchmarks (kept as safety nets).
+- `sub_tol_schedule`: `:fixed` (the default `1e-8`) or `:eta2` (adaptive,
+  clamped to `[1e-10, 1e-8]`).
+ (Default h0 to :identity; document the re-measured toggle verdicts)
 - `scaling`: normalize the relaxed constraints by their gradient magnitudes
   and the objective by its initial magnitude (Curtis–Jiang–Robinson style
   scaling), so the penalty applies to balanced, unit-scaled constraint
@@ -252,7 +267,7 @@ function AugLagOptions(;
     safeguard::Bool=true,
     two_way::Bool=true,
     levenberg::Bool=true,
-    h0::Symbol=:penalty,
+    h0::Symbol=:identity,
     sub_tol_schedule::Symbol=:fixed,
     tron_cauchy::Bool=false,
     keep_all::Bool=false,
