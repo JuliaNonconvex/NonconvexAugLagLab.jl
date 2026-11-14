@@ -191,11 +191,15 @@ end
   steps, 0.003 vs 0.032 on 6 steps), while cold restarts end with a lighter
   objective but slightly violate the stress limit. Use it when feasibility
   or runtime dominate the continuation, not for a lower final objective.
-- `h0`: base operator of the built-in L-BFGS recursion, `:identity` (the
-  default) or `:penalty` (the diagonal `1/(1+ρ)` scaling). Re-measured on
-  0.2.5: identity gives a slightly better TopOpt stress objective
-  (−0.23808 vs −0.23559) and better PGLib case5 feasibility (gap 0.10 vs
-  0.12, violation 1.02 vs 1.14) at +12% TopOpt wall-clock.
+- `h0`: base operator of the built-in L-BFGS recursion, `:penalty` (the
+  default diagonal `1/(1+ρ)` scaling) or `:identity`. Re-measured on
+  0.2.5/0.2.6: `:identity` is 12% slower on single-shot TopOpt solves for
+  a 1% better objective and better PGLib case5 feasibility (gap 0.10 vs
+  0.12, violation 1.02 vs 1.14), while on a warm 6-step SIMP continuation
+  (`warm_continue = true`) it is 9% faster but loses 21% of the final
+  objective (0.198 vs 0.163) with a 3× larger stress violation — the
+  faster variant is not close enough in accuracy there, so `:penalty`
+  stays the default.
 - `filter`, `stall_retry`, `selective`, `safeguard`, `two_way`, `levenberg`:
   toggles for the corresponding defaults (all `true`). Re-measured on 0.2.5:
   removing the selective weights costs ~79% TopOpt wall-clock, removing the
@@ -267,7 +271,7 @@ function AugLagOptions(;
     safeguard::Bool=true,
     two_way::Bool=true,
     levenberg::Bool=true,
-    h0::Symbol=:identity,
+    h0::Symbol=:penalty,
     sub_tol_schedule::Symbol=:fixed,
     tron_cauchy::Bool=false,
     keep_all::Bool=false,

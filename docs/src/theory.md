@@ -68,6 +68,9 @@ scaling, constraint groups with wildly different gradient scales need
 wildly different penalties, which is the classic source of ALM divergence
 on problems like AC-OPF (Curtis–Jiang–Robinson). The scaling uses only
 $Jv$ products (finite-difference), never a materialized Jacobian.
+Re-measured on the released 0.2.5 code: removing it leaves TopOpt unchanged
+but degrades PGLib case5 (gap 0.10 → 0.14, max scaled violation
+1.02 → 1.11).
 
 ### Matrix-free CG least-squares multiplier initialization (`lsq_multipliers = true`)
 
@@ -77,7 +80,10 @@ stationarity residual in multiplier space — by CGLS on the normal
 equations, again using only $Jv$ and $J^\top v$ products. The cost is a
 handful of constraint evaluations and the payoff is a multiplier estimate
 orders of magnitude better than zero, which removes the first many
-expensive outer iterations.
+expensive outer iterations. Re-measured on the released 0.2.5 code it is
+*inert* on the PGLib AC-OPF cases (case5 gap 0.098 vs 0.10 with it off —
+noise): the hardened outer loop reaches the same multipliers on its own.
+Kept as a cheap initialization that does no harm.
 
 ### Safeguarded multipliers and selective penalty weights
 
@@ -192,7 +198,12 @@ subproblem gives $\nabla f + \sum_i \frac{u_i}{1 + u_i g_i / c_i} \nabla g_i = 0
 so the effective multiplier is $\lambda_i = u_i/(1 + u_i g_i/c_i)$ — the
 fixed point of the update is exactly the KKT complementarity, and on the
 feasible side ($g_i < 0$) the multipliers *grow*, sharpening the barrier
-near the boundary. In [`AugLagAlg`](@ref) the PBM term applies on the
+near the boundary. Re-measured on the released 0.2.5 code the PBM mode is
+*not* suited to the TopOpt local-stress benchmark: it converges to a
+near-solid, stress-inactive design (objective +0.52 vs −0.24 for the
+classical quadratic mode) and is worse on PGLib case5 (gap 0.15 vs 0.10).
+The classical quadratic mode (`penalty = :quadratic`) remains the default;
+the PBM/mixed modes are options for their barrier-type niche. In [`AugLagAlg`](@ref) the PBM term applies on the
 feasible side while the infeasible side falls back to the classical
 quadratic term — the standard globalization of the barrier domain
 (`penalty = :pbm`, or `:mixed` for quadratic semidefinite terms).

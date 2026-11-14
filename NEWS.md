@@ -7,6 +7,16 @@
   Julia 1.10/1.11 (users silently resolved to 0.1.2).
 - Requires Julia 1.10+.
 
+## v0.2.7
+
+- **`h0` default reverts to `:penalty`** (the diagonal `1/(1+ρ)` scaling).
+  Re-measured on 0.2.6: `:identity` is 12% slower on single-shot TopOpt
+  solves for a ~1% better objective and better PGLib case5 feasibility,
+  and on a warm 6-step SIMP continuation it is 9% faster but loses 21% of
+  the final objective with a 3x larger stress violation - by the
+  faster-only-if-almost-same-accuracy rule, `:penalty` wins both settings
+  once the continuation is included.
+
 ## v0.2.6
 
 - **L-BFGS base operator defaults to the identity** (`h0 = :identity`; the
