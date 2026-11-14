@@ -1,13 +1,8 @@
 # NEWS
 
-## 0.1.4
+## 0.2.8
 
-- Fixed invalid stdlib compat bounds (`LinearAlgebra = "1.12.0 - 1"`) that
-  accidentally shipped in 0.1.3 and made the package uninstallable on
-  Julia 1.10/1.11 (users silently resolved to 0.1.2).
-- Requires Julia 1.10+.
 
-## v0.2.8
 
 - **100% test coverage** of src/ and the SDP extension: regression tests
   for every option branch (scaling, h0, sub_tol_schedule, selective,
@@ -23,7 +18,9 @@
   fallback - the update keeps the matrix positive definite - and a dead
   case in the TRON quadratic root helper).
 
-## v0.2.7
+## 0.2.7
+
+
 
 - **`h0` default reverts to `:penalty`** (the diagonal `1/(1+ρ)` scaling).
   Re-measured on 0.2.6: `:identity` is 12% slower on single-shot TopOpt
@@ -33,7 +30,9 @@
   faster-only-if-almost-same-accuracy rule, `:penalty` wins both settings
   once the continuation is included.
 
-## v0.2.6
+## 0.2.6
+
+
 
 - **L-BFGS base operator defaults to the identity** (`h0 = :identity`; the
   penalty-scaled diagonal remains as `h0 = :penalty`). Re-measured on the
@@ -52,14 +51,18 @@
 - `sub_options` now forwards `reset`, `nonmonotone` and `soc` to the
   built-in sub-solver.
 
-## v0.2.5
+## 0.2.5
+
+
 
 - Fix the elastic-mode filter backtrack: it evaluated the constraint
   violation on the slack-augmented vector, crashing any model whose
   constraint functions index the variable vector by position
   (e.g. the TopOpt SAND tutorial model).
 
-## v0.2.4
+## 0.2.4
+
+
 
 - **Label-based relaxation selection:** `RelaxConstraintSelection(labels = ...)`
   relaxes every constraint whose `flags` contain one of the given labels
@@ -69,7 +72,9 @@
   blending, first-iteration failure fallback, dense-BFGS nonpositive sᵀBs
   guard, early gradient-convergence stop in the sub-solver driver.
 
-## v0.2.3
+## 0.2.3
+
+
 
 - **TRON inner solver (`sub_options=(; linesearch=:tron)`, opt-in):** a
   projected-CG trust-region step with active-set identification on the
@@ -93,7 +98,9 @@
   mode (opt-in).
 - NonconvexIpopt compat widened to `0.7, 0.8`.
 
-## v0.2.2
+## 0.2.2
+
+
 
 - **Scaling (default on):** the relaxed constraints are normalized by their
   gradient magnitudes and the objective by its initial magnitude
@@ -110,3 +117,40 @@
   `sub_options`).
 - **Two-way penalty update** (Curtis et al.) backs the penalty down once
   feasibility is nearly attained.
+
+## 0.2.1
+
+
+- **Block semidefinite constraints** in the projected augmented
+  Lagrangian: vector-of-matrices `BlockSDConstraint`s are handled with
+  per-block projections and multipliers.
+
+## 0.2.0
+
+
+- NonconvexCore 2 with strict solver capability declarations.
+- Documentation and test coverage of all the ALM options, penalty modes and
+  quasi-Newton variants; tests migrated to TestItems with JET, Aqua and
+  formatting quality gates.
+
+## 0.1.6
+
+
+- Widened the compat bounds and adapted the code to Optim 2 and
+  IntervalArithmetic 1 APIs.
+
+## 0.1.5
+
+
+- Fixed AugLag2 equality handling, empty residuals and iteration
+  counters, with regression tests for equality rejection and unconstrained
+  models.
+
+## 0.1.4
+
+
+
+- Fixed invalid stdlib compat bounds (`LinearAlgebra = "1.12.0 - 1"`) that
+  accidentally shipped in 0.1.3 and made the package uninstallable on
+  Julia 1.10/1.11 (users silently resolved to 0.1.2).
+- Requires Julia 1.10+.
