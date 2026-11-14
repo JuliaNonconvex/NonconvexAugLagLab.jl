@@ -34,7 +34,12 @@ end
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
     # diagonal sparsity pattern: only the diagonal of the Hessian model is kept
     B = spdiagm(ones(2))
-    r = optimize(m, QuasiNewtonAlg(StructuredBFGSApprox(B)), [-1.2, 1.0]; options=nothing)
+    r = optimize(
+        m,
+        QuasiNewtonAlg(StructuredBFGSApprox(B); max_iter=5000),
+        [-1.2, 1.0];
+        options=nothing,
+    )
     @test norm(r.minimizer - [1.0, 1.0]) < 5e-2
 end
 
@@ -191,4 +196,104 @@ end
         options=AugLagOptions(sub_options=(; max_iter=200, tol=1e-6, linesearch=:tron)),
     )
     @test norm(r3.minimizer - [1.0, 1.0]) < 1e-3
+end
+
+@testitem "QuasiNewtonAlg: coverage branches" begin
+    using NonconvexAugLagLab, NonconvexCore, Test, LinearAlgebra, SparseArrays
+    const NC = NonconvexCore
+    m = Model(x -> (x[1] - 1)^2 + (x[2] - 2)^2)
+    addvar!(m, [-10.0, -10.0], [10.0, 10.0])
+    # DenseBFGSApprox form=:hessian with Powell damping off on a nonconvex
+    # objective: the secant matrix turns indefinite and solve! falls back to
+    # steepest descent.
+    mnc = Model(x -> x[1]^4 - 2 * x[1]^2)
+    addvar!(mnc, [-2.0], [2.0])
+    rnc = optimize(
+        mnc,
+        QuasiNewtonAlg(DenseBFGSApprox(form=:hessian); damping=false, max_iter=500),
+        [0.1],
+    )
+    @test abs(abs(rnc.minimizer[1]) - 1.0) < 1e-2
+    # StructuredBFGSApprox direct-Hessian update (sparse pattern).
+    r = optimize(
+        m, QuasiNewtonAlg(StructuredBFGSApprox(spdiagm(ones(2))); max_iter=500), [0.0, 0.0]
+    )
+    @test norm(r.minimizer - [1.0, 2.0]) < 1e-2
+    # StructuredBFGSApprox rejects form=:inverse on update (with a nonzero
+    # structural matrix so the curvature guards pass and the form check fires).
+    Hbad = StructuredBFGSApprox(spdiagm([1.0, 1.0]); form=:inverse)
+    @test_throws ArgumentError NonconvexAugLagLab.update!(Hbad, [1.0, 0.0], [1.0, 0.0])
+    # DenseBFGSApprox with a factorized direct Hessian.
+    r = optimize(
+        m, QuasiNewtonAlg(DenseBFGSApprox(form=:hessian); max_iter=500), [0.0, 0.0]
+    )
+    @test norm(r.minimizer - [1.0, 2.0]) < 1e-2
+    # Backtracking exhaustion returns (0, fx): every halving lands in the
+    # barrier region (f = Inf below 1), so Armijo never holds.
+    res = NonconvexAugLagLab._backtracking_linesearch(
+        x -> x[1] < 1 ? Inf : x[1]^2, [1.0], [-0.9], 1.0, [2.0]
+    )
+    @test res == (0.0, 1.0)
+    # TRON Cauchy refine, fallback only: a degenerate CG step (d = 0) makes
+    # less than half the Cauchy model decrease with B = I, so the step is
+    # replaced by the Cauchy step (the path search cannot improve on it).
+    dref = NonconvexAugLagLab._tron_cauchy_refine(
+        zeros(2), v -> 1.0 .* v, [1.0, 1.0], [0.5, 0.5], [0.0, 0.0], [1.0, 1.0], 10.0
+    )
+    @test dref == [-0.5, -0.5]
+    # ... and with B = 1.5I the projected-path search shortens the Cauchy
+    # step further (the fallback and the replace branch both fire).
+    dref2 = NonconvexAugLagLab._tron_cauchy_refine(
+        zeros(2), v -> 3.0 .* v, [1.0, 1.0], [0.5, 0.5], [0.0, 0.0], [1.0, 1.0], 10.0
+    )
+    @test norm(dref2 - [-0.375, -0.375]) < 1e-12
+    # TRON + Cauchy fallback / projected-path search.
+    m3 = Model(x -> (x[1] - 1)^2 + 2 * (x[2] - 2)^2)
+    addvar!(m3, [0.0, 0.0], [1.0, Inf])
+    r3 = optimize(
+        m3, QuasiNewtonAlg(; linesearch=:tron, tron_cauchy=true, max_iter=500), [0.1, 0.1]
+    )
+    @test norm(r3.minimizer - [1.0, 2.0]) < 1e-4
+    # Second-order corrections (rejected step, soc rescue).
+    m4 = Model(x -> x[1]^4 - 2 * x[1]^2)
+    addvar!(m4, [-2.0], [2.0])
+    r4 = optimize(
+        m4,
+        QuasiNewtonAlg(
+            NewtonTRApprox(); linesearch=:trustregion, soc=true, Δ0=10.0, max_iter=500
+        ),
+        [0.1],
+    )
+    @test abs(abs(r4.minimizer[1]) - 1.0) < 1e-2
+    # Negative curvature in TRON: exact (Newton) Hessian is indefinite near 0.
+    r5 = optimize(
+        m4, QuasiNewtonAlg(NewtonTRApprox(); linesearch=:tron, max_iter=500), [0.1]
+    )
+    @test abs(abs(r5.minimizer[1]) - 1.0) < 1e-2
+    # Steihaug CG runs >= 2 sweeps on an ill-conditioned quadratic.
+    m6 = Model(x -> x[1]^2 + 100 * x[2]^2)
+    addvar!(m6, [-10.0, -10.0], [10.0, 10.0])
+    r6 = optimize(
+        m6, QuasiNewtonAlg(; linesearch=:trustregion, tol=1e-10, max_iter=500), [1.0, 1.0]
+    )
+    @test norm(r6.minimizer) < 1e-3
+end
+
+@testitem "QuasiNewtonAlg: remaining internal branches" begin
+    using NonconvexAugLagLab, NonconvexCore, Test, LinearAlgebra, SparseArrays
+    const NC = NonconvexCore
+    # StructuredBFGSApprox solve! with a non-SPD structural matrix falls
+    # back to the steepest-descent direction.
+    d = zeros(2)
+    Hbad = StructuredBFGSApprox(spdiagm([-1.0, 1.0]))
+    NonconvexAugLagLab.solve!(d, Hbad, [1.0, 1.0])
+    @test d == [1.0, 1.0]
+    # damped secant: nonpositive sᵀBs returns y unchanged.
+    @test NonconvexAugLagLab._damped_secant([1.0], [1.0], [-1.0]) == [1.0]
+    # TRON negative curvature: a negative-definite model rides to the
+    # trust-region boundary.
+    dneg = NonconvexAugLagLab._tron_subproblem(
+        v -> -v, [1.0], [0.0], [-10.0], [10.0], 10.0, 0.0
+    )
+    @test norm(dneg) ≈ 10.0
 end

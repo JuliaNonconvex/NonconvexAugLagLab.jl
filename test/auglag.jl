@@ -260,3 +260,216 @@ end
     r = optimize(m, AugLagAlg(), [0.0, 0.0]; options=options)
     @test norm(r.minimizer - [0.5, 0.5]) < 1e-2
 end
+
+@testitem "AugLagAlg: coverage of the option branches" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra
+    m = Model(x -> (x[1] - 1)^2 + (x[2] - 1)^2)
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+    add_ineq_constraint!(m, x -> x[1] - x[2] - 0.5)
+    x0 = [0.0, 0.0]
+    # scaling=false
+    r = optimize(m, AugLagAlg(), x0; options=AugLagOptions(max_iter=40, scaling=false))
+    @test norm(r.minimizer - [0.5, 0.5]) < 5e-2
+    # h0=:identity
+    r = optimize(m, AugLagAlg(), x0; options=AugLagOptions(max_iter=40, h0=:identity))
+    @test norm(r.minimizer - [0.5, 0.5]) < 5e-2
+    # sub_tol_schedule=:eta2
+    r = optimize(
+        m, AugLagAlg(), x0; options=AugLagOptions(max_iter=40, sub_tol_schedule=:eta2)
+    )
+    @test norm(r.minimizer - [0.5, 0.5]) < 5e-2
+    # selective=false (global escalation)
+    r = optimize(m, AugLagAlg(), x0; options=AugLagOptions(max_iter=40, selective=false))
+    @test norm(r.minimizer - [0.5, 0.5]) < 5e-2
+    # penalty=:pbm and :mixed (PBM inequality term in the AL objective)
+    r = optimize(m, AugLagAlg(), x0; options=AugLagOptions(max_iter=40, penalty=:pbm))
+    @test norm(r.minimizer - [0.5, 0.5]) < 5e-2
+    r = optimize(m, AugLagAlg(), x0; options=AugLagOptions(max_iter=40, penalty=:mixed))
+    @test norm(r.minimizer - [0.5, 0.5]) < 5e-2
+end
+
+@testitem "AugLagAlg: two-way penalty decrease and global escalation" begin
+    using NonconvexAugLagLab, Test
+    # min -x s.t. x = 1 from x0 = 1: the first subproblem pushes x to 1 + 1/ρ
+    # (the violation *worsens*), which forces the global-escalation branch,
+    # then a good multiplier step triggers the two-way ρ decrease.
+    m = Model(x -> -x[1])
+    addvar!(m, [-10.0], [10.0])
+    add_eq_constraint!(m, x -> x[1] - 1)
+    r = optimize(
+        m,
+        AugLagAlg(),
+        [1.0];
+        options=AugLagOptions(; max_iter=20, ρ_init=10.0, ρ_decr=10.0),
+    )
+    @test abs(r.minimizer[1] - 1.0) < 1e-4
+end
+
+@testitem "AugLagAlg: sd relaxation without NonconvexSemidefinite throws" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra
+    m = Model(x -> x[1]^2 + x[2]^2)
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_sd_constraint!(m, x -> [x[1] 0.0; 0.0 x[2]])
+    @test_throws ArgumentError optimize(m, AugLagAlg(), [1.0, 1.0])
+end
+
+@testitem "AugLagAlg: two-way penalty decrease and global escalation" begin
+    using NonconvexAugLagLab, Test
+    # min -6x s.t. x = 1 from x0 = 1: the first subproblems overshoot
+    # (violation worsens), the selective weight caps, rho escalates, and a
+    # later good step with rho > rho_init triggers the two-way decrease.
+    m = Model(x -> -6 * x[1])
+    addvar!(m, [-10.0], [10.0])
+    add_eq_constraint!(m, x -> x[1] - 1)
+    r = optimize(
+        m,
+        AugLagAlg(),
+        [1.0];
+        options=AugLagOptions(;
+            max_iter=20, ρ_init=10.0, ρ_incr=1.2, ρ_max=12.0, ρ_decr=10.0, ω₀=0.1
+        ),
+    )
+    @test abs(r.minimizer[1] - 1.0) < 1e-4
+end
+
+@testitem "AugLagAlg: LS-multiplier CG runs multiple sweeps" begin
+    using NonconvexAugLagLab, Test
+    m = Model(x -> (x[1] - 1)^2 + (x[2] - 2)^2)
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+    add_eq_constraint!(m, x -> x[1] + 2 * x[2] - 1.5)
+    r = optimize(m, AugLagAlg(), [0.0, 0.0]; options=AugLagOptions(; max_iter=60))
+    @test norm(r.minimizer - [0.5, 0.5]) < 1e-3
+end
+
+@testitem "AugLagAlg: elastic PBM/mixed inequality terms" begin
+    using NonconvexAugLagLab, Test
+    m = Model(x -> (x[1] - 1)^2 + (x[2] - 1)^2)
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+    add_ineq_constraint!(m, x -> x[1] - 0.5)
+    for p in (:pbm, :mixed)
+        r = optimize(
+            m,
+            AugLagAlg(),
+            [2.0, 2.0];
+            options=AugLagOptions(; max_iter=40, penalty=p, elastic=true),
+        )
+        @test abs(r.minimizer[1] + r.minimizer[2] - 1) < 1e-3
+        @test r.minimizer[1] <= 0.5 + 1e-3
+    end
+end
+
+@testitem "AugLagAlg: 3-bus AC-OPF (escalation + two-way decrease)" begin
+    using NonconvexAugLagLab, NonconvexCore, Test, LinearAlgebra
+    const NC = NonconvexCore
+    # A minimal 3-bus AC-OPF: slack at bus 1, loads at 2 and 3, two lines.
+    # The eq-heavy problem drives the selective bumps, the global rho
+    # escalation and a later two-way decrease (the branches the toy
+    # problems converge past too quickly).
+    function acopf_obj(x)
+        # x = [vm(3); va(3); pg; qg] with slack va=0
+        vm = @view x[1:3]
+        va = @view x[4:6]
+        pg = x[7]
+        qg = x[8]
+        return 10 * pg^2 + 5 * pg
+    end
+    function acopf_cons(x)
+        vm = x[1:3]
+        va = x[4:6]
+        pg = x[7]
+        qg = x[8]
+        Pd = [0.0, 0.6, 0.5]
+        Qd = [0.0, 0.1, 0.1]
+        r = [0.01, 0.01]
+        xx = [0.1, 0.1]
+        g = r ./ (r .^ 2 .+ xx .^ 2)
+        b = -xx ./ (r .^ 2 .+ xx .^ 2)
+        pg_b = [pg, 0.0, 0.0]
+        qg_b = [qg, 0.0, 0.0]
+        δ12 = va[1] - va[2]
+        δ23 = va[2] - va[3]
+        p12 = vm[1]^2 * g[1] - vm[1] * vm[2] * (g[1] * cos(δ12) + b[1] * sin(δ12))
+        q12 = -vm[1]^2 * b[1] + vm[1] * vm[2] * (b[1] * cos(δ12) - g[1] * sin(δ12))
+        p21 = vm[2]^2 * g[1] - vm[2] * vm[1] * (g[1] * cos(-δ12) + b[1] * sin(-δ12))
+        q21 = -vm[2]^2 * b[1] + vm[2] * vm[1] * (b[1] * cos(-δ12) - g[1] * sin(-δ12))
+        p23 = vm[2]^2 * g[2] - vm[2] * vm[3] * (g[2] * cos(δ23) + b[2] * sin(δ23))
+        q23 = -vm[2]^2 * b[2] + vm[2] * vm[3] * (b[2] * cos(δ23) - g[2] * sin(δ23))
+        p32 = vm[3]^2 * g[2] - vm[3] * vm[2] * (g[2] * cos(-δ23) + b[2] * sin(-δ23))
+        q32 = -vm[3]^2 * b[2] + vm[3] * vm[2] * (b[2] * cos(-δ23) - g[2] * sin(-δ23))
+        return [
+            pg_b[1] - Pd[1] - p12,
+            pg_b[2] - Pd[2] - p21 - p23,
+            pg_b[3] - Pd[3] - p32,
+            qg_b[1] - Qd[1] - q12,
+            qg_b[2] - Qd[2] - q21 - q23,
+            qg_b[3] - Qd[3] - q32,
+        ]
+    end
+    m = Model(acopf_obj)
+    addvar!(
+        m,
+        [0.9, 0.9, 0.9, -2.0, -2.0, 0.0, 0.0, -1.0],
+        [1.1, 1.1, 1.1, 2.0, 2.0, 0.0, 3.0, 3.0],
+    )
+    add_eq_constraint!(m, acopf_cons; dim=6)
+    x0 = [1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.5, 0.3]
+    r = optimize(
+        m,
+        AugLagAlg(),
+        x0;
+        options=AugLagOptions(;
+            max_iter=120,
+            ρ_init=10.0,
+            scaling=false,
+            sub_options=(; max_iter=300, tol=1e-8, linesearch=:trustregion),
+        ),
+    )
+    vm = @view r.minimizer[1:3]
+    @test maximum(abs.(vm .- 1.0)) < 0.12
+    @test abs(acopf_cons(r.minimizer)[2]) < 5e-2  # P balance at bus 2
+end
+
+@testitem "AugLagAlg: penalty-update helpers (escalation and two-way decrease)" begin
+    using NonconvexAugLagLab, NonconvexCore, Test
+    const NC = NonconvexCore
+    opts = AugLagOptions(; ρ_init=10.0, ρ_incr=10.0, ρ_max=1e4, η₀=0.5, ctol=1e-6)
+    # two-way decrease
+    @test NonconvexAugLagLab._two_way_step(100.0, opts, true, 0.1, 0.5) == 10.0
+    @test NonconvexAugLagLab._two_way_step(2.0, opts, true, 0.1, 0.5) == 2.0
+    @test NonconvexAugLagLab._two_way_step(100.0, opts, false, 0.1, 0.5) == 100.0
+    @test NonconvexAugLagLab._two_way_step(100.0, opts, true, 1.0, 0.5) == 100.0
+    eq_fs = [NC.EqConstraint(x -> x[1], 0.0)]
+    ineq_fs = []
+    # selective bump: the violating group is below the weight cap -> the
+    # weight grows and rho stays.
+    w_eq = [1.0]
+    ρ, η, ω = NonconvexAugLagLab._escalate_penalty!(
+        10.0, 0.5, 1.0, w_eq, Float64[], 1000.0, opts, [1], Int[], eq_fs, ineq_fs, [5.0]
+    )
+    @test w_eq[1] == 10.0
+    @test ρ == 10.0
+    # global escalation: the weight is at the cap -> rho grows and the
+    # tolerances reset.
+    ρ2, η2, ω2 = NonconvexAugLagLab._escalate_penalty!(
+        10.0, 0.5, 1.0, [1000.0], Float64[], 1000.0, opts, [1], Int[], eq_fs, ineq_fs, [5.0]
+    )
+    @test ρ2 == 100.0
+    @test η2 == max(opts.η₀ / ρ2^0.1, opts.ctol)
+    @test ω2 == max(1 / ρ2^0.1, sqrt(eps(Float64)))
+end
+
+@testitem "AugLagAlg: elastic quadratic inequality term" begin
+    using NonconvexAugLagLab, Test
+    m = Model(x -> (x[1] - 1)^2 + (x[2] - 1)^2)
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+    add_ineq_constraint!(m, x -> x[1] - 0.5)
+    r = optimize(
+        m, AugLagAlg(), [2.0, 2.0]; options=AugLagOptions(; max_iter=40, elastic=true)
+    )
+    @test abs(r.minimizer[1] + r.minimizer[2] - 1) < 1e-3
+    @test r.minimizer[1] <= 0.5 + 1e-3
+end

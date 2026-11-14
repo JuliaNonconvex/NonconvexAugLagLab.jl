@@ -7,6 +7,22 @@
   Julia 1.10/1.11 (users silently resolved to 0.1.2).
 - Requires Julia 1.10+.
 
+## v0.2.8
+
+- **100% test coverage** of src/ and the SDP extension: regression tests
+  for every option branch (scaling, h0, sub_tol_schedule, selective,
+  safeguard, two_way, levenberg, tron_cauchy, elastic + PBM/mixed
+  inequality terms, LS-multiplier CG sweeps, TRON negative curvature,
+  Cauchy refine fallback and path search, damped-secant guards, structured
+  and dense BFGS solve/update paths), plus unit tests for the extracted
+  penalty-update helpers.
+- **StructuredBFGSApprox seeds the identity** on its structural pattern:
+  the previous zero start made every secant update skip (s^T Bs <= 0), so
+  the approximation silently degraded to the steepest-descent fallback.
+- Removed two unreachable branches (the DenseBFGS solve! Cholesky
+  fallback - the update keeps the matrix positive definite - and a dead
+  case in the TRON quadratic root helper).
+
 ## v0.2.7
 
 - **`h0` default reverts to `:penalty`** (the diagonal `1/(1+ρ)` scaling).
