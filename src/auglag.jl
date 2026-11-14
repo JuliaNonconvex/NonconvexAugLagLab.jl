@@ -216,6 +216,15 @@ mutable struct AugLagOptions{S,R,W}
     elastic::Bool
     elastic_μ::Real
     warm_continue::Bool
+    filter::Bool
+    stall_retry::Bool
+    selective::Bool
+    safeguard::Bool
+    two_way::Bool
+    levenberg::Bool
+    h0::Symbol
+    sub_tol_schedule::Symbol
+    tron_cauchy::Bool
     keep_all::Bool
 end
 function AugLagOptions(;
@@ -237,6 +246,15 @@ function AugLagOptions(;
     elastic::Bool=false,
     elastic_μ::Real=1e3,
     warm_continue::Bool=false,
+    filter::Bool=true,
+    stall_retry::Bool=true,
+    selective::Bool=true,
+    safeguard::Bool=true,
+    two_way::Bool=true,
+    levenberg::Bool=true,
+    h0::Symbol=:penalty,
+    sub_tol_schedule::Symbol=:fixed,
+    tron_cauchy::Bool=false,
     keep_all::Bool=false,
 )
     penalty in (:quadratic, :pbm, :mixed) ||
@@ -263,6 +281,15 @@ function AugLagOptions(;
         elastic,
         elastic_μ,
         warm_continue,
+        filter,
+        stall_retry,
+        selective,
+        safeguard,
+        two_way,
+        levenberg,
+        h0,
+        sub_tol_schedule,
+        tron_cauchy,
         keep_all,
     )
 end
@@ -635,6 +662,9 @@ function optimize!(workspace::AugLagWorkspace)
     @unpack relaxed, penalty, max_iter, ctol, η₀, ω₀ = options
     @unpack lsq_multipliers, scaling, keep_all, sub_options, memory = options
     @unpack elastic, elastic_μ, warm_continue = options
+    @unpack filter, stall_retry, selective, safeguard, two_way = options
+    levenberg = options.levenberg
+    @unpack h0, sub_tol_schedule, tron_cauchy = options
     obj = model.objective
     obj === nothing && throw(ArgumentError("The model has no objective."))
     ρ = Float64(options.ρ_init)
@@ -741,19 +771,29 @@ function optimize!(workspace::AugLagWorkspace)
         end
         qn_base_maxiter = get(qn_opts, :max_iter, 800)
         qn_linesearch = get(qn_opts, :linesearch, :trustregion)
+        h0_op = if h0 === :penalty
+            DiagonalPreconditioner(fill(1 / (1 + ρ), n + (use_elastic ? m_eq : 0)))
+        elseif h0 === :identity
+            IdentityPreconditioner()
+        else
+            throw(ArgumentError("h0 must be :penalty or :identity"))
+        end
         qn_approx = if warm && workspace.state.approx !== nothing
             workspace.state.approx
         else
-            LBFGSApprox(
-                memory;
-                H0=DiagonalPreconditioner(fill(1 / (1 + ρ), n + (use_elastic ? m_eq : 0))),
-            )
+            LBFGSApprox(memory; H0=h0_op)
         end
     end
     for iter in 1:max_iter
-        # Fixed subproblem tolerance (the adaptive η² schedule changed the
-        # trajectories on the stress benchmark; kept out for now).
-        sub_tol = 1e-8
+        # Subproblem tolerance: fixed (the accepted default) or adaptive
+        # (tied to the outer feasibility target η).
+        sub_tol = if sub_tol_schedule === :fixed
+            1e-8
+        elseif sub_tol_schedule === :eta2
+            clamp(η^2, 1e-10, 1e-8)
+        else
+            throw(ArgumentError("sub_tol_schedule must be :fixed or :eta2"))
+        end
         sd_terms = _sd_terms(model, sd_rel, ρ, x, Y)
         al_obj = if use_elastic
             _elastic_objective(
@@ -828,11 +868,14 @@ function optimize!(workspace::AugLagWorkspace)
                     tol=sub_tol,
                     linesearch=qn_linesearch,
                     reset=false,
+                    levenberg=levenberg,
+                    tron_cauchy=tron_cauchy,
                 ),
                 x_sub,
             )
             m1 = al_obj(r1.minimizer)
-            if !(isfinite(m1) && m1 < m_old - 1e-12 * max(1.0, abs(m_old)))
+            if stall_retry &&
+                !(isfinite(m1) && m1 < m_old - 1e-12 * max(1.0, abs(m_old)))
                 r2 = optimize(
                     submodel,
                     QuasiNewtonAlg(
@@ -841,6 +884,8 @@ function optimize!(workspace::AugLagWorkspace)
                         tol=10 * sub_tol,
                         linesearch=qn_linesearch,
                         reset=false,
+                        levenberg=levenberg,
+                        tron_cauchy=tron_cauchy,
                     ),
                     x_sub,
                 )
@@ -861,8 +906,10 @@ function optimize!(workspace::AugLagWorkspace)
         # Filter-based outer globalization: backtrack along the subsolver
         # direction until the (merit, violation) pair is not dominated by
         # any previous filter entry.
-        γ = 1e-4
-        _filter_accept(θ, φ) = all(
+        if filter
+            γ = 1e-4
+        end
+        _filter_accept(θ, φ) = !filter || all(
             θ <= filter_f[i] - γ * filter_v[i] || φ <= filter_v[i] - γ * filter_f[i] for
             i in eachindex(filter_f)
         )
@@ -881,7 +928,7 @@ function optimize!(workspace::AugLagWorkspace)
             end
             α *= 0.5
         end
-        if !accepted
+        if !accepted && filter
             # No acceptable step: record the current point in the filter and
             # keep it (the outer update will escalate).
             push!(filter_f, al_obj(x_sub))
@@ -934,12 +981,16 @@ function optimize!(workspace::AugLagWorkspace)
                 off = 0
                 for k in eachindex(eq_rel)
                     mk = length(y[k])
-                    y[k] .= clamp.(y_mixed[(off + 1):(off + mk)], -1e8, 1e8)
+                    y[k] .= if safeguard
+                        clamp.(y_mixed[(off + 1):(off + mk)], -1e8, 1e8)
+                    else
+                        y_mixed[(off + 1):(off + mk)]
+                    end
                     off += mk
                 end
             end
             for k in eachindex(eq_rel)
-                clamp!(y[k], -1e8, 1e8)
+                safeguard && clamp!(y[k], -1e8, 1e8)
             end
             k = 1
             for i in eachindex(ineq_rel)
@@ -952,7 +1003,7 @@ function optimize!(workspace::AugLagWorkspace)
                 else
                     λ[k] .= max.(λ[k] .+ (ρ * w) .* g, 0.0)
                 end
-                clamp!(λ[k], 0.0, 1e8)
+                safeguard && clamp!(λ[k], 0.0, 1e8)
                 k += 1
             end
             _sd_multiplier_update!(model, sd_rel, ρ, x, Y)
@@ -961,25 +1012,27 @@ function optimize!(workspace::AugLagWorkspace)
             # Two-way update (Curtis, Jiang & Robinson): once feasibility is
             # nearly attained, back the penalty down so the subproblems stay
             # well conditioned.
-            if vnorm <= η && ρ > options.ρ_init
+            if two_way && vnorm <= η && ρ > options.ρ_init
                 ρ = max(ρ / options.ρ_decr, options.ρ_init)
             end
         else
             # Selective penalty update: escalate only the most-violated
             # constraint groups instead of the global penalty.
             bumped = false
-            for k in eachindex(eq_rel)
-                vk = norm(_vecval(eq_fs[k](x)), Inf)
-                if vk > η && w_eq[k] < w_max
-                    w_eq[k] = min(w_eq[k] * options.ρ_incr, w_max)
-                    bumped = true
+            if selective
+                for k in eachindex(eq_rel)
+                    vk = norm(_vecval(eq_fs[k](x)), Inf)
+                    if vk > η && w_eq[k] < w_max
+                        w_eq[k] = min(w_eq[k] * options.ρ_incr, w_max)
+                        bumped = true
+                    end
                 end
-            end
-            for k in eachindex(ineq_rel)
-                vk = norm(max.(_vecval(ineq_fs[k](x)), 0.0), Inf)
-                if vk > η && w_ineq[k] < w_max
-                    w_ineq[k] = min(w_ineq[k] * options.ρ_incr, w_max)
-                    bumped = true
+                for k in eachindex(ineq_rel)
+                    vk = norm(max.(_vecval(ineq_fs[k](x)), 0.0), Inf)
+                    if vk > η && w_ineq[k] < w_max
+                        w_ineq[k] = min(w_ineq[k] * options.ρ_incr, w_max)
+                        bumped = true
+                    end
                 end
             end
             if !bumped
