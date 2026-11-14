@@ -170,12 +170,12 @@ previous run's final iterate, multipliers (rescaled to the new constraint
 scales), per-group weights and the L-BFGS curvature object — exactly the
 state a continuation scheme needs. $\rho$, $\eta$, $\omega$, the filter and
 the Anderson history re-initialize from the new options, and a structure
-mismatch falls back to a cold start. Measured on the TopOpt local-stress
-SIMP continuation: a coarse 3-step schedule trades a better final design
-(~8%) for comparable wall-clock, while a fine 6-step schedule
-($p = 1.0, 1.5, \dots, 3.5$) is both 21% faster and better (obj 0.2086 vs
-0.2130) than cold restarts — the carried state stays relevant when the
-parameter change between solves is small.
+mismatch falls back to a cold start. Measured on the released 0.2.5 code (TopOpt
+local-stress SIMP continuation): warm continuation is consistently faster
+than cold restarts (26% on a coarse 3-step schedule, 10% on a fine 6-step
+one) and keeps the design at the stress threshold (violation 0.0 vs 0.005
+on 3 steps, 0.003 vs 0.032 on 6 steps), while cold restarts end with a
+lighter objective but slightly violate the stress limit.
 
 ## The penalty-barrier-multiplier method (PBM)
 

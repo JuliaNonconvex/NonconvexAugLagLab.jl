@@ -184,12 +184,13 @@ end
   continuation, where the model or the hyper-parameters change between
   solves); the multipliers are rescaled to the new constraint scales, while
   `ρ`, `η`, `ω`, the filter and the Anderson history are re-initialized from
-  the new options. This pays off in continuation settings where the
-  parameter changes between solves are *small*: on the TopOpt local-stress
-  benchmark, a fine 6-step SIMP schedule (`p = 1.0, 1.5, ..., 3.5`) ended
-  21% faster and with a better design (obj 0.2086 vs 0.2130) than cold
-  restarts, whereas a coarse 3-step schedule only traded a better design
-  (~8%) for comparable-or-higher wall-clock.
+  the new options. Measured on the released 0.2.5 code (TopOpt local-stress
+  SIMP continuation): warm continuation is consistently *faster* than cold
+  restarts (26% on a coarse 3-step schedule, 10% on a fine 6-step one) and
+  keeps the design at the stress threshold (violation 0.0 vs 0.005 on 3
+  steps, 0.003 vs 0.032 on 6 steps), while cold restarts end with a lighter
+  objective but slightly violate the stress limit. Use it when feasibility
+  or runtime dominate the continuation, not for a lower final objective.
 - `scaling`: normalize the relaxed constraints by their gradient magnitudes
   and the objective by its initial magnitude (Curtis–Jiang–Robinson style
   scaling), so the penalty applies to balanced, unit-scaled constraint
