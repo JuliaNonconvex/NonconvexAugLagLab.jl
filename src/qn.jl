@@ -347,6 +347,8 @@ struct QuasiNewtonAlg{A<:AbstractHessianApprox} <: AbstractOptimizer
     reset::Bool
     nonmonotone::Bool
     soc::Bool
+    levenberg::Bool
+    tron_cauchy::Bool
 end
 # The quasi-Newton driver solves smooth box-constrained (possibly unbounded)
 # problems; it handles no other constraint kinds.
@@ -376,12 +378,24 @@ function QuasiNewtonAlg(
     reset::Bool=true,
     nonmonotone::Bool=false,
     soc::Bool=false,
+    levenberg::Bool=true,
+    tron_cauchy::Bool=false,
 )
     linesearch in (:backtracking, :wolfe, :trustregion, :tron) || throw(
         ArgumentError("linesearch must be :backtracking, :wolfe, :trustregion or :tron")
     )
     return QuasiNewtonAlg(
-        approx, linesearch, max_iter, tol, damping, Δ0, reset, nonmonotone, soc
+        approx,
+        linesearch,
+        max_iter,
+        tol,
+        damping,
+        Δ0,
+        reset,
+        nonmonotone,
+        soc,
+        levenberg,
+        tron_cauchy,
     )
 end
 
@@ -475,7 +489,7 @@ function optimize!(workspace::QuasiNewtonWorkspace)
     # out immediately, never hold a reference across another gradient call.
     g = copy(gradfun(x))
     Δ = optimizer.Δ0
-    τ = 1e-8
+    τ = optimizer.levenberg ? 1e-8 : 0.0
     merits = Float64[]
     M = 5
     for iter in 1:optimizer.max_iter
@@ -485,6 +499,28 @@ function optimize!(workspace::QuasiNewtonWorkspace)
             # TRON: projected-CG trust-region step with active-set tracking.
             d = _tron_subproblem(v -> _hessmatvec(approx, v), g, x, lb, ub, Δ, τ)
             d = _project(x, d, lb, ub)
+            if optimizer.tron_cauchy
+                # Lin-Moré safeguard: the accepted step must make at least
+                # half the projected-Cauchy model decrease; otherwise fall
+                # back to the Cauchy step, then try shorter steps along the
+                # projected path.
+                modeldec(dd) = -(dot(g, dd) + dot(dd, _hessmatvec(approx, dd)) / 2)
+                dC = _box_cauchy(g, x, lb, ub, Δ)
+                mC = modeldec(dC)
+                mCG = modeldec(d)
+                if mCG < 0.5 * mC
+                    d = dC
+                    mCG = mC
+                end
+                for α in (0.75, 0.5, 0.25)
+                    dα = _project(x, α .* d, lb, ub)
+                    mα = modeldec(dα)
+                    if mα > mCG
+                        d = dα
+                        mCG = mα
+                    end
+                end
+            end
             norm(d) < 1e-12 && break
             xnew = x .+ d
             fnew = fobj(xnew)
@@ -503,10 +539,10 @@ function optimize!(workspace::QuasiNewtonWorkspace)
                 g .= gradfun(x)
                 norm(g, Inf) < optimizer.tol && break
                 Δ = min(10Δ, optimizer.Δ0 * 10)
-                τ = max(τ / 2, 1e-10)
+                τ = optimizer.levenberg ? max(τ / 2, 1e-10) : 0.0
             else
                 Δ = max(Δ / 2, 1e-10)
-                τ = min(τ * 2, 1e4)
+                τ = optimizer.levenberg ? min(τ * 2, 1e4) : 0.0
             end
             continue
         end
@@ -541,7 +577,7 @@ function optimize!(workspace::QuasiNewtonWorkspace)
                 g .= gradfun(x)
                 norm(g, Inf) < optimizer.tol && break
                 Δ = min(10Δ, optimizer.Δ0 * 10)
-                τ = max(τ / 2, 1e-10)
+                τ = optimizer.levenberg ? max(τ / 2, 1e-10) : 0.0
             elseif optimizer.soc
                 # Second-order correction (Ipopt, opt-in): re-solve the model
                 # with the gradient evaluated at the rejected trial point.
@@ -561,14 +597,14 @@ function optimize!(workspace::QuasiNewtonWorkspace)
                     g .= gradfun(x)
                     norm(g, Inf) < optimizer.tol && break
                     Δ = min(10Δ, optimizer.Δ0 * 10)
-                    τ = max(τ / 2, 1e-10)
+                    τ = optimizer.levenberg ? max(τ / 2, 1e-10) : 0.0
                 else
                     Δ = max(Δ / 2, 1e-10)
-                    τ = min(τ * 2, 1e4)
+                    τ = optimizer.levenberg ? min(τ * 2, 1e4) : 0.0
                 end
             else
                 Δ = max(Δ / 2, 1e-10)
-                τ = min(τ * 2, 1e4)
+                τ = optimizer.levenberg ? min(τ * 2, 1e4) : 0.0
             end
             continue
         end
@@ -603,6 +639,26 @@ function optimize!(workspace::QuasiNewtonWorkspace)
         nothing,
         counter[],
     )
+end
+
+# Projected Cauchy point of the bounded trust-region subproblem (the
+# steepest-descent step clipped to the box and the radius; Conn-Gould-Toint
+# §9). Used by TRON's optional fallback.
+function _box_cauchy(g, x, lb, ub, Δ)
+    n = length(g)
+    gp = copy(g)
+    for i in 1:n
+        (x[i] <= lb[i] && g[i] > 0) && (gp[i] = 0.0)
+        (x[i] >= ub[i] && g[i] < 0) && (gp[i] = 0.0)
+    end
+    nrm = norm(gp)
+    nrm < 1e-14 && return zeros(n)
+    τ = min(1.0, Δ / nrm)
+    d = similar(x)
+    for i in 1:n
+        d[i] = clamp(x[i] - τ * gp[i], lb[i], ub[i]) - x[i]
+    end
+    return d
 end
 
 # TRON (Lin & Moré 1999): projected conjugate gradients on the free-variable
