@@ -146,9 +146,13 @@ can be solved by **TRON** (Lin & Moré 1999): projected conjugate gradients
 on the free-variable subspace with active-set identification — a variable
 that hits a bound mid-sweep is fixed for the rest of the sweep, negative
 curvature rides to the trust-region boundary, and the step respects both
-the bounds and the radius at every CG iterate. On the TopOpt local-stress
-benchmark it is ~32% faster than the default; on Rosetta AC-OPF it reaches
-better feasibility but a worse objective, so it stays opt-in.
+the bounds and the radius at every CG iterate. Measured on the released
+0.2.5 code (after the L-BFGS matvec fix): on the TopOpt local-stress quick
+config it is 27% slower with a 1.8% worse objective; on PGLib case5 it
+improves the gap (0.12 → 0.095) and the max scaled violation (1.14 → 0.95)
+at comparable time, and on case14 it slightly improves feasibility
+(0.0144 → 0.013). It stays opt-in for problems where constraint
+feasibility dominates TopOpt-style speed.
 
 ### Elastic mode (`elastic = true`, *opt-in*)
 
