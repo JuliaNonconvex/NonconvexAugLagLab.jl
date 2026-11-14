@@ -120,9 +120,13 @@ curvature for the next one. The two-loop base operator is the
 **penalty-scaled diagonal** $H_0 = (1+\rho)^{-1} I$: the AL objective's
 curvature grows like $\rho$ on the constraint subspace, and an $H_0$ that
 shrinks with $1/(1+\rho)$ keeps the first CG steps of each subproblem on
-the right scale. The memory is a deliberate default of 50 — a small memory
-(5) takes the compliant-design path on the stress benchmark but ~6×
-slower, and a larger one (100) changes nothing (measured).
+the right scale. The memory is a deliberate default of 50. Measured on the
+released 0.2.5 code: a small memory (5) is comparable but never better; a
+larger memory (100) leaves the TopOpt stress design essentially unchanged
+(+0.7% objective, +47% time) but materially improves equality-heavy
+AC-OPF — on PGLib case5 the gap drops 0.12 → 0.067 and the max scaled
+violation 1.14 → 0.70 at ~5× the wall-clock. Use `memory = 100` when
+constraint feasibility dominates runtime.
 
 ### Levenberg damping and stall retry
 
@@ -142,9 +146,13 @@ can be solved by **TRON** (Lin & Moré 1999): projected conjugate gradients
 on the free-variable subspace with active-set identification — a variable
 that hits a bound mid-sweep is fixed for the rest of the sweep, negative
 curvature rides to the trust-region boundary, and the step respects both
-the bounds and the radius at every CG iterate. On the TopOpt local-stress
-benchmark it is ~32% faster than the default; on Rosetta AC-OPF it reaches
-better feasibility but a worse objective, so it stays opt-in.
+the bounds and the radius at every CG iterate. Measured on the released
+0.2.5 code (after the L-BFGS matvec fix): on the TopOpt local-stress quick
+config it is 27% slower with a 1.8% worse objective; on PGLib case5 it
+improves the gap (0.12 → 0.095) and the max scaled violation (1.14 → 0.95)
+at comparable time, and on case14 it slightly improves feasibility
+(0.0144 → 0.013). It stays opt-in for problems where constraint
+feasibility dominates TopOpt-style speed.
 
 ### Elastic mode (`elastic = true`, *opt-in*)
 
@@ -162,12 +170,12 @@ previous run's final iterate, multipliers (rescaled to the new constraint
 scales), per-group weights and the L-BFGS curvature object — exactly the
 state a continuation scheme needs. $\rho$, $\eta$, $\omega$, the filter and
 the Anderson history re-initialize from the new options, and a structure
-mismatch falls back to a cold start. Measured on the TopOpt local-stress
-SIMP continuation: a coarse 3-step schedule trades a better final design
-(~8%) for comparable wall-clock, while a fine 6-step schedule
-($p = 1.0, 1.5, \dots, 3.5$) is both 21% faster and better (obj 0.2086 vs
-0.2130) than cold restarts — the carried state stays relevant when the
-parameter change between solves is small.
+mismatch falls back to a cold start. Measured on the released 0.2.5 code (TopOpt
+local-stress SIMP continuation): warm continuation is consistently faster
+than cold restarts (26% on a coarse 3-step schedule, 10% on a fine 6-step
+one) and keeps the design at the stress threshold (violation 0.0 vs 0.005
+on 3 steps, 0.003 vs 0.032 on 6 steps), while cold restarts end with a
+lighter objective but slightly violate the stress limit.
 
 ## The penalty-barrier-multiplier method (PBM)
 
