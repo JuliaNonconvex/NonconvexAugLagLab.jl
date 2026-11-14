@@ -193,9 +193,13 @@ end
   or runtime dominate the continuation, not for a lower final objective.
 - `h0`: base operator of the built-in L-BFGS recursion, `:identity` (the
   default) or `:penalty` (the diagonal `1/(1+ρ)` scaling). Re-measured on
-  0.2.5: identity gives a slightly better TopOpt stress objective
-  (−0.23808 vs −0.23559) and better PGLib case5 feasibility (gap 0.10 vs
-  0.12, violation 1.02 vs 1.14) at +12% TopOpt wall-clock.
+  0.2.5: on single-shot solves identity gives a slightly better TopOpt
+  stress objective (−0.23808 vs −0.23559) and better PGLib case5
+  feasibility (gap 0.10 vs 0.12) at +12% TopOpt wall-clock. On a warm
+  6-step SIMP continuation (`warm_continue = true`) the picture flips:
+  `:penalty` keeps the final design 21% better (obj 0.163 vs 0.198) and
+  the stress violation 3× smaller (0.0031 vs 0.0099) at ~9% extra time —
+  pair continuations with `h0 = :penalty`.
 - `filter`, `stall_retry`, `selective`, `safeguard`, `two_way`, `levenberg`:
   toggles for the corresponding defaults (all `true`). Re-measured on 0.2.5:
   removing the selective weights costs ~79% TopOpt wall-clock, removing the
