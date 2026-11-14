@@ -676,6 +676,49 @@ function _failed_iterate_fallback(trajectory, x_init)
     return isempty(trajectory) ? copy(x_init) : copy(trajectory[end][1])
 end
 
+# Two-way penalty decrease (Curtis-Gould-Jiang-Robinson): once feasibility
+# is attained with an escalated penalty, back rho down toward rho_init so
+# the subproblems stay well conditioned. The no-op case (feasibility
+# reached without an escalated penalty, or the two-way update disabled)
+# returns rho unchanged.
+function _two_way_step(ρ, options, two_way, vnorm, η)
+    if two_way && vnorm <= η && ρ > options.ρ_init
+        return max(ρ / options.ρ_decr, options.ρ_init)
+    end
+    return ρ
+end
+
+# Feasibility-driven penalty update on a bad step: escalate the most
+# violated constraint groups (selective weights, when enabled) or the
+# global penalty when no single group stands out.
+function _escalate_penalty!(
+    ρ, η, ω, w_eq, w_ineq, w_max, options, eq_rel, ineq_rel, eq_fs, ineq_fs, x
+)
+    bumped = false
+    if options.selective
+        for k in eachindex(eq_rel)
+            vk = norm(_vecval(eq_fs[k](x)), Inf)
+            if vk > η && w_eq[k] < w_max
+                w_eq[k] = min(w_eq[k] * options.ρ_incr, w_max)
+                bumped = true
+            end
+        end
+        for k in eachindex(ineq_rel)
+            vk = norm(max.(_vecval(ineq_fs[k](x)), 0.0), Inf)
+            if vk > η && w_ineq[k] < w_max
+                w_ineq[k] = min(w_ineq[k] * options.ρ_incr, w_max)
+                bumped = true
+            end
+        end
+    end
+    if !bumped
+        ρ = min(options.ρ_max, ρ * options.ρ_incr)
+        η = max(options.η₀ / ρ^0.1, options.ctol)
+        ω = max(1 / ρ^0.1, sqrt(eps(Float64)))
+    end
+    return ρ, η, ω
+end
+
 function optimize!(workspace::AugLagWorkspace)
     @unpack model, x0, options, sub_alg = workspace
     @unpack relaxed, penalty, max_iter, ctol, η₀, ω₀ = options
@@ -1041,34 +1084,13 @@ function optimize!(workspace::AugLagWorkspace)
             # Two-way update (Curtis, Jiang & Robinson): once feasibility is
             # nearly attained, back the penalty down so the subproblems stay
             # well conditioned.
-            if two_way && vnorm <= η && ρ > options.ρ_init
-                ρ = max(ρ / options.ρ_decr, options.ρ_init)
-            end
+            ρ = _two_way_step(ρ, options, two_way, vnorm, η)
         else
             # Selective penalty update: escalate only the most-violated
             # constraint groups instead of the global penalty.
-            bumped = false
-            if selective
-                for k in eachindex(eq_rel)
-                    vk = norm(_vecval(eq_fs[k](x)), Inf)
-                    if vk > η && w_eq[k] < w_max
-                        w_eq[k] = min(w_eq[k] * options.ρ_incr, w_max)
-                        bumped = true
-                    end
-                end
-                for k in eachindex(ineq_rel)
-                    vk = norm(max.(_vecval(ineq_fs[k](x)), 0.0), Inf)
-                    if vk > η && w_ineq[k] < w_max
-                        w_ineq[k] = min(w_ineq[k] * options.ρ_incr, w_max)
-                        bumped = true
-                    end
-                end
-            end
-            if !bumped
-                ρ = min(options.ρ_max, ρ * options.ρ_incr)
-                η = max(η₀ / ρ^0.1, ctol)
-                ω = max(1 / ρ^0.1, sqrt(eps(Float64)))
-            end
+            ρ, η, ω = _escalate_penalty!(
+                ρ, η, ω, w_eq, w_ineq, w_max, options, eq_rel, ineq_rel, eq_fs, ineq_fs, x
+            )
         end
         vprev = vnorm
         vnorm <= ctol && break

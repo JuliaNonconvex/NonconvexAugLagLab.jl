@@ -207,13 +207,10 @@ function solve!(d, H::DenseBFGSApprox, g)
     if H.form === :inverse
         return mul!(d, H.H, g)
     else
-        # factorization-free robust solve: Cholesky of the SPD approximation
+        # Cholesky of the SPD approximation (updates are skipped on
+        # nonpositive curvature, so H stays positive definite).
         F = cholesky(Symmetric(H.H); check=false)
-        if issuccess(F)
-            return copyto!(d, F \ g)
-        else
-            return copyto!(d, g)   # fall back to steepest descent
-        end
+        return copyto!(d, F \ g)
     end
 end
 
@@ -239,7 +236,11 @@ function StructuredBFGSApprox(B::AbstractMatrix; form::Symbol=:hessian)
 end
 
 function init!(H::StructuredBFGSApprox, n::Int, x0)
-    H.B .= 0
+    B = H.B
+    fill!(B, 0)
+    for i in 1:min(n, size(B, 1))
+        B[i, i] = 1.0
+    end
     return H
 end
 reset!(H::StructuredBFGSApprox) = init!(H, size(H.B, 1), nothing)
@@ -500,26 +501,7 @@ function optimize!(workspace::QuasiNewtonWorkspace)
             d = _tron_subproblem(v -> _hessmatvec(approx, v), g, x, lb, ub, Δ, τ)
             d = _project(x, d, lb, ub)
             if optimizer.tron_cauchy
-                # Lin-Moré safeguard: the accepted step must make at least
-                # half the projected-Cauchy model decrease; otherwise fall
-                # back to the Cauchy step, then try shorter steps along the
-                # projected path.
-                modeldec(dd) = -(dot(g, dd) + dot(dd, _hessmatvec(approx, dd)) / 2)
-                dC = _box_cauchy(g, x, lb, ub, Δ)
-                mC = modeldec(dC)
-                mCG = modeldec(d)
-                if mCG < 0.5 * mC
-                    d = dC
-                    mCG = mC
-                end
-                for α in (0.75, 0.5, 0.25)
-                    dα = _project(x, α .* d, lb, ub)
-                    mα = modeldec(dα)
-                    if mα > mCG
-                        d = dα
-                        mCG = mα
-                    end
-                end
+                d = _tron_cauchy_refine(d, v -> _hessmatvec(approx, v), g, x, lb, ub, Δ)
             end
             norm(d) < 1e-12 && break
             xnew = x .+ d
@@ -657,6 +639,29 @@ function _box_cauchy(g, x, lb, ub, Δ)
     d = similar(x)
     for i in 1:n
         d[i] = clamp(x[i] - τ * gp[i], lb[i], ub[i]) - x[i]
+    end
+    return d
+end
+
+# Lin-Moré safeguard for TRON: if the projected-CG step achieves less than
+# half the projected-Cauchy model decrease, fall back to the Cauchy step,
+# then try shorter steps along the projected path.
+function _tron_cauchy_refine(d, Bv, g, x, lb, ub, Δ)
+    modeldec(dd) = -(dot(g, dd) + dot(dd, Bv(dd)) / 2)
+    dC = _box_cauchy(g, x, lb, ub, Δ)
+    mC = modeldec(dC)
+    mCG = modeldec(d)
+    if mCG < 0.5 * mC
+        d = dC
+        mCG = mC
+    end
+    for α in (0.75, 0.5, 0.25)
+        dα = _project(x, α .* d, lb, ub)
+        mα = modeldec(dα)
+        if mα > mCG
+            d = dα
+            mCG = mα
+        end
     end
     return d
 end
@@ -799,11 +804,5 @@ function _root_of_quadratic(a, b, c)
     disc = max(disc, 0.0)
     τ1 = (-b + sqrt(disc)) / (2a)
     τ2 = (-b - sqrt(disc)) / (2a)
-    return if max(τ1, τ2) > 0
-        max(τ1, τ2)
-    elseif min(τ1, τ2) > 0
-        min(τ1, τ2)
-    else
-        0.0
-    end
+    return max(τ1, τ2) > 0 ? max(τ1, τ2) : 0.0
 end
