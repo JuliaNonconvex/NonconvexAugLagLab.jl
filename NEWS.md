@@ -1,5 +1,8 @@
 # NEWS
 
+## 0.2.10
+
+- Fixed the elastic-mode Anderson acceleration residual: the slack is now included (`ρw(c − s)`), matching the fixed-point map actually being iterated.
 ## 0.2.9
 
 - Removed a stray planning note from the `AugLagOptions` docstring;
