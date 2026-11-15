@@ -1039,11 +1039,26 @@ function optimize!(workspace::AugLagWorkspace)
                 end
             end
             # Anderson acceleration of the equality multiplier updates.
+            # The residual must match the fixed-point map actually being
+            # iterated: in elastic mode the update is y += ρw(c − s), so the
+            # slack `s` belongs in the residual too (using ρw·c accelerated
+            # the wrong map).
             if !isempty(eq_rel)
                 y_new_flat = reduce(vcat, y; init=Float64[])
                 resid = Float64[]
-                for k in eachindex(eq_rel)
-                    append!(resid, (ρ * w_eq[k]) .* _vecval(eq_fs[k](x)))
+                if use_elastic
+                    s = x_new[(n + 1):end]
+                    off = 0
+                    for k in eachindex(eq_rel)
+                        ck = _vecval(eq_fs[k](x))
+                        sk = s[(off + 1):(off + length(ck))]
+                        append!(resid, (ρ * w_eq[k]) .* (ck .- sk))
+                        off += length(ck)
+                    end
+                else
+                    for k in eachindex(eq_rel)
+                        append!(resid, (ρ * w_eq[k]) .* _vecval(eq_fs[k](x)))
+                    end
                 end
                 y_prev_flat = y_new_flat .- resid
                 push!(and_history, (y_prev_flat, resid))
