@@ -1,8 +1,12 @@
 # NEWS
 
+## 0.2.9
+
+- Removed a stray planning note from the `AugLagOptions` docstring;
+  restructured NEWS.md (newest-first order, no `v` prefixes, added the
+  missing 0.1.5-0.2.1 entries).
+
 ## 0.2.8
-
-
 
 - **100% test coverage** of src/ and the SDP extension: regression tests
   for every option branch (scaling, h0, sub_tol_schedule, selective,
