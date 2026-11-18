@@ -725,25 +725,35 @@ end
     add_eq_constraint!(m, x -> x[1] + x[2] - 1)
     # restoration disabled: the stuck solver leaves the iterate infeasible
     r_off = optimize(
-        m, AugLagAlg(StuckAlg()), [0.0, 0.0];
+        m,
+        AugLagAlg(StuckAlg()),
+        [0.0, 0.0];
         options=AugLagOptions(max_iter=10, filter=false, restore=true, restore_stall=0),
     )
     @test abs(sum(r_off.minimizer) - 1) > 0.5
     # stall-triggered restoration (a very lax tolerance guarantees firing):
     # the reported point is the feasibility-restored one
     r_on = optimize(
-        m, AugLagAlg(StuckAlg()), [0.0, 0.0];
+        m,
+        AugLagAlg(StuckAlg()),
+        [0.0, 0.0];
         options=AugLagOptions(
-            max_iter=10, filter=false, restore=true, restore_stall=2, restore_tol=0.9,
+            max_iter=10, filter=false, restore=true, restore_stall=2, restore_tol=0.9
         ),
     )
     @test abs(sum(r_on.minimizer) - 1) < 1e-4
     # the anchor keeps the restored point near the pre-restoration iterate
     r_anch = optimize(
-        m, AugLagAlg(StuckAlg()), [0.0, 0.0];
+        m,
+        AugLagAlg(StuckAlg()),
+        [0.0, 0.0];
         options=AugLagOptions(
-            max_iter=10, filter=false, restore=true, restore_stall=2,
-            restore_tol=0.9, restore_prox=1e2,
+            max_iter=10,
+            filter=false,
+            restore=true,
+            restore_stall=2,
+            restore_tol=0.9,
+            restore_prox=1e2,
         ),
     )
     @test abs(sum(r_anch.minimizer) - 1) > abs(sum(r_on.minimizer) - 1)
@@ -766,7 +776,9 @@ end
     vm, x0, _ = NonconvexCore.tovecmodel(m, [0.0, 0.0])
     # raw violation = max over the relaxed groups of the raw inf-norms:
     # eq |x1+x2-1| = 1, ineq (x1-2)^+ = 0 at x0
-    @test NonconvexAugLagLab._raw_violation(vm, NonconvexAugLagLab.RelaxConstraintSelection(), x0) ≈ 1.0
+    @test NonconvexAugLagLab._raw_violation(
+        vm, NonconvexAugLagLab.RelaxConstraintSelection(), x0
+    ) ≈ 1.0
     # feasible point: both groups zero
     @test NonconvexAugLagLab._raw_violation(
         vm, NonconvexAugLagLab.RelaxConstraintSelection(), [1.0, 0.0]
