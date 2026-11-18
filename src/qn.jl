@@ -324,6 +324,15 @@ function apply!(Hv, H::NewtonTRApprox, v)
 end
 solve!(d, H::NewtonTRApprox, g) = copyto!(d, g)
 
+# Newton-type approximations evaluate the Hessian exactly at every iterate
+# through `hessfun` (AD-based NewtonTRApprox, or the JuMP-evaluator-based
+# JumpNewtonTRApprox); no secant updates apply to them.
+_is_newton(::NewtonTRApprox) = true
+_is_newton(::Any) = false
+
+# The Steihaug preconditioner of an approximation, when it carries one.
+_steihaug_precond(a) = hasproperty(a, :precond) ? a.precond : nothing
+
 # ------------------------------------------------------------------
 # Driver
 # ------------------------------------------------------------------
@@ -530,11 +539,11 @@ function optimize!(workspace::QuasiNewtonWorkspace)
         end
         if optimizer.linesearch === :trustregion
             # Steihaug-Toint CG with the current Hessian model
-            Hmat = approx isa NewtonTRApprox ? approx.hessfun(x) : nothing
-            if approx isa NewtonTRApprox
+            Hmat = _is_newton(approx) ? approx.hessfun(x) : nothing
+            if _is_newton(approx)
                 approx.H .= Hmat
             end
-            d = _steihaug(approx, g, Δ, τ)
+            d = _steihaug(approx, g, Δ, τ, _steihaug_precond(approx))
             d = _project(x, d, lb, ub)
             norm(d) < 1e-12 && break
             xnew = x .+ d
@@ -564,7 +573,7 @@ function optimize!(workspace::QuasiNewtonWorkspace)
                 # Second-order correction (Ipopt, opt-in): re-solve the model
                 # with the gradient evaluated at the rejected trial point.
                 gsoc = gradfun(xnew)
-                dsoc = _steihaug(approx, gsoc, Δ, τ)
+                dsoc = _steihaug(approx, gsoc, Δ, τ, _steihaug_precond(approx))
                 dsoc = _project(x, dsoc, lb, ub)
                 xnsoc = x .+ dsoc
                 fnsoc = fobj(xnsoc)
@@ -599,7 +608,7 @@ function optimize!(workspace::QuasiNewtonWorkspace)
         xnew = x .+ α .* d
         s = xnew .- x
         y = gradfun(xnew) .- g
-        if optimizer.damping && !(approx isa NewtonTRApprox)
+        if optimizer.damping && !_is_newton(approx)
             Bs = similar(y)
             apply!(Bs, approx, s)
             y = _damped_secant(y, s, Bs)
@@ -761,11 +770,20 @@ end
 
 # Steihaug–Toint CG for the trust-region subproblem
 # min ⟨g,d⟩ + ½ dᵀ(B + τI)d, ‖d‖ ≤ Δ (Levenberg dual regularization)
-function _steihaug(approx, g, Δ, τ=0.0)
+function _steihaug(approx, g, Δ, τ=0.0, M=nothing)
     n = length(g)
     d = zeros(n)
     r = copy(g)
-    p = .-g
+    # preconditioned CG: z = M⁻¹r; unpreconditioned z = r
+    z = if M === nothing
+        copy(g)
+    else
+        zi = zeros(n)
+        ldiv!(zi, M, r)
+        zi
+    end
+    p = .-z
+    zr = dot(z, r)
     rnorm2 = dot(r, r)
     rnorm2 < 1e-14 && return d
     for _ in 1:n
@@ -792,8 +810,17 @@ function _steihaug(approx, g, Δ, τ=0.0)
         r .+= α .* Bp
         rnorm2new = dot(r, r)
         rnorm2new < 1e-14 && break
-        β = rnorm2new / rnorm2
-        p .= .-r .+ β .* p
+        z = if M === nothing
+            copy(r)
+        else
+            zi = zeros(n)
+            ldiv!(zi, M, r)
+            zi
+        end
+        zrnew = dot(z, r)
+        β = zrnew / zr
+        p .= .-z .+ β .* p
+        zr = zrnew
         rnorm2 = rnorm2new
     end
     return d

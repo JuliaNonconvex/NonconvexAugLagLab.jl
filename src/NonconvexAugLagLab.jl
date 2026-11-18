@@ -4,6 +4,7 @@ export AugLagAlg, AugLagOptions, RelaxConstraintSelection, AugLagResult
 export QuasiNewtonAlg, AbstractHessianApprox
 export LBFGSApprox, DenseBFGSApprox, StructuredBFGSApprox, NewtonTRApprox
 export IdentityPreconditioner, DiagonalPreconditioner
+export SQSDPAlg, SQSDPOptions, SQSDPResult
 
 using Reexport, Parameters, LinearAlgebra, SparseArrays
 @reexport using NonconvexCore
@@ -20,5 +21,6 @@ import NonconvexCore: Workspace, optimize!, _optimize_precheck
 
 include("qn.jl")
 include("auglag.jl")
+include("sqsdp.jl")
 
 end
