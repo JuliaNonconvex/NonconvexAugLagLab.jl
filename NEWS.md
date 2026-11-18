@@ -1,6 +1,6 @@
 # NEWS
 
-## Unreleased
+## 0.3.0
 
 - **Proximal regularization (opt-in)**: `AugLagOptions(prox = τ)` adds
   `τ/2‖x − x̄‖²` to the AL subproblems. 10% faster on Rosetta case5 with
