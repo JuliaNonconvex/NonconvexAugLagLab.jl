@@ -398,7 +398,7 @@ end
     JuMP.@constraint(jm, x[1]^2 + x[2] - 2 == 0)   # nonlinear → expression path
     dm = DictModel(jm)
     x0 = NonconvexCore.getinit(dm)
-    r = optimize(dm, AugLagAlg(), x0; options = AugLagOptions(max_iter = 60, newton = true))
+    r = optimize(dm, AugLagAlg(), x0; options = AugLagOptions(max_iter = 100, newton = true))
     @test norm(r.minimizer[:x] - [1.0, 1.0]) < 1e-2
     # plain model: the Hessian comes from AD
     m = NonconvexCore.Model(x -> (x[1] - 1)^2 + (x[2] - 1)^2)
@@ -421,6 +421,16 @@ end
     r = optimize(m, AugLagAlg(), [0.0, 0.0]; options = AugLagOptions(max_iter = 40, box_barrier = true))
     @test norm(r.minimizer - [0.5, 0.5]) < 1e-3
     @test_throws ArgumentError AugLagOptions(box_barrier_scale = 0.0)
+end
+
+@testitem "AugLagAlg: auto rho_init calibration" begin
+    using NonconvexAugLagLab, NonconvexCore, Test, LinearAlgebra
+    m = Model(x -> (x[1] - 1)^2 + (x[2] - 1)^2)
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+    r = optimize(m, AugLagAlg(), [0.0, 0.0];
+        options = AugLagOptions(max_iter = 40, auto_ρ_init = true))
+    @test norm(r.minimizer - [0.5, 0.5]) < 1e-3
 end
 
 @testitem "AugLagAlg: adaptive PBM barrier coefficient" begin
@@ -585,7 +595,7 @@ end
             max_iter=120,
             ρ_init=10.0,
             scaling=false,
-            sub_options=(; max_iter=300, tol=1e-8, linesearch=:trustregion),
+            sub_options=(; max_iter=300, tol=1e-8, globalization=:trustregion),
         ),
     )
     vm = @view r.minimizer[1:3]

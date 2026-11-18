@@ -21,7 +21,7 @@
 # - One warm-started L-BFGS history (memory 50) across the outer loop with
 #   a penalty-scaled base operator H0 = 1/(1+ρ).
 # - Levenberg damping and a stall retry for the subproblems.
-# Opt-in: TRON projected-CG subproblem solves (`linesearch = :tron`), the
+# Opt-in: TRON projected-CG subproblem solves (`globalization = :tron`), the
 # elastic ALM (`elastic = true`), and warm continuation across solves on
 # one workspace (`warm_continue = true`). See docs/theory for the details.
 
@@ -156,7 +156,7 @@ end
 
 - `sub_options`: options for the sub-solver. For the built-in
   `QuasiNewtonAlg` this is a named tuple of its keyword arguments (default:
-  `(; max_iter = 800, tol = 1e-8, linesearch = :trustregion)` — trust-region
+  `(; max_iter = 800, tol = 1e-8, globalization = :trustregion)` — trust-region
   Steihaug–Toint steps are substantially more robust than backtracking on
   the nonconvex augmented Lagrangian subproblems); for a custom `sub_alg`
   it is forwarded as its `options`.
@@ -168,6 +168,15 @@ end
   `:mixed_logdet` (PBM for inequalities, logdet for semidefinite). The
   logdet kernels are experimental: measured on the covariance MLE they
   converge but land short of the projected quadratic.
+- `auto_ρ_init`: (opt-in) calibrate the initial penalty from the problem at
+  x0: `ρ = clamp(‖∇f(x0)‖ / max(‖c̃(x0)‖, ε), 1, 1e6)` on the scaled
+  constraints — the penalty gradient then balances the objective gradient,
+  avoiding the measured escalation waste (the default `ρ_init = 10` needs
+  ~130 outer iterations of escalation on AC-OPF). Measured: wins Rosetta
+  AC-OPF case5 (viol 0.34 vs 0.60 at 200 outer iterations) but loses the
+  TopOpt local-stress problem badly (near-feasible starts give a tiny
+  scaled violation and an over-large penalty: viol 0.009 vs 5.7e-6, 7×
+  slower) — opt-in for infeasible-start problems, off by default.
 - `ρ_init`, `ρ_max`, `ρ_incr`, `ρ_decr`: initial/maximum penalty and the
   increase/decrease factors (two-way adaptation).
 - `max_iter`: maximum outer iterations.
@@ -176,8 +185,35 @@ end
 - `weights`: per-constraint-group penalty weights (default: all ones).
 - `lsq_multipliers`: initialize equality multipliers from the least-squares
   stationarity residual (default `true`).
+- `prox`: (opt-in) proximal regularization of the AL subproblems
+  (Rockafellar): adds `τ/2‖x − x̄‖²` to the subproblem objective, anchored
+  at the outer iterate — conditions the ill-conditioned subproblems of the
+  escalated penalty. `0` (default) disables it. Composes with every penalty
+  mode (`:bm`, `:pbm`, `:mixed`, `:logdet`, `:mixed_logdet`) and with
+  `sub_approx = :sr1`; with `newton`, the exact-Hessian subproblems add the
+  τI term (the prox term's true curvature). Only the `two_level` inner loop
+  rebuilds from the un-proxed objective, so its inner anchor replaces the
+  outer prox. Measured: 10% faster with slightly better feasibility on
+  Rosetta AC-OPF case5 (151.7 vs 169.2 s, viol 0.584 vs 0.599), and on
+  TopOpt local-stress 32% faster and more feasible on the single-level
+  solve but converging to a heavier design (obj 0.181 vs 0.094 — the
+  anchor bias), while the 3-stage SIMP continuation flips that trade:
+  2.7× faster (204 vs 560 s) *and* a lighter final design (obj 0.186 vs
+  0.187) at viol 5.3e-9 — opt-in. Combinations measured on Rosetta case5:
+  with `penalty = :pbm`, prox is 13% faster and lands on a lower f but
+  less feasible (159.5 s, viol 0.524 vs 183.4 s, 0.399 — no dominant win);
+  with `sub_approx = :sr1`, prox is 27% faster but far from the optimum
+  (57.6 s, f = 14187, viol 0.158 vs 78.9 s, f = 17576, viol 0.016) — the
+  anchor counteracts SR1's curvature exploration, so the combination is
+  not recommended.
 - `memory`: L-BFGS memory of the built-in subproblem solver (default `50`;
   the curvature history is reused across outer iterations).
+- `sub_approx`: the curvature approximation of the built-in subproblem
+  solver, `:lbfgs` (default) or `:sr1` (limited-memory symmetric rank-one —
+  captures indefiniteness, intended for the trust-region subproblems).
+  Measured: a massive Rosetta AC-OPF case5 win (80 vs 219 s, viol 0.016
+  vs 0.60, f near the true optimum) but slower on the TopOpt local-stress
+  problem (no completion within 31 min vs ~6 min for L-BFGS) — opt-in.
 - `elastic`: relax the equalities through slack variables,
   `yᵀ(c−s) + ρ/2‖c−s‖² + μΣ√(sᵢ²+ε²)`, the elastic mode of the augmented
   Lagrangian (more robust to infeasible subproblems; default `false`).
@@ -252,7 +288,7 @@ end
   MathOptInterface evaluator for JuMP-converted models (with the
   stale-Cholesky-preconditioned Steihaug CG), AD (`value_hessian`) for all
   other models. `penalty = :quadratic`, no semidefinite constraints, no
-  elastic mode, `linesearch = :trustregion` required; the box barrier is
+  elastic mode, `globalization = :trustregion` required; the box barrier is
   automatic with this mode (`box_barrier = missing`). Measured on Rosetta
   AC-OPF case5: with `ρ_init = 100` it converges to `viol = 1e-6` in 86 s
   (the L-BFGS subproblem solves stall at viol ≈ 0.34 after 268 s); with
@@ -268,17 +304,17 @@ end
   (1.9 vs 23.2 s, same 1.3e-8 accuracy) and 2.7× faster on the BMI (5.7 vs
   15.6 s, with a more stable closed loop, λ = −1.07 vs −0.82).
 - `box_barrier`, `box_barrier_scale`: (experimental, opt-in) Ipopt-style
-  barrierification of the subproblem's box bounds: instead of the projected
-  (active-set) subproblem solves, the box enters the subproblem objective
-  as a log barrier `−μ Σ(log(x−l) + log(u−x))` with a C² extension outside,
-  the subproblem becomes smooth and unconstrained, and `μ = max(η ·
-  box_barrier_scale, μ_min)` relaxes with the outer feasibility target.
-  Soft bounds (the barrier discourages, not forbids, leaving the box; a
-  nonzero μ floor keeps the iterate inside at convergence, at an O(μ) bias).
+  barrierification of the subproblem's box bounds: the box enters the
+  subproblem objective as a log barrier `−μ Σ(log(x−l) + log(u−x))` with a
+  C² extension outside, `μ` adapts by the implied-dual complementarity on
+  the near-bound coordinates (Ipopt-style κ rule), the start is pushed off
+  the bounds by the barrier thickness (bound-push), and the hard box stays
+  projected in the subproblem (fraction-to-boundary at τ = 1) so the
+  iterate never leaves the bounds.
   `box_barrier = missing` (the default) is automatic: **on** with
-  `newton` (measured 5.3× faster on Rosetta case5, landing on the
-  true optimum) and **off** with the first-order subproblems (measured
-  harmful there: viol 0.66 vs 0.40).
+  `newton` (measured on Rosetta case5: 43.8 s to f = 17553, viol 3.5e-8)
+  and **off** with the first-order subproblems (measured harmful there:
+  viol 0.66 vs 0.40).
 - `pbm_adaptive`: (opt-in) Ipopt-style barrier adaptation for the PBM
   penalty modes: each inequality group's barrier coefficient tracks the
   complementarity of its implied duals (grow the barrier when the
@@ -300,6 +336,9 @@ mutable struct AugLagOptions{S,R,W}
     ρ_max::Real
     ρ_incr::Real
     ρ_decr::Real
+    auto_ρ_init::Bool
+    sub_approx::Symbol
+    prox::Real
     max_iter::Int
     ctol::Real
     η₀::Real
@@ -342,6 +381,9 @@ function AugLagOptions(;
     ρ_max::Real=1e10,
     ρ_incr::Real=10.0,
     ρ_decr::Real=10.0,
+    auto_ρ_init::Bool=false,
+    sub_approx::Symbol=:lbfgs,
+    prox::Real=0.0,
     max_iter::Int=1000,
     ctol::Real=1e-6,
     η₀::Real=0.5,
@@ -385,6 +427,9 @@ function AugLagOptions(;
     box_barrier_scale > 0 || throw(ArgumentError("box_barrier_scale must be positive"))
     (box_barrier === true || box_barrier === false || box_barrier === missing) ||
         throw(ArgumentError("box_barrier must be true, false or missing (automatic)"))
+    sub_approx in (:lbfgs, :sr1) ||
+        throw(ArgumentError("sub_approx must be :lbfgs or :sr1"))
+    prox >= 0 || throw(ArgumentError("prox must be non-negative"))
     ρ_init > 0 || throw(ArgumentError("ρ_init must be positive"))
     ρ_incr > 1 || throw(ArgumentError("ρ_incr must be > 1"))
     ρ_decr > 1 || throw(ArgumentError("ρ_decr must be > 1"))
@@ -398,6 +443,9 @@ function AugLagOptions(;
         ρ_max,
         ρ_incr,
         ρ_decr,
+        auto_ρ_init,
+        sub_approx,
+        prox,
         max_iter,
         ctol,
         η₀,
@@ -837,7 +885,7 @@ function _restore_feasible(model, relaxed, submodel0, x)
             LBFGSApprox(10; H0 = IdentityPreconditioner());
             max_iter = 200,
             tol = 1e-6,
-            linesearch = :trustregion,
+            globalization = :trustregion,
         ),
         x,
     )
@@ -908,6 +956,7 @@ function optimize!(workspace::AugLagWorkspace)
     @unpack box_barrier_scale = options
     restore = options.restore
     pbm_adaptive = options.pbm_adaptive
+    prox = Float64(options.prox)
     # automatic box-barrier selection by subproblem order: on with the
     # exact-Hessian (`newton`) subproblems, off with the first-order
     # quasi-Newton subproblems (measured 5.3x faster / harmful resp.)
@@ -941,6 +990,20 @@ function optimize!(workspace::AugLagWorkspace)
         eq_fs = [model.eq_constraints.fs[i] for i in eq_rel]
         ineq_fs = [model.ineq_constraints.fs[i] for i in ineq_rel]
         scales = ones(length(eq_rel) + length(ineq_rel))
+    end
+    if options.auto_ρ_init
+        # calibrate ρ so the penalty gradient balances the objective gradient
+        # at x0 (on the scaled constraints): avoids the escalation waste of a
+        # too-small ρ_init (measured: ~130 outer iterations on AC-OPF).
+        _, ∇f = NonconvexCore.value_gradient(obj, x)
+        viol0 = 0.0
+        for c in eq_fs
+            viol0 = max(viol0, norm(_vecval(c(x)), Inf))
+        end
+        for c in ineq_fs
+            viol0 = max(viol0, norm(max.(_vecval(c(x)), 0.0), Inf))
+        end
+        ρ = clamp(norm(∇f) / max(viol0, 1e-8), 1.0, 1e6)
     end
     # Internal per-group penalty weights (selective bumps modify these; the
     # user-provided weights are the initial values).
@@ -1015,19 +1078,19 @@ function optimize!(workspace::AugLagWorkspace)
     # `reset = false` so the L-BFGS curvature of the previous subproblem
     # warm-starts the next one; reset whenever the penalty changes scale.
     qn_base_maxiter = 800
-    qn_linesearch = :trustregion
+    qn_globalization = :trustregion
     qn_reset = false
     qn_nonmonotone = false
     qn_soc = false
     qn_approx = nothing
     if sub_alg === nothing
         qn_opts = if sub_options === nothing
-            (; max_iter=800, tol=1e-8, linesearch=:trustregion)
+            (; max_iter=800, tol=1e-8, globalization=:trustregion)
         else
             sub_options
         end
         qn_base_maxiter = get(qn_opts, :max_iter, 800)
-        qn_linesearch = get(qn_opts, :linesearch, :trustregion)
+        qn_globalization = get(qn_opts, :globalization, :trustregion)
         qn_reset = get(qn_opts, :reset, false)
         qn_nonmonotone = get(qn_opts, :nonmonotone, false)
         qn_soc = get(qn_opts, :soc, false)
@@ -1040,6 +1103,8 @@ function optimize!(workspace::AugLagWorkspace)
         end
         qn_approx = if warm && workspace.state.approx !== nothing
             workspace.state.approx
+        elseif options.sub_approx === :sr1
+            LimitedMemorySR1Approx(memory; H0=h0_op)
         else
             LBFGSApprox(memory; H0=h0_op)
         end
@@ -1056,20 +1121,25 @@ function optimize!(workspace::AugLagWorkspace)
             throw(ArgumentError("newton does not support semidefinite constraints"))
         use_elastic &&
             throw(ArgumentError("newton does not support the elastic mode"))
-        qn_linesearch = :trustregion
+        qn_globalization = :trustregion
         je = _jump_evaluator(model.objective)
         qn_approx = if je !== nothing
             # JuMP-converted: exact evaluator Hessians with the
             # stale-Cholesky-preconditioned Steihaug CG.
             jump_newton_active = true
             JumpNewtonTRApprox(
-                x -> _jump_al_hessian(
-                    je, x, eq_fs, ineq_fs, scales, y, λ, w_eq, w_ineq, ρref, fscale,
-                    box_barrier ? submodel0.box_min : nothing,
-                    box_barrier ? submodel0.box_max : nothing,
-                    μref,
-                    δbar,
-                ),
+                x -> begin
+                    H = _jump_al_hessian(
+                        je, x, eq_fs, ineq_fs, scales, y, λ, w_eq, w_ineq, ρref, fscale,
+                        box_barrier ? submodel0.box_min : nothing,
+                        box_barrier ? submodel0.box_max : nothing,
+                        μref,
+                        δbar,
+                    )
+                    # the prox term adds τI to the subproblem Hessian
+                    prox > 0 && (H[diagind(H)] .+= prox)
+                    H
+                end,
             )
         else
             # other models: exact Hessians through AD (value_hessian)
@@ -1091,6 +1161,16 @@ function optimize!(workspace::AugLagWorkspace)
     end
     δbar = 1e-4
     μref = Ref(0.0)
+    if box_barrier
+        # bound-push (Ipopt's bound_push): start strictly inside the finite
+        # bounds by the barrier thickness, so the first subproblem sees the
+        # log branch of the barrier rather than the quadratic extension
+        for i in 1:n
+            isfinite(submodel0.box_min[i]) && (x[i] = max(x[i], submodel0.box_min[i] + δbar))
+            isfinite(submodel0.box_max[i]) && (x[i] = min(x[i], submodel0.box_max[i] - δbar))
+        end
+        μref[] = Float64(box_barrier_scale)
+    end
     for iter in 1:max_iter
         # Subproblem tolerance: fixed (the accepted default) or adaptive
         # (tied to the outer feasibility target η).
@@ -1104,7 +1184,9 @@ function optimize!(workspace::AugLagWorkspace)
         # the barrier parameter relaxes with η but keeps a nonzero floor
         # (like Ipopt's final μ): a vanishing μ lets the soft-bounded
         # iterate leave the box at convergence
-        μref[] = box_barrier ? max(η * Float64(box_barrier_scale), 1e-3) : 0.0
+        μref[] = box_barrier ? _box_barrier_μ(
+            μref[], x, submodel0.box_min, submodel0.box_max, δbar, Float64(box_barrier_scale)
+        ) : 0.0
         sd_terms = _sd_terms(model, sd_rel, ρ, x, Y, penalty)
         build_al = sd_t -> if use_elastic
             _elastic_objective(
@@ -1130,8 +1212,10 @@ function optimize!(workspace::AugLagWorkspace)
                 [submodel0.integer; falses(m_eq)],
             )
         elseif box_barrier
-            # Ipopt-style box barrier: the bounds enter the objective and the
-            # subproblem is smooth and unconstrained (soft bounds).
+            # Ipopt-style box barrier with hard projected bounds: the
+            # barrier smooths the merit near the boundary while the
+            # projection enforces it (fraction-to-boundary at tau = 1), so
+            # the iterate can never leave the box - no soft-bounds bias.
             VecModel(
                 Objective(
                     _box_barrier_objective(
@@ -1141,8 +1225,8 @@ function optimize!(workspace::AugLagWorkspace)
                 submodel0.eq_constraints,
                 submodel0.ineq_constraints,
                 submodel0.sd_constraints,
-                fill(-Inf, n),
-                fill(Inf, n),
+                submodel0.box_min,
+                submodel0.box_max,
                 submodel0.init,
                 submodel0.integer,
             )
@@ -1158,14 +1242,21 @@ function optimize!(workspace::AugLagWorkspace)
                 submodel0.integer,
             )
         end
-        submodel = make_submodel(al_obj)
+        x_sub = use_elastic ? [x; zeros(m_eq)] : x
+        al_sub = if prox > 0
+            # proximal regularization (Rockafellar): conditions the
+            # subproblems of the escalated penalty
+            z -> al_obj(z) + (prox / 2) * sum(abs2, z .- x_sub)
+        else
+            al_obj
+        end
+        submodel = make_submodel(al_sub)
         checksubproblem!(
             submodel,
             sub_alg === nothing ? QuasiNewtonAlg(qn_approx::AbstractHessianApprox) : sub_alg;
             context="the augmented Lagrangian subproblem",
             hint="relax the constraint in `RelaxConstraintSelection` or choose a sub-solver that supports it.",
         )
-        x_sub = use_elastic ? [x; zeros(m_eq)] : x
         result_i = if sub_alg === nothing
             # Stall detection: if the first solve does not decrease the AL
             # merit, retry once with a 4x budget and a relaxed tolerance.
@@ -1176,7 +1267,7 @@ function optimize!(workspace::AugLagWorkspace)
                     qn_approx::AbstractHessianApprox;
                     max_iter=qn_base_maxiter,
                     tol=sub_tol,
-                    linesearch=qn_linesearch,
+                    globalization=qn_globalization,
                     reset=qn_reset,
                     levenberg=levenberg,
                     tron_cauchy=tron_cauchy,
@@ -1193,7 +1284,7 @@ function optimize!(workspace::AugLagWorkspace)
                         qn_approx::AbstractHessianApprox;
                         max_iter=4 * qn_base_maxiter,
                         tol=10 * sub_tol,
-                        linesearch=qn_linesearch,
+                        globalization=qn_globalization,
                         reset=qn_reset,
                         levenberg=levenberg,
                         tron_cauchy=tron_cauchy,
@@ -1234,7 +1325,7 @@ function optimize!(workspace::AugLagWorkspace)
                         qn_approx::AbstractHessianApprox;
                         max_iter = max(50, qn_base_maxiter ÷ 2),
                         tol = sub_tol,
-                        linesearch = qn_linesearch,
+                        globalization = qn_globalization,
                         reset = qn_reset,
                         levenberg = levenberg,
                         tron_cauchy = tron_cauchy,
@@ -1648,6 +1739,30 @@ function _box_barrier_term(t, δ)
 end
 # Hessian of the barrier term: 1/t² for t ≥ δ and 1/δ² below.
 _box_barrier_curv(t, δ) = inv(max(t, δ)^2)
+
+# Ipopt-style barrier adaptation for the box barrier: μ tracks the mean
+# implied dual μ/dist on the near-bound coordinates (grow when the duals
+# are weak, shrink when well-established), clamped to [1e-4, 10].
+function _box_barrier_μ(μ, x, l, u, δ, scale)
+    s = 0.0
+    k = 0
+    for i in eachindex(x)
+        if isfinite(l[i]) && x[i] - l[i] < 10δ
+            s += μ / max(x[i] - l[i], δ)
+            k += 1
+        end
+        if isfinite(u[i]) && u[i] - x[i] < 10δ
+            s += μ / max(u[i] - x[i], δ)
+            k += 1
+        end
+    end
+    κ = k == 0 ? 0.0 : s / k
+    if k == 0
+        # no coordinate near a bound: the barrier is irrelevant, decay μ
+        return max(μ / 2, 1e-4)
+    end
+    return clamp(μ * clamp(1e-2 / max(κ, 1e-12), 0.5, 2.0), 1e-4, 10.0 * scale)
+end
 
 function _box_barrier_objective(f, l, u, μ, δ)
     return x -> begin

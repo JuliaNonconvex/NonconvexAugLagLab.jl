@@ -101,10 +101,10 @@ end
 @testitem "QuasiNewtonAlg: Wolfe linesearch, damping and driver options" begin
     using NonconvexAugLagLab, Test, LinearAlgebra, SparseArrays
     rosen = x -> (1 - x[1])^2 + 100 * (x[2] - x[1]^2)^2
-    for linesearch in (:backtracking, :wolfe)
+    for globalization in (:backtracking, :wolfe)
         m = Model(rosen)
         addvar!(m, [-5.0, -5.0], [5.0, 5.0])
-        alg = QuasiNewtonAlg(; linesearch=linesearch, max_iter=500, tol=1e-8)
+        alg = QuasiNewtonAlg(; globalization=globalization, max_iter=500, tol=1e-8)
         r = optimize(m, alg, [-1.2, 1.0])
         @test norm(r.minimizer - [1.0, 1.0]) < 1e-3
     end
@@ -114,7 +114,7 @@ end
     alg = QuasiNewtonAlg(LBFGSApprox(5; H0=IdentityPreconditioner()); damping=false)
     r = optimize(m, alg, [-1.2, 1.0])
     @test norm(r.minimizer - [1.0, 1.0]) < 1e-3
-    @test_throws ArgumentError QuasiNewtonAlg(; linesearch=:foo)
+    @test_throws ArgumentError QuasiNewtonAlg(; globalization=:foo)
     # each approximation type is the right AbstractHessianApprox subtype
     @test LBFGSApprox(3) isa AbstractHessianApprox
     @test DenseBFGSApprox(form=:inverse) isa AbstractHessianApprox
