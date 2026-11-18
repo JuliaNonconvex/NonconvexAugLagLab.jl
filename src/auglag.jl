@@ -324,8 +324,39 @@ end
 - `restore`: (opt-in) Ipopt-style restoration phase: when the subproblem
   iterate blows up (non-finite or exploding violation) instead of just
   reverting to the previous point, solve a feasibility-only problem
-  (`min Σ‖c‖² + Σ‖g⁺‖² + Σ‖viol_sd‖²` over the box) with the built-in
-  quasi-Newton driver to recover a usable iterate, then continue.
+  (`min Σ‖c‖² + Σ‖g⁺‖² + Σ‖viol_sd‖²` over the box, on the same scaled
+  constraints as the main phase) with the built-in quasi-Newton driver to
+  recover a usable iterate, then continue.
+- `restore_stall`: (opt-in, with `restore`) also trigger the restoration
+  when feasibility stalls: no improvement of more than `restore_tol` over
+  the last `restore_stall` outer iterations. The restored point replaces
+  the iterate and the equality multipliers are re-estimated (least
+  squares) there; at most 2 restorations per solve. `0` (default) keeps
+  the blow-up-only trigger.
+- `restore_tol`: the feasibility-improvement threshold for the
+  `restore_stall` trigger, in the units of `restore_tol_mode`: `:relative`
+  (default `1e-2`: the violation must have dropped by more than 1% over
+  the window) or `:absolute` (a drop in the raw scaled violation). The
+  main phase is not feasibility-preserving, so when a restoration point is
+  strictly more feasible than the final main-phase iterate it is reported
+  as the result. Measured on Rosetta AC-OPF case5: `restore = true,
+  restore_stall = 5` drives the violation from 0.60 to 1.6e-6 and the
+  objective to f = 17858 (the true optimum) in ~300 s (vs the 169.7 s /
+  viol 0.60 / f 8921 default) — a decisive opt-in win. On the TopOpt SAND
+  tutorial it fires but cannot close the equilibrium gap: the raw merit
+  Σ‖Ku−f‖² is a KᵀK least-squares whose SIMP stiffness conditioning
+  κ(K)² stalls any first-order restore at resid ~0.08 (only the nested
+  solve u = K⁻¹f — the NAND formulation from the SAND literature — or
+  second-order steps reach equilibrium there).
+- `restore_prox`: (opt-in) Rockafellar anchor weight `τ` on the
+  restoration objective: `min Σ‖c‖² + Σ‖g⁺‖² + τ/2‖z − x̄‖²` with `x̄` the
+  pre-restoration iterate — the violation merit alone can wander along its
+  zero manifold; `τ > 0` keeps the restored point close to the previous
+  solution. The anchor is a per-variable scaled pseudo-Huber (log-cosh)
+  penalty: each variable is scaled by its box width, and the anchor
+  gradient is `τ·tanh(Δᵢ/wᵢ)` — magnitude below `τ` for every variable,
+  saturating instead of growing linearly. `0` (default) disables the
+  anchor.
 - `keep_all`: keep the trajectory of outer iterates in the result.
 """
 mutable struct AugLagOptions{S,R,W}
@@ -369,6 +400,10 @@ mutable struct AugLagOptions{S,R,W}
     box_barrier::Union{Bool,Missing}
     box_barrier_scale::Real
     restore::Bool
+    restore_stall::Int
+    restore_tol::Real
+    restore_tol_mode::Symbol
+    restore_prox::Real
     pbm_adaptive::Bool
     tron_cauchy::Bool
     keep_all::Bool
@@ -414,6 +449,10 @@ function AugLagOptions(;
     box_barrier = missing,
     box_barrier_scale::Real=1.0,
     restore::Bool=false,
+    restore_stall::Int=0,
+    restore_tol::Real=1e-2,
+    restore_tol_mode::Symbol=:relative,
+    restore_prox::Real=0.0,
     pbm_adaptive::Bool=false,
     tron_cauchy::Bool=false,
     keep_all::Bool=false,
@@ -435,6 +474,14 @@ function AugLagOptions(;
     ρ_decr > 1 || throw(ArgumentError("ρ_decr must be > 1"))
     0 < watchdog_tau < 1 || throw(ArgumentError("watchdog_tau must be in (0, 1)"))
     watchdog_tol >= 0 || throw(ArgumentError("watchdog_tol must be non-negative"))
+    restore_stall >= 0 || throw(ArgumentError("restore_stall must be >= 0"))
+    restore_tol_mode in (:relative, :absolute) ||
+        throw(ArgumentError("restore_tol_mode must be :relative or :absolute"))
+    restore_tol > 0 || throw(ArgumentError("restore_tol must be positive"))
+    if restore_tol_mode === :relative
+        restore_tol < 1 || throw(ArgumentError("relative restore_tol must be < 1"))
+    end
+    restore_prox >= 0 || throw(ArgumentError("restore_prox must be non-negative"))
     return AugLagOptions(
         sub_options,
         relaxed,
@@ -476,6 +523,10 @@ function AugLagOptions(;
         box_barrier,
         box_barrier_scale,
         restore,
+        restore_stall,
+        restore_tol,
+        restore_tol_mode,
+        restore_prox,
         pbm_adaptive,
         tron_cauchy,
         keep_all,
@@ -845,6 +896,23 @@ end
 # Fallback for a rejected outer iterate: the previous trajectory point, or
 # the run's initial point when the very first iteration fails (the trajectory
 # is still empty then and `trajectory[end]` would throw a BoundsError).
+# Raw (unscaled) violation norm of the relaxed constraints — the physical
+# feasibility metric used to accept restoration points and to choose
+# between the final main-phase iterate and the best restoration point
+# (the restoration merit minimizes this, while the main phase's internal
+# metric is the scaled violation).
+function _raw_violation(model, relaxed, x)
+    eq_rel, ineq_rel, _, _ = _subproblem(model, relaxed, nothing)
+    v = 0.0
+    for i in eq_rel
+        v = max(v, norm(_vecval(model.eq_constraints.fs[i](x)), Inf))
+    end
+    for i in ineq_rel
+        v = max(v, norm(max.(_vecval(model.ineq_constraints.fs[i](x)), 0.0), Inf))
+    end
+    return v
+end
+
 function _failed_iterate_fallback(trajectory, x_init)
     return isempty(trajectory) ? copy(x_init) : copy(trajectory[end][1])
 end
@@ -852,44 +920,103 @@ end
 # Restoration phase (Ipopt-style): solve a feasibility-only problem
 # (squared violations of the relaxed constraints over the box) to recover a
 # usable iterate after a blow-up, instead of just reverting.
-function _restore_feasible(model, relaxed, submodel0, x)
+function _restore_feasible(eq_fs, ineq_fs, model, relaxed, submodel0, x, prox=0.0)
+    x̄ = copy(x)  # snapshot: the anchor must not drift with the solve
     eq_rel, ineq_rel, sd_rel, _ = _subproblem(model, relaxed, nothing)
-    fns_eq = model.eq_constraints.fs
-    fns_ineq = model.ineq_constraints.fs
+    # anchor widths: relative moves are measured against each variable's
+    # box width (a raw Euclidean anchor would be dominated by the widest
+    # block, e.g. displacements in [-1e3, 1e3] vs densities in [0, 1])
+    wscale = map(
+        (lo, hi) -> isfinite(lo) && isfinite(hi) && hi > lo ? hi - lo : 1.0,
+        submodel0.box_min,
+        submodel0.box_max,
+    )
     objr = z -> begin
         v = 0.0
+        # RAW constraint values: the restoration merit is the physical
+        # feasibility metric, not the solver's internal scaled one (the
+        # CJR scales weight the groups by their Jacobian norms, which on
+        # problems like SAND makes a small-scale group like the volume
+        # constraint dominate the merit while the equilibrium group —
+        # the physically meaningful one — is ignored). Variable-level
+        # conditioning is handled by the formulation's diagonal scaling
+        # below instead.
         for i in eq_rel
-            v += sum(abs2, _vecval(fns_eq[i](z)))
+            v += sum(abs2, _vecval(model.eq_constraints.fs[eq_rel[i]](z)))
         end
         for i in ineq_rel
-            v += sum(abs2, max.(_vecval(fns_ineq[i](z)), 0.0))
+            v += sum(abs2, max.(_vecval(model.ineq_constraints.fs[ineq_rel[i]](z)), 0.0))
         end
         for i in sd_rel
             v += sum(abs2, _sd_violation(model, i, z))
         end
+        # optional Rockafellar anchor: stay close to the pre-restoration
+        # iterate (the violation merit alone can wander along its zero
+        # manifold). Per-variable scaled pseudo-Huber (log-cosh) penalty:
+        # f_i = w_i * log(cosh(Delta_i / w_i)) has gradient
+        # tau * tanh(Delta_i / w_i) — magnitude < tau for EVERY variable,
+        # saturating instead of growing linearly, with the transition
+        # width scaled per variable by its box width (a raw Euclidean
+        # anchor would be dominated by the widest block, e.g.
+        # displacements in [-1e3, 1e3] vs densities in [0, 1]).
+        if prox > 0
+            Δ = clamp.((z .- x̄) ./ wscale, -50.0, 50.0)
+            v += prox * sum(wscale .* log.(cosh.(Δ)))
+        end
         return v
     end
+    # Diagonal inverse premultiplier IN THE FORMULATION (not the solver):
+    # d_i = sum_j (dF_j/dz_i)^2 over the stacked RAW merit F = [c; g^+] —
+    # the diagonal of the least-squares Hessian J'J. The restoration
+    # submodel is defined in the scaled variables z = Ds .* zhat with
+    # Ds_i = 1/sqrt(max(d_i, eps)), so every column of J * diag(Ds) has
+    # unit norm: the raw merit would otherwise be dominated by the most
+    # sensitive blocks (e.g. the stiffness-column dominated displacement
+    # block in SAND, whose J'J conditioning stalls an unscaled
+    # first-order solve).
+    nz = length(x)
+    hfd = sqrt(eps(Float64)) .* (1 .+ abs.(x))
+    dcol = zeros(nz)
+    for i in 1:nz
+        zp = copy(x)
+        zp[i] += hfd[i]
+        zm = copy(x)
+        zm[i] -= hfd[i]
+        for k in eq_rel
+            cp = _vecval(model.eq_constraints.fs[k](zp))
+            cm = _vecval(model.eq_constraints.fs[k](zm))
+            δ = (cp .- cm) ./ (2 * hfd[i])
+            dcol[i] += sum(abs2, δ)
+        end
+        for k in ineq_rel
+            gp = max.(_vecval(model.ineq_constraints.fs[k](zp)), 0.0)
+            gm = max.(_vecval(model.ineq_constraints.fs[k](zm)), 0.0)
+            δ = (gp .- gm) ./ (2 * hfd[i])
+            dcol[i] += sum(abs2, δ)
+        end
+    end
+    Ds = 1 ./ sqrt.(max.(dcol, 1e-12))
     rm = VecModel(
-        Objective(objr),
+        Objective(zhat -> objr(Ds .* zhat)),
         VectorOfFunctions(NonconvexCore.EqConstraint[]),
         VectorOfFunctions(NonconvexCore.IneqConstraint[]),
         VectorOfFunctions(NonconvexCore.SDConstraint[]),
-        submodel0.box_min,
-        submodel0.box_max,
-        submodel0.init,
+        submodel0.box_min ./ Ds,
+        submodel0.box_max ./ Ds,
+        submodel0.init ./ Ds,
         submodel0.integer,
     )
     r = optimize(
         rm,
         QuasiNewtonAlg(
-            LBFGSApprox(10; H0 = IdentityPreconditioner());
-            max_iter = 200,
-            tol = 1e-6,
+            LBFGSApprox(50; H0 = IdentityPreconditioner());
+            max_iter = 2000,
+            tol = 1e-10,
             globalization = :trustregion,
         ),
-        x,
+        x ./ Ds,
     )
-    return copy(r.minimizer)
+    return Ds .* copy(r.minimizer)
 end
 
 # Two-way penalty decrease (Curtis-Gould-Jiang-Robinson): once feasibility
@@ -955,6 +1082,10 @@ function optimize!(workspace::AugLagWorkspace)
     @unpack two_level, two_level_iters, two_level_tau = options
     @unpack box_barrier_scale = options
     restore = options.restore
+    restore_stall = options.restore_stall
+    restore_tol = Float64(options.restore_tol)
+    restore_tol_mode = options.restore_tol_mode
+    restore_prox = Float64(options.restore_prox)
     pbm_adaptive = options.pbm_adaptive
     prox = Float64(options.prox)
     # automatic box-barrier selection by subproblem order: on with the
@@ -1064,7 +1195,19 @@ function optimize!(workspace::AugLagWorkspace)
     trajectory = Tuple{typeof(x),Real,Real}[]
     fx = obj(x)
     vprev = Inf
+    vnorm = Inf
     and_history = Tuple{Vector{Float64},Vector{Float64}}[]
+    # Ipopt-style restoration accounting: window of recent violation values
+    # (for the stall trigger) and the number of restorations already
+    # performed this solve.
+    vhist = Float64[]
+    n_restores = 0
+    # Best restoration point: the main phase is not feasibility-preserving,
+    # so a restoration point can be strictly more feasible than the final
+    # main-phase iterate — track it and report it if so (opt-in behavior).
+    x_rest = nothing
+    fx_rest = 0.0
+    vraw_rest = Inf
     # Fletcher-Leyffer filter for the outer globalization: a step is
     # accepted unless a previous iterate dominates it in both the AL merit
     # and the violation.
@@ -1187,6 +1330,35 @@ function optimize!(workspace::AugLagWorkspace)
         μref[] = box_barrier ? _box_barrier_μ(
             μref[], x, submodel0.box_min, submodel0.box_max, δbar, Float64(box_barrier_scale)
         ) : 0.0
+        # Ipopt-style restoration on stall: when the violation has not
+        # improved by more than `restore_tol` over the last `restore_stall`
+        # outer iterations, solve the feasibility-only problem to recover a
+        # feasible reference point, re-seed the equality multipliers there
+        # and continue the main phase from it.
+        if restore && restore_stall > 0 && length(vhist) == restore_stall &&
+            (
+                restore_tol_mode === :relative ?
+                vhist[end] >= (1 - restore_tol) * vhist[1] :
+                vhist[end] >= vhist[1] - restore_tol
+            ) && n_restores < 2
+            xr = _restore_feasible(eq_fs, ineq_fs, model, relaxed, submodel0, copy(x), restore_prox)
+            vraw_r = _raw_violation(model, relaxed, xr)
+            if vraw_r < _raw_violation(model, relaxed, x)
+                x = copy(xr)
+                vnorm = norm(_scaled_violation(eq_fs, ineq_fs, model, relaxed, x), Inf)
+                fx = obj(x)
+                if lsq_multipliers && !isempty(eq_rel)
+                    y = _lsq_multipliers_scaled(scaled_obj, eq_fs, x)
+                end
+                if vraw_r < vraw_rest
+                    x_rest = copy(xr)
+                    fx_rest = fx
+                    vraw_rest = vraw_r
+                end
+                n_restores += 1
+            end
+            empty!(vhist)
+        end
         sd_terms = _sd_terms(model, sd_rel, ρ, x, Y, penalty)
         build_al = sd_t -> if use_elastic
             _elastic_objective(
@@ -1403,7 +1575,9 @@ function optimize!(workspace::AugLagWorkspace)
                 # restore from the last good iterate (x may hold the
                 # blown-up point here)
                 xgood = use_elastic ? @view(x_sub[1:n]) : x_sub
-                x = _restore_feasible(model, relaxed, submodel0, copy(xgood))
+                x = _restore_feasible(
+                    eq_fs, ineq_fs, model, relaxed, submodel0, copy(xgood), restore_prox
+                )
                 vnorm = norm(
                     _scaled_violation(eq_fs, ineq_fs, model, relaxed, x), Inf
                 )
@@ -1528,6 +1702,10 @@ function optimize!(workspace::AugLagWorkspace)
             )
         end
         vprev = vnorm
+        if restore && restore_stall > 0
+            push!(vhist, vnorm)
+            length(vhist) > restore_stall && popfirst!(vhist)
+        end
         if watchdog && ρ != ρ_before
             # The AL objective's scale changed with the penalty: the frozen
             # reference no longer applies, so give the next step a free pass
@@ -1549,6 +1727,14 @@ function optimize!(workspace::AugLagWorkspace)
         end
         vnorm <= ctol && break
     end
+    # Report the best restoration point when it is strictly more feasible
+    # (in the raw metric the restoration minimizes) than the final
+    # main-phase iterate — the main phase is not feasibility-preserving,
+    # so its terminal iterate can be infeasible even though a restoration
+    # phase reached feasibility earlier.
+    vraw_final = _raw_violation(model, relaxed, x)
+    reported_x = (x_rest !== nothing && vraw_rest < vraw_final) ? x_rest : x
+    reported_fx = (x_rest !== nothing && vraw_rest < vraw_final) ? fx_rest : fx
     workspace.state = (
         n=n,
         m_eq=m_eq,
@@ -1558,7 +1744,7 @@ function optimize!(workspace::AugLagWorkspace)
         ineq_rel=copy(ineq_rel),
         sd_rel=copy(sd_rel),
         elastic=use_elastic,
-        x=copy(x),
+        x=copy(reported_x),
         y=[copy(yk) for yk in y],
         λ=[copy(λk) for λk in λ],
         scales=copy(scales),
@@ -1572,7 +1758,9 @@ function optimize!(workspace::AugLagWorkspace)
         filter_v=copy(filter_v),
         approx=qn_approx,
     )
-    return AugLagResult(copy(x), fx, nothing, keep_all ? trajectory : nothing)
+    return AugLagResult(
+        copy(reported_x), reported_fx, nothing, keep_all ? trajectory : nothing
+    )
 end
 
 # Least-squares multiplier initialization over the scaled equality

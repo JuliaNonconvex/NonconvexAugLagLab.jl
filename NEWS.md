@@ -2,8 +2,49 @@
 
 ## 0.2.10
 
-- Fixed the elastic-mode Anderson acceleration residual: the slack is now included (`ρw(c − s)`), matching the fixed-point map actually being iterated.
-## 0.2.9
+- **Proximal regularization (opt-in)**: `AugLagOptions(prox = τ)` adds
+  `τ/2‖x − x̄‖²` to the AL subproblems. 10% faster on Rosetta case5 with
+  slightly better feasibility (151.7 vs 169.2 s, viol 0.584 vs 0.599); on
+  TopOpt local-stress the single-level solve is 32% faster and more
+  feasible but converges to a heavier design (anchor bias), while the
+  3-stage SIMP continuation wins outright: 2.7× faster (204 vs 560 s) and
+  a lighter final design (obj 0.186 vs 0.187) at viol 5.3e-9 — opt-in.
+  Prox composes with every penalty mode and with `sub_approx = :sr1`; the
+  `newton` subproblems now add the τI term to their exact Hessians.
+  Combinations measured on Rosetta case5: prox+PBM is 13% faster with a
+  lower f but less feasible (159.5 s, viol 0.524 vs 183.4 s, 0.399);
+  prox+SR1 is 27% faster but far from the optimum (f = 14187, viol 0.158
+  vs f = 17576, viol 0.016) — not recommended.
+- **L-SR1 subproblem curvature (opt-in)**: `AugLagOptions(sub_approx = :sr1)`
+  uses limited-memory symmetric rank-one for the trust-region subproblems.
+  Massive Rosetta case5 win (80 vs 219 s, viol 0.016 vs 0.60) but slower on
+  TopOpt — opt-in, L-BFGS stays the default.
+- **Auto ρ_init calibration (opt-in)**: `AugLagOptions(auto_ρ_init = true)`
+  calibrates the initial penalty from ‖∇f(x0)‖ / ‖c̃⁺(x0)‖. Wins Rosetta
+  case5 (viol 0.34 vs 0.60 at 200 outer iterations) but loses TopOpt
+  (near-feasible starts → over-large penalty); opt-in, off by default.
+- **Ipopt-style restoration trigger (opt-in)**: `AugLagOptions(restore = true,
+  restore_stall = k, restore_tol = t, restore_tol_mode = :relative|:absolute,
+  restore_prox = τ)` enters the feasibility-restoration phase not only on
+  subproblem blow-ups (existing `restore`) but also when feasibility
+  stalls: the violation improves by less than `restore_tol` (relative or
+  absolute) over `restore_stall` outer iterations. The restoration
+  minimizes the raw squared violations over the box with the built-in
+  quasi-Newton driver, in the formulation-scaled variables (diagonal
+  inverse premultiplier from the JᵀJ diagonal), with an optional
+  per-variable pseudo-Huber anchor (`restore_prox`); the restored point
+  replaces the iterate, the equality multipliers are re-estimated there,
+  and the most-feasible point (restoration or final iterate) is reported.
+  Measured on Rosetta AC-OPF case5: viol 0.60 → 1.6e-6 with f = 17858
+  (the true optimum) at ~1.8× the default time — a decisive opt-in win
+  (both tolerance modes). On the TopOpt SAND tutorial it fires but cannot
+  close the equilibrium gap (first-order KᵀK conditioning wall; the
+  nested solve is the documented NAND fix); `restore_stall = 0` (default)
+  keeps the blow-up-only trigger.
+- **Breaking (unreleased branch)**: the `QuasiNewtonAlg` step-strategy option
+  is renamed `linesearch` → `globalization` (the values include
+  `:trustregion` and `:tron`, which are not line searches). The
+  `AugLagOptions.sub_options` named tuple forwards `globalization` now.
 
 - Removed a stray planning note from the `AugLagOptions` docstring;
   restructured NEWS.md (newest-first order, no `v` prefixes, added the
