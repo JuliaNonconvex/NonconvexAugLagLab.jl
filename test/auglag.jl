@@ -696,3 +696,84 @@ end
     @test abs(r.minimizer[1] + r.minimizer[2] - 1) < 1e-3
     @test r.minimizer[1] <= 0.5 + 1e-3
 end
+
+@testitem "AugLagAlg: stall-triggered restoration" begin
+    using NonconvexAugLagLab, NonconvexCore, Test, LinearAlgebra
+
+    # A sub-solver that returns its start point unchanged: the outer
+    # violation never improves, so the stall trigger fires and the
+    # built-in restoration must solve the feasibility-only problem.
+    struct StuckAlg <: NonconvexCore.AbstractOptimizer end
+    NonconvexCore.solver_capabilities(::StuckAlg) = ConstraintCapabilities(;
+        box=true, continuous=true, infinite_bounds=true
+    )
+    struct StuckResult{X} <: NonconvexCore.AbstractResult
+        minimizer::X
+        minimum::Float64
+    end
+    struct StuckWS{M,X} <: Workspace
+        model::M
+        x0::X
+    end
+    function Workspace(model::NonconvexCore.VecModel, ::StuckAlg, x0; kwargs...)
+        return StuckWS(model, copy(x0))
+    end
+    NonconvexCore.optimize!(ws::StuckWS) = StuckResult(copy(ws.x0), 0.0)
+
+    m = Model(x -> x[1]^2 + x[2]^2)
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+    # restoration disabled: the stuck solver leaves the iterate infeasible
+    r_off = optimize(
+        m, AugLagAlg(StuckAlg()), [0.0, 0.0];
+        options=AugLagOptions(max_iter=10, filter=false, restore=true, restore_stall=0),
+    )
+    @test abs(sum(r_off.minimizer) - 1) > 0.5
+    # stall-triggered restoration (a very lax tolerance guarantees firing):
+    # the reported point is the feasibility-restored one
+    r_on = optimize(
+        m, AugLagAlg(StuckAlg()), [0.0, 0.0];
+        options=AugLagOptions(
+            max_iter=10, filter=false, restore=true, restore_stall=2, restore_tol=0.9,
+        ),
+    )
+    @test abs(sum(r_on.minimizer) - 1) < 1e-4
+    # the anchor keeps the restored point near the pre-restoration iterate
+    r_anch = optimize(
+        m, AugLagAlg(StuckAlg()), [0.0, 0.0];
+        options=AugLagOptions(
+            max_iter=10, filter=false, restore=true, restore_stall=2,
+            restore_tol=0.9, restore_prox=1e2,
+        ),
+    )
+    @test abs(sum(r_anch.minimizer) - 1) > abs(sum(r_on.minimizer) - 1)
+
+    # option validation
+    @test_throws ArgumentError AugLagOptions(restore_stall=-1)
+    @test_throws ArgumentError AugLagOptions(restore_tol=0.0)
+    @test_throws ArgumentError AugLagOptions(restore_tol_mode=:bad)
+    @test_throws ArgumentError AugLagOptions(restore_tol=2.0, restore_tol_mode=:relative)
+    @test_throws ArgumentError AugLagOptions(restore_prox=-1.0)
+end
+
+@testitem "AugLagAlg: raw violation metric" begin
+    using NonconvexAugLagLab, NonconvexCore, Test
+
+    m = Model(x -> x[1]^2 + x[2]^2)
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+    add_ineq_constraint!(m, x -> x[1] - 2.0)
+    vm, x0, _ = NonconvexCore.tovecmodel(m, [0.0, 0.0])
+    # raw violation = max over the relaxed groups of the raw inf-norms:
+    # eq |x1+x2-1| = 1, ineq (x1-2)^+ = 0 at x0
+    @test NonconvexAugLagLab._raw_violation(vm, NonconvexAugLagLab.RelaxConstraintSelection(), x0) ≈ 1.0
+    # feasible point: both groups zero
+    @test NonconvexAugLagLab._raw_violation(
+        vm, NonconvexAugLagLab.RelaxConstraintSelection(), [1.0, 0.0]
+    ) ≈ 0.0
+    # infeasible inequality dominates: at (2.5, -1.5) the equality holds and
+    # the raw violation is the inequality excess 0.5
+    @test NonconvexAugLagLab._raw_violation(
+        vm, NonconvexAugLagLab.RelaxConstraintSelection(), [2.5, -1.5]
+    ) ≈ 0.5
+end
