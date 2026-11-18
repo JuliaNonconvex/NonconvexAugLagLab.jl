@@ -309,3 +309,16 @@ end
     )
     @test norm(dneg) ≈ 10.0
 end
+
+@testitem "QuasiNewtonAlg: preconditioned Steihaug CG under the trust region" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra
+    m = Model(x -> (1 - x[1])^2 + 100 * (x[2] - x[1]^2)^2)
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    alg = QuasiNewtonAlg(
+        LBFGSApprox(10; H0=DiagonalPreconditioner([1.0, 100.0]));
+        globalization=:trustregion,
+        max_iter=500,
+    )
+    r = optimize(m, alg, [-1.2, 1.0])
+    @test norm(r.minimizer - [1.0, 1.0]) < 1e-3
+end
