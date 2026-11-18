@@ -1340,13 +1340,13 @@ function optimize!(workspace::AugLagWorkspace)
         # iterate leave the box at convergence
         μref[] = if box_barrier
             _box_barrier_μ(
-            μref[],
-            x,
-            submodel0.box_min,
-            submodel0.box_max,
-            δbar,
-            Float64(box_barrier_scale),
-        )
+                μref[],
+                x,
+                submodel0.box_min,
+                submodel0.box_max,
+                δbar,
+                Float64(box_barrier_scale),
+            )
         else
             0.0
         end

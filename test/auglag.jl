@@ -219,9 +219,8 @@ end
     struct _AlwaysFailAlg <: NonconvexCore.AbstractOptimizer
         calls::Base.RefValue{Int}
     end
-    NonconvexCore.solver_capabilities(::_AlwaysFailAlg) = ConstraintCapabilities(;
-        box=true, continuous=true, infinite_bounds=true
-    )
+    NonconvexCore.solver_capabilities(::_AlwaysFailAlg) =
+        ConstraintCapabilities(; box=true, continuous=true, infinite_bounds=true)
     struct _AlwaysFailWorkspace <: NonconvexCore.Workspace
         model::NonconvexCore.VecModel
         alg::_AlwaysFailAlg
@@ -353,9 +352,8 @@ end
         minimizer::X
         minimum::Float64
     end
-    NonconvexCore.solver_capabilities(::AlwaysWorseAlg) = ConstraintCapabilities(;
-        box=true, continuous=true, infinite_bounds=true
-    )
+    NonconvexCore.solver_capabilities(::AlwaysWorseAlg) =
+        ConstraintCapabilities(; box=true, continuous=true, infinite_bounds=true)
     struct AlwaysWorseWorkspace{M,X} <: Workspace
         model::M
         x0::X
@@ -397,7 +395,7 @@ end
     using NonconvexAugLagLab, NonconvexCore, Test, LinearAlgebra, JuMP
     # JuMP-converted model: the Hessian comes from the MOI evaluator
     jm = JuMP.Model()
-    JuMP.@variable(jm, -5 <= x[1:2] <= 5, start = 0.0)
+    JuMP.@variable(jm, -5 <= x[1:2] <= 5, start=0.0)
     JuMP.@objective(jm, Min, (x[1] - 1)^2 + (x[2] - 1)^2)
     JuMP.@constraint(jm, x[1]^2 + x[2] - 2 == 0)   # nonlinear → expression path
     dm = DictModel(jm)
@@ -469,9 +467,8 @@ end
         minimizer::X
         minimum::Float64
     end
-    NonconvexCore.solver_capabilities(::NaNAlg) = ConstraintCapabilities(;
-        box=true, continuous=true, infinite_bounds=true
-    )
+    NonconvexCore.solver_capabilities(::NaNAlg) =
+        ConstraintCapabilities(; box=true, continuous=true, infinite_bounds=true)
     struct NW{M,X} <: Workspace
         model::M
         x0::X
@@ -704,9 +701,8 @@ end
     # violation never improves, so the stall trigger fires and the
     # built-in restoration must solve the feasibility-only problem.
     struct StuckAlg <: NonconvexCore.AbstractOptimizer end
-    NonconvexCore.solver_capabilities(::StuckAlg) = ConstraintCapabilities(;
-        box=true, continuous=true, infinite_bounds=true
-    )
+    NonconvexCore.solver_capabilities(::StuckAlg) =
+        ConstraintCapabilities(; box=true, continuous=true, infinite_bounds=true)
     struct StuckResult{X} <: NonconvexCore.AbstractResult
         minimizer::X
         minimum::Float64
