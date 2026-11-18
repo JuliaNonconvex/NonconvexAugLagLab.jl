@@ -260,7 +260,7 @@ end
     r4 = optimize(
         m4,
         QuasiNewtonAlg(
-            NewtonTRApprox(); globalization=:trustregion, soc=true, Δ0=10.0, max_iter=500
+            NewtonTRApprox(); globalization=:trustregion, soc=true, delta0=10.0, max_iter=500
         ),
         [0.1],
     )

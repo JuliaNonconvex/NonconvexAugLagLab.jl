@@ -407,7 +407,7 @@ _steihaug_precond(a) = hasproperty(a, :precond) ? a.precond : nothing
 # ------------------------------------------------------------------
 """
     QuasiNewtonAlg(approx = LBFGSApprox(10); globalization = :backtracking,
-                   max_iter = 200, tol = 1e-6, damping = true, Δ0 = 1.0)
+                   max_iter = 200, tol = 1e-6, damping = true, delta0 = 1.0)
 
 A smooth box-constrained quasi-Newton optimizer: `approx` is any
 [`AbstractHessianApprox`](@ref) (L-BFGS with an optional preconditioner, dense
@@ -422,7 +422,7 @@ struct QuasiNewtonAlg{A<:AbstractHessianApprox} <: AbstractOptimizer
     max_iter::Int
     tol::Real
     damping::Bool
-    Δ0::Real
+    delta0::Real
     reset::Bool
     nonmonotone::Bool
     soc::Bool
@@ -453,7 +453,7 @@ function QuasiNewtonAlg(
     max_iter::Int=200,
     tol::Real=1e-6,
     damping::Bool=true,
-    Δ0::Real=1.0,
+    delta0::Real=1.0,
     reset::Bool=true,
     nonmonotone::Bool=false,
     soc::Bool=false,
@@ -469,7 +469,7 @@ function QuasiNewtonAlg(
         max_iter,
         tol,
         damping,
-        Δ0,
+        delta0,
         reset,
         nonmonotone,
         soc,
@@ -567,7 +567,7 @@ function optimize!(workspace::QuasiNewtonWorkspace)
     # Core value_gradient may reuse its output buffer across calls: copy it
     # out immediately, never hold a reference across another gradient call.
     g = copy(gradfun(x))
-    Δ = optimizer.Δ0
+    Δ = optimizer.delta0
     τ = optimizer.levenberg ? 1e-8 : 0.0
     merits = Float64[]
     M = 5
@@ -598,7 +598,7 @@ function optimize!(workspace::QuasiNewtonWorkspace)
                 fx = fnew
                 g .= gradfun(x)
                 norm(g, Inf) < optimizer.tol && break
-                Δ = min(10Δ, optimizer.Δ0 * 10)
+                Δ = min(10Δ, optimizer.delta0 * 10)
                 τ = optimizer.levenberg ? max(τ / 2, 1e-10) : 0.0
             else
                 Δ = max(Δ / 2, 1e-10)
@@ -636,7 +636,7 @@ function optimize!(workspace::QuasiNewtonWorkspace)
                 fx = fnew
                 g .= gradfun(x)
                 norm(g, Inf) < optimizer.tol && break
-                Δ = min(10Δ, optimizer.Δ0 * 10)
+                Δ = min(10Δ, optimizer.delta0 * 10)
                 τ = optimizer.levenberg ? max(τ / 2, 1e-10) : 0.0
             elseif optimizer.soc
                 # Second-order correction (Ipopt, opt-in): re-solve the model
@@ -656,7 +656,7 @@ function optimize!(workspace::QuasiNewtonWorkspace)
                     fx = fnsoc
                     g .= gradfun(x)
                     norm(g, Inf) < optimizer.tol && break
-                    Δ = min(10Δ, optimizer.Δ0 * 10)
+                    Δ = min(10Δ, optimizer.delta0 * 10)
                     τ = optimizer.levenberg ? max(τ / 2, 1e-10) : 0.0
                 else
                     Δ = max(Δ / 2, 1e-10)

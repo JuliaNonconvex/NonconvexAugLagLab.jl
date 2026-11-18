@@ -41,9 +41,9 @@
         @test rm.minimum < 0.7
     end
     @test_throws ArgumentError AugLagOptions(penalty=:foo)
-    @test_throws ArgumentError AugLagOptions(ρ_init=0.0)
-    @test_throws ArgumentError AugLagOptions(ρ_incr=1.0)
-    @test_throws ArgumentError AugLagOptions(ρ_decr=0.5)
+    @test_throws ArgumentError AugLagOptions(rho_init=0.0)
+    @test_throws ArgumentError AugLagOptions(rho_incr=1.0)
+    @test_throws ArgumentError AugLagOptions(rho_decr=0.5)
 end
 
 @testitem "AugLagOptions: weights, lsq_multipliers and custom penalty schedule" begin
@@ -57,14 +57,14 @@ end
     options = AugLagOptions(
         weights=[2.0],
         lsq_multipliers=true,
-        ρ_init=1.0,
-        ρ_max=1e6,
-        ρ_incr=2.0,
-        ρ_decr=4.0,
+        rho_init=1.0,
+        rho_max=1e6,
+        rho_incr=2.0,
+        rho_decr=4.0,
         max_iter=100,
         ctol=1e-6,
-        η₀=0.9,
-        ω₀=1.5,
+        eta0=0.9,
+        omega0=1.5,
         keep_all=true,
     )
     r = optimize(m, AugLagAlg(), [0.5, 0.5], options=options)
@@ -108,7 +108,7 @@ end
         r = optimize(m, alg, [-1.2, 1.0])
         @test norm(r.minimizer - [1.0, 1.0]) < 1e-3
     end
-    # damping off + explicit identity preconditioner + trust-region Δ0
+    # damping off + explicit identity preconditioner + trust-region delta0
     m = Model(rosen)
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
     alg = QuasiNewtonAlg(LBFGSApprox(5; H0=IdentityPreconditioner()); damping=false)

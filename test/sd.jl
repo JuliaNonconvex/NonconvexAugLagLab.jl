@@ -83,7 +83,7 @@ end
     @test dm.sd_constraints.fs[1] isa NonconvexSemidefinite.BlockSDConstraint
 
     r = NonconvexCore.optimize(
-        dm, AugLagAlg(), [2.0, 2.0]; options=AugLagOptions(ρ_init=100.0)
+        dm, AugLagAlg(), [2.0, 2.0]; options=AugLagOptions(rho_init=100.0)
     )
     @test abs(r.minimizer[1] - 1.0) < 5e-2
     @test abs(r.minimizer[2] - 1.0) < 5e-2

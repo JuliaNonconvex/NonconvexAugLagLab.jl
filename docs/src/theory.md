@@ -91,7 +91,7 @@ The multiplier update is clamped ($|y|, \lambda \le 10^8$) so a poorly
 solved subproblem cannot poison the next one with a huge multiplier.
 Instead of escalating the *global* penalty when a single constraint group
 is violated, the **selective** update (`weights`) bumps only the weights of
-the most-violated groups (by `ρ_incr`, capped at `ρ_max/ρ`), escalating
+the most-violated groups (by `rho_incr`, capped at `rho_max/ρ`), escalating
 $\rho$ itself only when no single group stands out. This keeps the
 well-behaved groups' subproblems well-conditioned while the offender is
 penalized harder — the per-group generalization of the Birgin–Martínez

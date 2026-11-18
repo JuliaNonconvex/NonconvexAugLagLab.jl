@@ -301,7 +301,7 @@ end
         m,
         AugLagAlg(),
         [1.0];
-        options=AugLagOptions(; max_iter=20, ρ_init=10.0, ρ_decr=10.0),
+        options=AugLagOptions(; max_iter=20, rho_init=10.0, rho_decr=10.0),
     )
     @test abs(r.minimizer[1] - 1.0) < 1e-4
 end
@@ -398,18 +398,18 @@ end
     JuMP.@constraint(jm, x[1]^2 + x[2] - 2 == 0)   # nonlinear → expression path
     dm = DictModel(jm)
     x0 = NonconvexCore.getinit(dm)
-    r = optimize(dm, AugLagAlg(), x0; options = AugLagOptions(max_iter = 100, newton = true))
+    r = optimize(dm, AugLagAlg(), x0; options = AugLagOptions(max_iter = 100, curvature = :newton))
     @test norm(r.minimizer[:x] - [1.0, 1.0]) < 1e-2
     # plain model: the Hessian comes from AD
     m = NonconvexCore.Model(x -> (x[1] - 1)^2 + (x[2] - 1)^2)
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
     add_eq_constraint!(m, x -> x[1] + x[2] - 1)
     add_ineq_constraint!(m, x -> x[1] - x[2] - 0.5)
-    r2 = optimize(m, AugLagAlg(), [0.0, 0.0]; options = AugLagOptions(max_iter = 40, newton = true))
+    r2 = optimize(m, AugLagAlg(), [0.0, 0.0]; options = AugLagOptions(max_iter = 40, curvature = :newton))
     @test norm(r2.minimizer - [0.5, 0.5]) < 5e-2
     # guard rails: PBM penalties are not supported
     @test_throws ArgumentError optimize(
-        dm, AugLagAlg(), x0; options = AugLagOptions(newton = true, penalty = :pbm)
+        dm, AugLagAlg(), x0; options = AugLagOptions(curvature = :newton, penalty = :pbm)
     )
 end
 
@@ -429,7 +429,7 @@ end
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
     add_eq_constraint!(m, x -> x[1] + x[2] - 1)
     r = optimize(m, AugLagAlg(), [0.0, 0.0];
-        options = AugLagOptions(max_iter = 40, auto_ρ_init = true))
+        options = AugLagOptions(max_iter = 40, auto_rho_init = true))
     @test norm(r.minimizer - [0.5, 0.5]) < 1e-3
 end
 
@@ -498,7 +498,7 @@ end
         AugLagAlg(),
         [1.0];
         options=AugLagOptions(;
-            max_iter=20, ρ_init=10.0, ρ_incr=1.2, ρ_max=12.0, ρ_decr=10.0, ω₀=0.1
+            max_iter=20, rho_init=10.0, rho_incr=1.2, rho_max=12.0, rho_decr=10.0, omega0=0.1
         ),
     )
     @test abs(r.minimizer[1] - 1.0) < 1e-4
@@ -593,7 +593,7 @@ end
         x0;
         options=AugLagOptions(;
             max_iter=120,
-            ρ_init=10.0,
+            rho_init=10.0,
             scaling=false,
             sub_options=(; max_iter=300, tol=1e-8, globalization=:trustregion),
         ),
@@ -606,7 +606,7 @@ end
 @testitem "AugLagAlg: penalty-update helpers (escalation and two-way decrease)" begin
     using NonconvexAugLagLab, NonconvexCore, Test
     const NC = NonconvexCore
-    opts = AugLagOptions(; ρ_init=10.0, ρ_incr=10.0, ρ_max=1e4, η₀=0.5, ctol=1e-6)
+    opts = AugLagOptions(; rho_init=10.0, rho_incr=10.0, rho_max=1e4, eta0=0.5, ctol=1e-6)
     # two-way decrease
     @test NonconvexAugLagLab._two_way_step(100.0, opts, true, 0.1, 0.5) == 10.0
     @test NonconvexAugLagLab._two_way_step(2.0, opts, true, 0.1, 0.5) == 2.0
@@ -629,15 +629,15 @@ end
     )
     @test ρ2 == 100.0
     # the default schedule is :bm (full 1/ρ reset)
-    @test η2 == max(opts.η₀ / ρ2, opts.ctol)
+    @test η2 == max(opts.eta0 / ρ2, opts.ctol)
     @test ω2 == max(1 / ρ2, sqrt(eps(Float64)))
     # the gentler :default schedule is still available
-    opts_def = AugLagOptions(; ρ_init=10.0, ρ_incr=10.0, ρ_max=1e4, η₀=0.5,
+    opts_def = AugLagOptions(; rho_init=10.0, rho_incr=10.0, rho_max=1e4, eta0=0.5,
         ctol=1e-6, outer_schedule=:default)
     ρ3, η3, ω3 = NonconvexAugLagLab._escalate_penalty!(
         10.0, 0.5, 1.0, [1000.0], Float64[], 1000.0, opts_def, [1], Int[], eq_fs, ineq_fs, [5.0]
     )
-    @test η3 == max(opts_def.η₀ / ρ3^0.1, opts_def.ctol)
+    @test η3 == max(opts_def.eta0 / ρ3^0.1, opts_def.ctol)
     @test ω3 == max(1 / ρ3^0.1, sqrt(eps(Float64)))
 end
 

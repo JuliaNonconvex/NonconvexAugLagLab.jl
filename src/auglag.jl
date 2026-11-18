@@ -168,20 +168,20 @@ end
   `:mixed_logdet` (PBM for inequalities, logdet for semidefinite). The
   logdet kernels are experimental: measured on the covariance MLE they
   converge but land short of the projected quadratic.
-- `auto_ρ_init`: (opt-in) calibrate the initial penalty from the problem at
+- `auto_rho_init`: (opt-in) calibrate the initial penalty from the problem at
   x0: `ρ = clamp(‖∇f(x0)‖ / max(‖c̃(x0)‖, ε), 1, 1e6)` on the scaled
   constraints — the penalty gradient then balances the objective gradient,
-  avoiding the measured escalation waste (the default `ρ_init = 10` needs
+  avoiding the measured escalation waste (the default `rho_init = 10` needs
   ~130 outer iterations of escalation on AC-OPF). Measured: wins Rosetta
   AC-OPF case5 (viol 0.34 vs 0.60 at 200 outer iterations) but loses the
   TopOpt local-stress problem badly (near-feasible starts give a tiny
   scaled violation and an over-large penalty: viol 0.009 vs 5.7e-6, 7×
   slower) — opt-in for infeasible-start problems, off by default.
-- `ρ_init`, `ρ_max`, `ρ_incr`, `ρ_decr`: initial/maximum penalty and the
+- `rho_init`, `rho_max`, `rho_incr`, `rho_decr`: initial/maximum penalty and the
   increase/decrease factors (two-way adaptation).
 - `max_iter`: maximum outer iterations.
 - `ctol`: feasibility tolerance.
-- `η₀`, `ω₀`: initial feasibility/optimality targets of the subproblems.
+- `eta0`, `omega0`: initial feasibility/optimality targets of the subproblems.
 - `weights`: per-constraint-group penalty weights (default: all ones).
 - `lsq_multipliers`: initialize equality multipliers from the least-squares
   stationarity residual (default `true`).
@@ -190,7 +190,7 @@ end
   at the outer iterate — conditions the ill-conditioned subproblems of the
   escalated penalty. `0` (default) disables it. Composes with every penalty
   mode (`:bm`, `:pbm`, `:mixed`, `:logdet`, `:mixed_logdet`) and with
-  `sub_approx = :sr1`; with `newton`, the exact-Hessian subproblems add the
+  `curvature = :sr1`; with `curvature = :newton`, the exact-Hessian subproblems add the
   τI term (the prox term's true curvature). Only the `two_level` inner loop
   rebuilds from the un-proxed objective, so its inner anchor replaces the
   outer prox. Measured: 10% faster with slightly better feasibility on
@@ -202,22 +202,28 @@ end
   0.187) at viol 5.3e-9 — opt-in. Combinations measured on Rosetta case5:
   with `penalty = :pbm`, prox is 13% faster and lands on a lower f but
   less feasible (159.5 s, viol 0.524 vs 183.4 s, 0.399 — no dominant win);
-  with `sub_approx = :sr1`, prox is 27% faster but far from the optimum
+  with `curvature = :sr1`, prox is 27% faster but far from the optimum
   (57.6 s, f = 14187, viol 0.158 vs 78.9 s, f = 17576, viol 0.016) — the
   anchor counteracts SR1's curvature exploration, so the combination is
   not recommended.
 - `memory`: L-BFGS memory of the built-in subproblem solver (default `50`;
   the curvature history is reused across outer iterations).
-- `sub_approx`: the curvature approximation of the built-in subproblem
-  solver, `:lbfgs` (default) or `:sr1` (limited-memory symmetric rank-one —
-  captures indefiniteness, intended for the trust-region subproblems).
-  Measured: a massive Rosetta AC-OPF case5 win (80 vs 219 s, viol 0.016
-  vs 0.60, f near the true optimum) but slower on the TopOpt local-stress
-  problem (no completion within 31 min vs ~6 min for L-BFGS) — opt-in.
+- `curvature`: the curvature approximation of the built-in subproblem
+  solver, `:lbfgs` (default), `:sr1` (limited-memory symmetric rank-one —
+  captures indefiniteness, intended for the trust-region subproblems) or
+  `:newton` (experimental, opt-in: exact-Hessian Newton trust-region
+  solves — MathOptInterface evaluator Hessians for JuMP-converted models,
+  AD otherwise, with the stale-Cholesky preconditioned Steihaug CG; the
+  box-barrier mode auto-pairs with it). Measured: `:sr1` is a massive
+  Rosetta AC-OPF case5 win (80 vs 219 s, viol 0.016 vs 0.60, f near the
+  true optimum) but slower on the TopOpt local-stress problem (no
+  completion within 31 min vs ~6 min for L-BFGS) — opt-in; `:newton` with
+  `box_barrier` solves case5 to the true optimum (43.8 s, f = 17553,
+  viol 3.5e-8) — second-order only, opt-in.
 - `elastic`: relax the equalities through slack variables,
   `yᵀ(c−s) + ρ/2‖c−s‖² + μΣ√(sᵢ²+ε²)`, the elastic mode of the augmented
   Lagrangian (more robust to infeasible subproblems; default `false`).
-- `elastic_μ`: the slack penalty coefficient of the elastic mode.
+- `elastic_mu`: the slack penalty coefficient of the elastic mode.
 - `warm_continue`: reuse the previous run's final iterate, multipliers,
   per-group weights and quasi-Newton curvature when `optimize!` is called
   again on the same workspace (e.g. across the stages of a SIMP
@@ -283,17 +289,6 @@ end
   and the objective by its initial magnitude (Curtis–Jiang–Robinson style
   scaling), so the penalty applies to balanced, unit-scaled constraint
   violations (default `true`).
-- `newton`: (experimental, opt-in) exact-Hessian (Newton trust-region)
-  subproblem solves. The Hessian source is detected automatically: the
-  MathOptInterface evaluator for JuMP-converted models (with the
-  stale-Cholesky-preconditioned Steihaug CG), AD (`value_hessian`) for all
-  other models. `penalty = :quadratic`, no semidefinite constraints, no
-  elastic mode, `globalization = :trustregion` required; the box barrier is
-  automatic with this mode (`box_barrier = missing`). Measured on Rosetta
-  AC-OPF case5: with `ρ_init = 100` it converges to `viol = 1e-6` in 86 s
-  (the L-BFGS subproblem solves stall at viol ≈ 0.34 after 268 s); with
-  the box barrier it converges in 13 outer iterations (10.9 s warm) to the
-  exact optimum at an O(μ)-floor bound bias.
 - `two_level`, `two_level_iters`, `two_level_tau`: (experimental, opt-in)
   two-level semi-proximal inner loop for the semidefinite block
   (SDPNAL+-style sPADMM adapted to nonlinear `P(x)`, plan S2 option B):
@@ -312,7 +307,7 @@ end
   projected in the subproblem (fraction-to-boundary at τ = 1) so the
   iterate never leaves the bounds.
   `box_barrier = missing` (the default) is automatic: **on** with
-  `newton` (measured on Rosetta case5: 43.8 s to f = 17553, viol 3.5e-8)
+  `curvature = :newton` (measured on Rosetta case5: 43.8 s to f = 17553, viol 3.5e-8)
   and **off** with the first-order subproblems (measured harmful there:
   viol 0.66 vs 0.40).
 - `pbm_adaptive`: (opt-in) Ipopt-style barrier adaptation for the PBM
@@ -363,23 +358,23 @@ mutable struct AugLagOptions{S,R,W}
     sub_options::S
     relaxed::R
     penalty::Symbol
-    ρ_init::Real
-    ρ_max::Real
-    ρ_incr::Real
-    ρ_decr::Real
-    auto_ρ_init::Bool
-    sub_approx::Symbol
+    rho_init::Real
+    rho_max::Real
+    rho_incr::Real
+    rho_decr::Real
+    auto_rho_init::Bool
+    curvature::Symbol
     prox::Real
     max_iter::Int
     ctol::Real
-    η₀::Real
-    ω₀::Real
+    eta0::Real
+    omega0::Real
     weights::W
     lsq_multipliers::Bool
     scaling::Bool
     memory::Int
     elastic::Bool
-    elastic_μ::Real
+    elastic_mu::Real
     warm_continue::Bool
     filter::Bool
     watchdog::Bool
@@ -393,7 +388,7 @@ mutable struct AugLagOptions{S,R,W}
     h0::Symbol
     sub_tol_schedule::Symbol
     outer_schedule::Symbol
-    newton::Bool
+
     two_level::Bool
     two_level_iters::Int
     two_level_tau::Real
@@ -412,23 +407,23 @@ function AugLagOptions(;
     sub_options=nothing,
     relaxed=RelaxConstraintSelection(),
     penalty::Symbol=:quadratic,
-    ρ_init::Real=10.0,
-    ρ_max::Real=1e10,
-    ρ_incr::Real=10.0,
-    ρ_decr::Real=10.0,
-    auto_ρ_init::Bool=false,
-    sub_approx::Symbol=:lbfgs,
+    rho_init::Real=10.0,
+    rho_max::Real=1e10,
+    rho_incr::Real=10.0,
+    rho_decr::Real=10.0,
+    auto_rho_init::Bool=false,
+    curvature::Symbol=:lbfgs,
     prox::Real=0.0,
     max_iter::Int=1000,
     ctol::Real=1e-6,
-    η₀::Real=0.5,
-    ω₀::Real=1.0,
+    eta0::Real=0.5,
+    omega0::Real=1.0,
     weights=nothing,
     lsq_multipliers::Bool=true,
     scaling::Bool=true,
     memory::Int=50,
     elastic::Bool=false,
-    elastic_μ::Real=1e3,
+    elastic_mu::Real=1e3,
     warm_continue::Bool=false,
     filter::Bool=true,
     watchdog::Bool=false,
@@ -442,7 +437,7 @@ function AugLagOptions(;
     h0::Symbol=:penalty,
     sub_tol_schedule::Symbol=:eta2,
     outer_schedule::Symbol=:bm,
-    newton::Bool=false,
+
     two_level::Bool=false,
     two_level_iters::Int=5,
     two_level_tau::Real=1.0,
@@ -466,12 +461,12 @@ function AugLagOptions(;
     box_barrier_scale > 0 || throw(ArgumentError("box_barrier_scale must be positive"))
     (box_barrier === true || box_barrier === false || box_barrier === missing) ||
         throw(ArgumentError("box_barrier must be true, false or missing (automatic)"))
-    sub_approx in (:lbfgs, :sr1) ||
-        throw(ArgumentError("sub_approx must be :lbfgs or :sr1"))
+    curvature in (:lbfgs, :sr1, :newton) ||
+        throw(ArgumentError("curvature must be :lbfgs, :sr1 or :newton"))
     prox >= 0 || throw(ArgumentError("prox must be non-negative"))
-    ρ_init > 0 || throw(ArgumentError("ρ_init must be positive"))
-    ρ_incr > 1 || throw(ArgumentError("ρ_incr must be > 1"))
-    ρ_decr > 1 || throw(ArgumentError("ρ_decr must be > 1"))
+    rho_init > 0 || throw(ArgumentError("rho_init must be positive"))
+    rho_incr > 1 || throw(ArgumentError("rho_incr must be > 1"))
+    rho_decr > 1 || throw(ArgumentError("rho_decr must be > 1"))
     0 < watchdog_tau < 1 || throw(ArgumentError("watchdog_tau must be in (0, 1)"))
     watchdog_tol >= 0 || throw(ArgumentError("watchdog_tol must be non-negative"))
     restore_stall >= 0 || throw(ArgumentError("restore_stall must be >= 0"))
@@ -486,23 +481,23 @@ function AugLagOptions(;
         sub_options,
         relaxed,
         penalty,
-        ρ_init,
-        ρ_max,
-        ρ_incr,
-        ρ_decr,
-        auto_ρ_init,
-        sub_approx,
+        rho_init,
+        rho_max,
+        rho_incr,
+        rho_decr,
+        auto_rho_init,
+        curvature,
         prox,
         max_iter,
         ctol,
-        η₀,
-        ω₀,
+        eta0,
+        omega0,
         weights,
         lsq_multipliers,
         scaling,
         memory,
         elastic,
-        elastic_μ,
+        elastic_mu,
         warm_continue,
         filter,
         watchdog,
@@ -516,7 +511,7 @@ function AugLagOptions(;
         h0,
         sub_tol_schedule,
         outer_schedule,
-        newton,
+
         two_level,
         two_level_iters,
         two_level_tau,
@@ -1025,8 +1020,8 @@ end
 # reached without an escalated penalty, or the two-way update disabled)
 # returns rho unchanged.
 function _two_way_step(ρ, options, two_way, vnorm, η)
-    if two_way && vnorm <= η && ρ > options.ρ_init
-        return max(ρ / options.ρ_decr, options.ρ_init)
+    if two_way && vnorm <= η && ρ > options.rho_init
+        return max(ρ / options.rho_decr, options.rho_init)
     end
     return ρ
 end
@@ -1042,25 +1037,25 @@ function _escalate_penalty!(
         for k in eachindex(eq_rel)
             vk = norm(_vecval(eq_fs[k](x)), Inf)
             if vk > η && w_eq[k] < w_max
-                w_eq[k] = min(w_eq[k] * options.ρ_incr, w_max)
+                w_eq[k] = min(w_eq[k] * options.rho_incr, w_max)
                 bumped = true
             end
         end
         for k in eachindex(ineq_rel)
             vk = norm(max.(_vecval(ineq_fs[k](x)), 0.0), Inf)
             if vk > η && w_ineq[k] < w_max
-                w_ineq[k] = min(w_ineq[k] * options.ρ_incr, w_max)
+                w_ineq[k] = min(w_ineq[k] * options.rho_incr, w_max)
                 bumped = true
             end
         end
     end
     if !bumped
-        ρ = min(options.ρ_max, ρ * options.ρ_incr)
+        ρ = min(options.rho_max, ρ * options.rho_incr)
         if options.outer_schedule === :bm
-            η = max(options.η₀ / ρ, options.ctol)
+            η = max(options.eta0 / ρ, options.ctol)
             ω = max(1 / ρ, sqrt(eps(Float64)))
         else
-            η = max(options.η₀ / ρ^0.1, options.ctol)
+            η = max(options.eta0 / ρ^0.1, options.ctol)
             ω = max(1 / ρ^0.1, sqrt(eps(Float64)))
         end
     end
@@ -1069,9 +1064,9 @@ end
 
 function optimize!(workspace::AugLagWorkspace)
     @unpack model, x0, options, sub_alg = workspace
-    @unpack relaxed, penalty, max_iter, ctol, η₀, ω₀ = options
+    @unpack relaxed, penalty, max_iter, ctol, eta0, omega0 = options
     @unpack lsq_multipliers, scaling, keep_all, sub_options, memory = options
-    @unpack elastic, elastic_μ, warm_continue = options
+    @unpack elastic, elastic_mu, warm_continue = options
     @unpack filter, stall_retry, selective, safeguard, two_way = options
     watchdog = options.watchdog
     watchdog_tau = Float64(options.watchdog_tau)
@@ -1091,10 +1086,10 @@ function optimize!(workspace::AugLagWorkspace)
     # automatic box-barrier selection by subproblem order: on with the
     # exact-Hessian (`newton`) subproblems, off with the first-order
     # quasi-Newton subproblems (measured 5.3x faster / harmful resp.)
-    box_barrier = options.box_barrier === missing ? options.newton : options.box_barrier
+    box_barrier = options.box_barrier === missing ? options.curvature === :newton : options.box_barrier
     obj = model.objective
     obj === nothing && throw(ArgumentError("The model has no objective."))
-    ρ = Float64(options.ρ_init)
+    ρ = Float64(options.rho_init)
     x = copy(x0)
     # Warm continuation restarts from the previous final iterate so the
     # constraint scales and multipliers are computed at the carried-over
@@ -1122,10 +1117,10 @@ function optimize!(workspace::AugLagWorkspace)
         ineq_fs = [model.ineq_constraints.fs[i] for i in ineq_rel]
         scales = ones(length(eq_rel) + length(ineq_rel))
     end
-    if options.auto_ρ_init
+    if options.auto_rho_init
         # calibrate ρ so the penalty gradient balances the objective gradient
         # at x0 (on the scaled constraints): avoids the escalation waste of a
-        # too-small ρ_init (measured: ~130 outer iterations on AC-OPF).
+        # too-small rho_init (measured: ~130 outer iterations on AC-OPF).
         _, ∇f = NonconvexCore.value_gradient(obj, x)
         viol0 = 0.0
         for c in eq_fs
@@ -1188,9 +1183,9 @@ function optimize!(workspace::AugLagWorkspace)
             y = _lsq_multipliers_scaled(scaled_obj, eq_fs, x)
         end
     end
-    η = max(η₀, ctol)
-    ω = max(ω₀, 1 / ρ^0.1)
-    w_max = Float64(options.ρ_max) / ρ
+    η = max(eta0, ctol)
+    ω = max(omega0, 1 / ρ^0.1)
+    w_max = Float64(options.rho_max) / ρ
     Y = _sd_init(model, sd_rel, ρ)
     trajectory = Tuple{typeof(x),Real,Real}[]
     fx = obj(x)
@@ -1246,7 +1241,7 @@ function optimize!(workspace::AugLagWorkspace)
         end
         qn_approx = if warm && workspace.state.approx !== nothing
             workspace.state.approx
-        elseif options.sub_approx === :sr1
+        elseif options.curvature === :sr1
             LimitedMemorySR1Approx(memory; H0=h0_op)
         else
             LBFGSApprox(memory; H0=h0_op)
@@ -1257,7 +1252,7 @@ function optimize!(workspace::AugLagWorkspace)
     # for JuMP-converted models and from AD otherwise.
     ρref = Ref(ρ)
     jump_newton_active = false
-    if options.newton
+    if options.curvature === :newton
         penalty === :quadratic ||
             throw(ArgumentError("newton requires penalty = :quadratic"))
         isempty(sd_rel) ||
@@ -1363,7 +1358,7 @@ function optimize!(workspace::AugLagWorkspace)
         build_al = sd_t -> if use_elastic
             _elastic_objective(
                 scaled_obj, eq_fs, ineq_fs, w_eq, w_ineq, ρ, y, λ, penalty, sd_t,
-                elastic_μ, n, m_eq,
+                elastic_mu, n, m_eq,
             )
         else
             _auglag_objective_scaled(
