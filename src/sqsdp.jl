@@ -30,16 +30,16 @@ mutable struct SQSDPOptions
     keep_all::Bool
 end
 function SQSDPOptions(;
-    max_iter::Int = 50,
-    ρ::Real = 10.0,
-    Δ0::Real = 1.0,
-    Δmax::Real = 10.0,
-    η::Real = 0.1,
-    ctol::Real = 1e-6,
-    memory::Int = 10,
-    sub_solver = nothing,
-    sub_options = nothing,
-    keep_all::Bool = false,
+    max_iter::Int=50,
+    ρ::Real=10.0,
+    Δ0::Real=1.0,
+    Δmax::Real=10.0,
+    η::Real=0.1,
+    ctol::Real=1e-6,
+    memory::Int=10,
+    sub_solver=nothing,
+    sub_options=nothing,
+    keep_all::Bool=false,
 )
     return SQSDPOptions(
         max_iter, ρ, Δ0, Δmax, η, ctol, memory, sub_solver, sub_options, keep_all
@@ -57,23 +57,21 @@ struct SQSDPAlg <: AbstractOptimizer end
 
 function NonconvexCore.solver_capabilities(::SQSDPAlg)
     return ConstraintCapabilities(;
-        linear_eq = true,
-        nonlinear_eq = true,
-        linear_ineq = true,
-        nonlinear_ineq = true,
-        linear_sd = true,
-        nonlinear_sd = true,
-        box = true,
-        continuous = true,
-        binary = false,
-        integer = false,
-        infinite_bounds = true,
+        linear_eq=true,
+        nonlinear_eq=true,
+        linear_ineq=true,
+        nonlinear_ineq=true,
+        linear_sd=true,
+        nonlinear_sd=true,
+        box=true,
+        continuous=true,
+        binary=false,
+        integer=false,
+        infinite_bounds=true,
     )
 end
 
-mutable struct SQSDPWorkspace{
-    M<:VecModel,X<:AbstractVector,O<:SQSDPOptions
-} <: Workspace
+mutable struct SQSDPWorkspace{M<:VecModel,X<:AbstractVector,O<:SQSDPOptions} <: Workspace
     model::M
     x0::X
     options::O
@@ -81,8 +79,12 @@ mutable struct SQSDPWorkspace{
 end
 
 function Workspace(
-    model::VecModel, optimizer::SQSDPAlg, x0::AbstractVector, args...;
-    options::SQSDPOptions = SQSDPOptions(), kwargs...,
+    model::VecModel,
+    optimizer::SQSDPAlg,
+    x0::AbstractVector,
+    args...;
+    options::SQSDPOptions=SQSDPOptions(),
+    kwargs...,
 )
     return SQSDPWorkspace(model, copy(x0), options, nothing)
 end
@@ -91,8 +93,8 @@ end
 
 function _sqsdp_merit(model, x, ρ)
     f = model.objective(x)
-    v = sum(c -> sum(abs2, _vecval(c(x))), model.eq_constraints.fs; init = 0.0)
-    v += sum(c -> sum(abs2, max.(_vecval(c(x)), 0.0)), model.ineq_constraints.fs; init = 0.0)
+    v = sum(c -> sum(abs2, _vecval(c(x))), model.eq_constraints.fs; init=0.0)
+    v += sum(c -> sum(abs2, max.(_vecval(c(x)), 0.0)), model.ineq_constraints.fs; init=0.0)
     for (i, c) in enumerate(model.sd_constraints.fs)
         v += sum(abs2, _sd_violation(model, i, x))
     end
@@ -157,7 +159,7 @@ function optimize!(workspace::SQSDPWorkspace)
     y = [zeros(length(_vecval(c(x)))) for c in eq_fs]
     λ = [zeros(length(_vecval(c(x)))) for c in ineq_fs]
     Y = [zeros(sd.dim, sd.dim) for sd in sd_fs]
-    approx = LBFGSApprox(memory; H0 = IdentityPreconditioner())
+    approx = LBFGSApprox(memory; H0=IdentityPreconditioner())
     Δ = Float64(Δ0)
     trajectory = Tuple{typeof(x),Real,Real}[]
     f_new = obj(x)
@@ -174,7 +176,7 @@ function optimize!(workspace::SQSDPWorkspace)
         end
         # QP-with-LMI subproblem: linearized constraints, L-BFGS curvature
         sub = Model(d -> dot(g, d) + 0.5 * dot(d, Bmat * d))
-        addvar!(sub, fill(-Δ, n), fill(Δ, n); init = zeros(n))
+        addvar!(sub, fill(-Δ, n), fill(Δ, n); init=zeros(n))
         for c in eq_fs
             c0 = _vecval(c(x))
             add_eq_constraint!(sub, d -> begin
@@ -196,15 +198,17 @@ function optimize!(workspace::SQSDPWorkspace)
             # functions, and the LMI linearization only needs first-order
             # accuracy (documented first-cut limitation).
             h = 1e-7 * (1 + norm(x, Inf))
-            add_sd_constraint!(sub, d -> begin
-                DPd = (c(x .+ h .* d) .- c(x .- h .* d)) ./ (2h)
-                return DPd .+ P0
-            end)
+            add_sd_constraint!(
+                sub, d -> begin
+                    DPd = (c(x .+ h .* d) .- c(x .- h .* d)) ./ (2h)
+                    return DPd .+ P0
+                end
+            )
         end
         rsub = if options.sub_options === nothing
             optimize(sub, sub_solver, zeros(n))
         else
-            optimize(sub, sub_solver, zeros(n); options = options.sub_options)
+            optimize(sub, sub_solver, zeros(n); options=options.sub_options)
         end
         d = rsub.minimizer
         # trust-region ratio on the AL merit

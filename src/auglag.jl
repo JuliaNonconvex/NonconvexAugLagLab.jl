@@ -441,7 +441,7 @@ function AugLagOptions(;
     two_level::Bool=false,
     two_level_iters::Int=5,
     two_level_tau::Real=1.0,
-    box_barrier = missing,
+    box_barrier=missing,
     box_barrier_scale::Real=1.0,
     restore::Bool=false,
     restore_stall::Int=0,
@@ -452,8 +452,9 @@ function AugLagOptions(;
     tron_cauchy::Bool=false,
     keep_all::Bool=false,
 )
-    penalty in (:quadratic, :pbm, :mixed, :logdet, :mixed_logdet) ||
-        throw(ArgumentError("penalty must be :quadratic, :pbm, :mixed, :logdet or :mixed_logdet"))
+    penalty in (:quadratic, :pbm, :mixed, :logdet, :mixed_logdet) || throw(
+        ArgumentError("penalty must be :quadratic, :pbm, :mixed, :logdet or :mixed_logdet"),
+    )
     outer_schedule in (:default, :bm) ||
         throw(ArgumentError("outer_schedule must be :default or :bm"))
     two_level_iters >= 1 || throw(ArgumentError("two_level_iters must be >= 1"))
@@ -511,7 +512,6 @@ function AugLagOptions(;
         h0,
         sub_tol_schedule,
         outer_schedule,
-
         two_level,
         two_level_iters,
         two_level_tau,
@@ -683,7 +683,7 @@ function _auglag_objective(
     λ,
     sd_terms::Function,
     penalty::Symbol,
-    b_ineq = nothing,
+    b_ineq=nothing,
 )
     eq_rel, ineq_rel, _, _ = _subproblem(model, sel, nothing)
     objective0 = model.objective
@@ -794,7 +794,7 @@ function _auglag_objective_scaled(
     objective0,
     eq_fs,
     ineq_fs,
-    b_ineq = nothing,
+    b_ineq=nothing,
 )
     w_eq, w_ineq = weights
     function _objective(x)
@@ -926,40 +926,41 @@ function _restore_feasible(eq_fs, ineq_fs, model, relaxed, submodel0, x, prox=0.
         submodel0.box_min,
         submodel0.box_max,
     )
-    objr = z -> begin
-        v = 0.0
-        # RAW constraint values: the restoration merit is the physical
-        # feasibility metric, not the solver's internal scaled one (the
-        # CJR scales weight the groups by their Jacobian norms, which on
-        # problems like SAND makes a small-scale group like the volume
-        # constraint dominate the merit while the equilibrium group —
-        # the physically meaningful one — is ignored). Variable-level
-        # conditioning is handled by the formulation's diagonal scaling
-        # below instead.
-        for i in eq_rel
-            v += sum(abs2, _vecval(model.eq_constraints.fs[eq_rel[i]](z)))
+    objr =
+        z -> begin
+            v = 0.0
+            # RAW constraint values: the restoration merit is the physical
+            # feasibility metric, not the solver's internal scaled one (the
+            # CJR scales weight the groups by their Jacobian norms, which on
+            # problems like SAND makes a small-scale group like the volume
+            # constraint dominate the merit while the equilibrium group —
+            # the physically meaningful one — is ignored). Variable-level
+            # conditioning is handled by the formulation's diagonal scaling
+            # below instead.
+            for i in eq_rel
+                v += sum(abs2, _vecval(model.eq_constraints.fs[eq_rel[i]](z)))
+            end
+            for i in ineq_rel
+                v += sum(abs2, max.(_vecval(model.ineq_constraints.fs[ineq_rel[i]](z)), 0.0))
+            end
+            for i in sd_rel
+                v += sum(abs2, _sd_violation(model, i, z))
+            end
+            # optional Rockafellar anchor: stay close to the pre-restoration
+            # iterate (the violation merit alone can wander along its zero
+            # manifold). Per-variable scaled pseudo-Huber (log-cosh) penalty:
+            # f_i = w_i * log(cosh(Delta_i / w_i)) has gradient
+            # tau * tanh(Delta_i / w_i) — magnitude < tau for EVERY variable,
+            # saturating instead of growing linearly, with the transition
+            # width scaled per variable by its box width (a raw Euclidean
+            # anchor would be dominated by the widest block, e.g.
+            # displacements in [-1e3, 1e3] vs densities in [0, 1]).
+            if prox > 0
+                Δ = clamp.((z .- x̄) ./ wscale, -50.0, 50.0)
+                v += prox * sum(wscale .* log.(cosh.(Δ)))
+            end
+            return v
         end
-        for i in ineq_rel
-            v += sum(abs2, max.(_vecval(model.ineq_constraints.fs[ineq_rel[i]](z)), 0.0))
-        end
-        for i in sd_rel
-            v += sum(abs2, _sd_violation(model, i, z))
-        end
-        # optional Rockafellar anchor: stay close to the pre-restoration
-        # iterate (the violation merit alone can wander along its zero
-        # manifold). Per-variable scaled pseudo-Huber (log-cosh) penalty:
-        # f_i = w_i * log(cosh(Delta_i / w_i)) has gradient
-        # tau * tanh(Delta_i / w_i) — magnitude < tau for EVERY variable,
-        # saturating instead of growing linearly, with the transition
-        # width scaled per variable by its box width (a raw Euclidean
-        # anchor would be dominated by the widest block, e.g.
-        # displacements in [-1e3, 1e3] vs densities in [0, 1]).
-        if prox > 0
-            Δ = clamp.((z .- x̄) ./ wscale, -50.0, 50.0)
-            v += prox * sum(wscale .* log.(cosh.(Δ)))
-        end
-        return v
-    end
     # Diagonal inverse premultiplier IN THE FORMULATION (not the solver):
     # d_i = sum_j (dF_j/dz_i)^2 over the stacked RAW merit F = [c; g^+] —
     # the diagonal of the least-squares Hessian J'J. The restoration
@@ -1004,10 +1005,10 @@ function _restore_feasible(eq_fs, ineq_fs, model, relaxed, submodel0, x, prox=0.
     r = optimize(
         rm,
         QuasiNewtonAlg(
-            LBFGSApprox(50; H0 = IdentityPreconditioner());
-            max_iter = 2000,
-            tol = 1e-10,
-            globalization = :trustregion,
+            LBFGSApprox(50; H0=IdentityPreconditioner());
+            max_iter=2000,
+            tol=1e-10,
+            globalization=:trustregion,
         ),
         x ./ Ds,
     )
@@ -1086,7 +1087,11 @@ function optimize!(workspace::AugLagWorkspace)
     # automatic box-barrier selection by subproblem order: on with the
     # exact-Hessian (`newton`) subproblems, off with the first-order
     # quasi-Newton subproblems (measured 5.3x faster / harmful resp.)
-    box_barrier = options.box_barrier === missing ? options.curvature === :newton : options.box_barrier
+    box_barrier = if options.box_barrier === missing
+        options.curvature === :newton
+    else
+        options.box_barrier
+    end
     obj = model.objective
     obj === nothing && throw(ArgumentError("The model has no objective."))
     ρ = Float64(options.rho_init)
@@ -1257,8 +1262,7 @@ function optimize!(workspace::AugLagWorkspace)
             throw(ArgumentError("newton requires penalty = :quadratic"))
         isempty(sd_rel) ||
             throw(ArgumentError("newton does not support semidefinite constraints"))
-        use_elastic &&
-            throw(ArgumentError("newton does not support the elastic mode"))
+        use_elastic && throw(ArgumentError("newton does not support the elastic mode"))
         qn_globalization = :trustregion
         je = _jump_evaluator(model.objective)
         qn_approx = if je !== nothing
@@ -1268,7 +1272,17 @@ function optimize!(workspace::AugLagWorkspace)
             JumpNewtonTRApprox(
                 x -> begin
                     H = _jump_al_hessian(
-                        je, x, eq_fs, ineq_fs, scales, y, λ, w_eq, w_ineq, ρref, fscale,
+                        je,
+                        x,
+                        eq_fs,
+                        ineq_fs,
+                        scales,
+                        y,
+                        λ,
+                        w_eq,
+                        w_ineq,
+                        ρref,
+                        fscale,
                         box_barrier ? submodel0.box_min : nothing,
                         box_barrier ? submodel0.box_max : nothing,
                         μref,
@@ -1304,8 +1318,10 @@ function optimize!(workspace::AugLagWorkspace)
         # bounds by the barrier thickness, so the first subproblem sees the
         # log branch of the barrier rather than the quadratic extension
         for i in 1:n
-            isfinite(submodel0.box_min[i]) && (x[i] = max(x[i], submodel0.box_min[i] + δbar))
-            isfinite(submodel0.box_max[i]) && (x[i] = min(x[i], submodel0.box_max[i] - δbar))
+            isfinite(submodel0.box_min[i]) &&
+                (x[i] = max(x[i], submodel0.box_min[i] + δbar))
+            isfinite(submodel0.box_max[i]) &&
+                (x[i] = min(x[i], submodel0.box_max[i] - δbar))
         end
         μref[] = Float64(box_barrier_scale)
     end
@@ -1322,21 +1338,37 @@ function optimize!(workspace::AugLagWorkspace)
         # the barrier parameter relaxes with η but keeps a nonzero floor
         # (like Ipopt's final μ): a vanishing μ lets the soft-bounded
         # iterate leave the box at convergence
-        μref[] = box_barrier ? _box_barrier_μ(
-            μref[], x, submodel0.box_min, submodel0.box_max, δbar, Float64(box_barrier_scale)
-        ) : 0.0
+        μref[] = if box_barrier
+            _box_barrier_μ(
+            μref[],
+            x,
+            submodel0.box_min,
+            submodel0.box_max,
+            δbar,
+            Float64(box_barrier_scale),
+        )
+        else
+            0.0
+        end
         # Ipopt-style restoration on stall: when the violation has not
         # improved by more than `restore_tol` over the last `restore_stall`
         # outer iterations, solve the feasibility-only problem to recover a
         # feasible reference point, re-seed the equality multipliers there
         # and continue the main phase from it.
-        if restore && restore_stall > 0 && length(vhist) == restore_stall &&
+        if restore &&
+            restore_stall > 0 &&
+            length(vhist) == restore_stall &&
             (
-                restore_tol_mode === :relative ?
-                vhist[end] >= (1 - restore_tol) * vhist[1] :
-                vhist[end] >= vhist[1] - restore_tol
-            ) && n_restores < 2
-            xr = _restore_feasible(eq_fs, ineq_fs, model, relaxed, submodel0, copy(x), restore_prox)
+                if restore_tol_mode === :relative
+                    vhist[end] >= (1 - restore_tol) * vhist[1]
+                else
+                    vhist[end] >= vhist[1] - restore_tol
+                end
+            ) &&
+            n_restores < 2
+            xr = _restore_feasible(
+                eq_fs, ineq_fs, model, relaxed, submodel0, copy(x), restore_prox
+            )
             vraw_r = _raw_violation(model, relaxed, xr)
             if vraw_r < _raw_violation(model, relaxed, x)
                 x = copy(xr)
@@ -1355,60 +1387,83 @@ function optimize!(workspace::AugLagWorkspace)
             empty!(vhist)
         end
         sd_terms = _sd_terms(model, sd_rel, ρ, x, Y, penalty)
-        build_al = sd_t -> if use_elastic
-            _elastic_objective(
-                scaled_obj, eq_fs, ineq_fs, w_eq, w_ineq, ρ, y, λ, penalty, sd_t,
-                elastic_mu, n, m_eq,
-            )
-        else
-            _auglag_objective_scaled(
-                model, relaxed, (w_eq, w_ineq), ρ, y, λ, sd_t, penalty,
-                scaled_obj, eq_fs, ineq_fs, b_ineq,
-            )
-        end
+        build_al =
+            sd_t -> if use_elastic
+                _elastic_objective(
+                    scaled_obj,
+                    eq_fs,
+                    ineq_fs,
+                    w_eq,
+                    w_ineq,
+                    ρ,
+                    y,
+                    λ,
+                    penalty,
+                    sd_t,
+                    elastic_mu,
+                    n,
+                    m_eq,
+                )
+            else
+                _auglag_objective_scaled(
+                    model,
+                    relaxed,
+                    (w_eq, w_ineq),
+                    ρ,
+                    y,
+                    λ,
+                    sd_t,
+                    penalty,
+                    scaled_obj,
+                    eq_fs,
+                    ineq_fs,
+                    b_ineq,
+                )
+            end
         al_obj = build_al(sd_terms)
-        make_submodel = o -> if use_elastic
-            VecModel(
-                Objective(o),
-                submodel0.eq_constraints,
-                submodel0.ineq_constraints,
-                submodel0.sd_constraints,
-                [submodel0.box_min; fill(-1e3, m_eq)],
-                [submodel0.box_max; fill(1e3, m_eq)],
-                [submodel0.init; zeros(m_eq)],
-                [submodel0.integer; falses(m_eq)],
-            )
-        elseif box_barrier
-            # Ipopt-style box barrier with hard projected bounds: the
-            # barrier smooths the merit near the boundary while the
-            # projection enforces it (fraction-to-boundary at tau = 1), so
-            # the iterate can never leave the box - no soft-bounds bias.
-            VecModel(
-                Objective(
-                    _box_barrier_objective(
-                        o, submodel0.box_min, submodel0.box_max, μref[], δbar
+        make_submodel =
+            o -> if use_elastic
+                VecModel(
+                    Objective(o),
+                    submodel0.eq_constraints,
+                    submodel0.ineq_constraints,
+                    submodel0.sd_constraints,
+                    [submodel0.box_min; fill(-1e3, m_eq)],
+                    [submodel0.box_max; fill(1e3, m_eq)],
+                    [submodel0.init; zeros(m_eq)],
+                    [submodel0.integer; falses(m_eq)],
+                )
+            elseif box_barrier
+                # Ipopt-style box barrier with hard projected bounds: the
+                # barrier smooths the merit near the boundary while the
+                # projection enforces it (fraction-to-boundary at tau = 1), so
+                # the iterate can never leave the box - no soft-bounds bias.
+                VecModel(
+                    Objective(
+                        _box_barrier_objective(
+                            o, submodel0.box_min, submodel0.box_max, μref[], δbar
+                        ),
                     ),
-                ),
-                submodel0.eq_constraints,
-                submodel0.ineq_constraints,
-                submodel0.sd_constraints,
-                submodel0.box_min,
-                submodel0.box_max,
-                submodel0.init,
-                submodel0.integer,
-            )
-        else
-            VecModel(
-                Objective(o),
-                submodel0.eq_constraints,
-                submodel0.ineq_constraints,
-                submodel0.sd_constraints,
-                submodel0.box_min,
-                submodel0.box_max,
-                submodel0.init,
-                submodel0.integer,
-            )
-        end
+                    submodel0.eq_constraints,
+                    submodel0.ineq_constraints,
+                    submodel0.sd_constraints,
+                    submodel0.box_min,
+                    submodel0.box_max,
+                    submodel0.init,
+                    submodel0.integer,
+                )
+            else
+                VecModel(
+                    Objective(o),
+                    submodel0.eq_constraints,
+                    submodel0.ineq_constraints,
+                    submodel0.sd_constraints,
+                    submodel0.box_min,
+                    submodel0.box_max,
+                    submodel0.init,
+                    submodel0.integer,
+                )
+            end
         x_sub = use_elastic ? [x; zeros(m_eq)] : x
         al_sub = if prox > 0
             # proximal regularization (Rockafellar): conditions the
@@ -1420,7 +1475,11 @@ function optimize!(workspace::AugLagWorkspace)
         submodel = make_submodel(al_sub)
         checksubproblem!(
             submodel,
-            sub_alg === nothing ? QuasiNewtonAlg(qn_approx::AbstractHessianApprox) : sub_alg;
+            if sub_alg === nothing
+                QuasiNewtonAlg(qn_approx::AbstractHessianApprox)
+            else
+                sub_alg
+            end;
             context="the augmented Lagrangian subproblem",
             hint="relax the constraint in `RelaxConstraintSelection` or choose a sub-solver that supports it.",
         )
@@ -1490,14 +1549,14 @@ function optimize!(workspace::AugLagWorkspace)
                     sub2,
                     QuasiNewtonAlg(
                         qn_approx::AbstractHessianApprox;
-                        max_iter = max(50, qn_base_maxiter ÷ 2),
-                        tol = sub_tol,
-                        globalization = qn_globalization,
-                        reset = qn_reset,
-                        levenberg = levenberg,
-                        tron_cauchy = tron_cauchy,
-                        nonmonotone = qn_nonmonotone,
-                        soc = qn_soc,
+                        max_iter=max(50, qn_base_maxiter ÷ 2),
+                        tol=sub_tol,
+                        globalization=qn_globalization,
+                        reset=qn_reset,
+                        levenberg=levenberg,
+                        tron_cauchy=tron_cauchy,
+                        nonmonotone=qn_nonmonotone,
+                        soc=qn_soc,
                     ),
                     x_two,
                 )
@@ -1526,9 +1585,9 @@ function optimize!(workspace::AugLagWorkspace)
             xt_orig = use_elastic ? @view(xt[1:n]) : xt
             φt = norm(_scaled_violation(eq_fs, ineq_fs, model, relaxed, xt_orig), Inf)
             if isfinite(mt) &&
-               isfinite(φt) &&
-               _filter_accept(mt, φt) &&
-               (!watchdog || mt <= watchdog_fbar * (1 + watchdog_tol))
+                isfinite(φt) &&
+                _filter_accept(mt, φt) &&
+                (!watchdog || mt <= watchdog_fbar * (1 + watchdog_tol))
                 x_new = xt
                 accepted = true
                 break
@@ -1538,10 +1597,11 @@ function optimize!(workspace::AugLagWorkspace)
         if watchdog && accepted
             # Recursive-mean update of the nonmonotone reference (BM style);
             # left unchanged on rejection so persistent failures escalate.
-            watchdog_fbar =
-                isfinite(watchdog_fbar) ?
-                (1 - watchdog_tau) * watchdog_fbar + watchdog_tau * mt :
+            watchdog_fbar = if isfinite(watchdog_fbar)
+                (1 - watchdog_tau) * watchdog_fbar + watchdog_tau * mt
+            else
                 mt
+            end
         end
         if !accepted && filter
             # No acceptable step: record the current point in the filter and
@@ -1573,9 +1633,7 @@ function optimize!(workspace::AugLagWorkspace)
                 x = _restore_feasible(
                     eq_fs, ineq_fs, model, relaxed, submodel0, copy(xgood), restore_prox
                 )
-                vnorm = norm(
-                    _scaled_violation(eq_fs, ineq_fs, model, relaxed, x), Inf
-                )
+                vnorm = norm(_scaled_violation(eq_fs, ineq_fs, model, relaxed, x), Inf)
                 f_new = obj(x)
             else
                 x = _failed_iterate_fallback(trajectory, x_init)
@@ -1668,9 +1726,7 @@ function optimize!(workspace::AugLagWorkspace)
                         gf = λ[k][feas] .* g[feas]
                         θ = sum(abs, gf) / length(gf)
                         b_ineq[k] = clamp(
-                            b_ineq[k] * clamp(1e-2 / max(θ, 1e-12), 0.5, 2.0),
-                            1e-2,
-                            ρ * w,
+                            b_ineq[k] * clamp(1e-2 / max(θ, 1e-12), 0.5, 2.0), 1e-2, ρ * w
                         )
                     end
                 end
@@ -1715,7 +1771,7 @@ function optimize!(workspace::AugLagWorkspace)
             # strong preconditioner for the ill-conditioned subproblems.
             Hc = qn_approx.hessfun(x)
             qn_approx.precond = try
-                cholesky(Hermitian(Hc + 1e-8 * I); check = false)
+                cholesky(Hermitian(Hc + 1e-8 * I); check=false)
             catch
                 nothing
             end
@@ -1965,8 +2021,21 @@ end
 # with c̃ = c/s the scaled constraint functions, μ = (multiplier + ρ w c̃)/s,
 # and the ρ JᵀJ term restricted to the active (violated) inequality rows.
 function _jump_al_hessian(
-    je, x, eq_fs, ineq_fs, scales, y, λ, w_eq, w_ineq, ρref, fscale,
-    l = nothing, u = nothing, μref = Ref(0.0), δ = 1e-4,
+    je,
+    x,
+    eq_fs,
+    ineq_fs,
+    scales,
+    y,
+    λ,
+    w_eq,
+    w_ineq,
+    ρref,
+    fscale,
+    l=nothing,
+    u=nothing,
+    μref=Ref(0.0),
+    δ=1e-4,
 )
     n = length(x)
     H = zeros(n, n)

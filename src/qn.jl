@@ -461,7 +461,7 @@ function QuasiNewtonAlg(
     tron_cauchy::Bool=false,
 )
     globalization in (:backtracking, :wolfe, :trustregion, :tron) || throw(
-        ArgumentError("globalization must be :backtracking, :wolfe, :trustregion or :tron")
+        ArgumentError("globalization must be :backtracking, :wolfe, :trustregion or :tron"),
     )
     return QuasiNewtonAlg(
         approx,

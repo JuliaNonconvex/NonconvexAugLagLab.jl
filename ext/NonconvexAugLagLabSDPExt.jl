@@ -52,11 +52,12 @@ _projected_term(Y, ρ, B) = begin
     (sum(abs2, Z) - sum(abs2, Y)) / (2ρ)
 end
 
-_logdet_term(Y, ρ, B) = if isposdef(Symmetric(B))
-    -(1 / ρ) * _sd_logdet(B) + dot(Y, B)
-else
-    _projected_term(Y, ρ, B)
-end
+_logdet_term(Y, ρ, B) =
+    if isposdef(Symmetric(B))
+        -(1 / ρ) * _sd_logdet(B) + dot(Y, B)
+    else
+        _projected_term(Y, ρ, B)
+    end
 
 function NonconvexAugLagLab._sd_terms(model::VecModel, sd_rel, ρ, x, Y, penalty)
     fns = model.sd_constraints.fs

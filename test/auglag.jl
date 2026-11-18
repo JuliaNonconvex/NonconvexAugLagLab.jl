@@ -219,8 +219,9 @@ end
     struct _AlwaysFailAlg <: NonconvexCore.AbstractOptimizer
         calls::Base.RefValue{Int}
     end
-    NonconvexCore.solver_capabilities(::_AlwaysFailAlg) =
-        ConstraintCapabilities(; box=true, continuous=true, infinite_bounds=true)
+    NonconvexCore.solver_capabilities(::_AlwaysFailAlg) = ConstraintCapabilities(;
+        box=true, continuous=true, infinite_bounds=true
+    )
     struct _AlwaysFailWorkspace <: NonconvexCore.Workspace
         model::NonconvexCore.VecModel
         alg::_AlwaysFailAlg
@@ -318,7 +319,9 @@ end
     @test norm(r.minimizer - [0.5, 0.5]) < 5e-2
     # watchdog combined with the filter
     r = optimize(
-        m, AugLagAlg(), x0;
+        m,
+        AugLagAlg(),
+        x0;
         options=AugLagOptions(max_iter=40, watchdog=true, watchdog_tau=0.1, filter=true),
     )
     @test norm(r.minimizer - [0.5, 0.5]) < 5e-2
@@ -351,7 +354,7 @@ end
         minimum::Float64
     end
     NonconvexCore.solver_capabilities(::AlwaysWorseAlg) = ConstraintCapabilities(;
-        box = true, continuous = true, infinite_bounds = true
+        box=true, continuous=true, infinite_bounds=true
     )
     struct AlwaysWorseWorkspace{M,X} <: Workspace
         model::M
@@ -372,21 +375,22 @@ end
     # Without the watchdog the worsening step is accepted every iteration and
     # the iterate drifts along the bad direction.
     r_off = optimize(
-        m, AugLagAlg(AlwaysWorseAlg()), x0;
-        options = AugLagOptions(max_iter = 5, filter = false),
+        m, AugLagAlg(AlwaysWorseAlg()), x0; options=AugLagOptions(max_iter=5, filter=false)
     )
     # With the watchdog, the first step gets the free pass (the reference
     # starts at +Inf), but every later worsening step is rejected outright and
     # the iterate stays put while the penalty escalates.
     r_on = optimize(
-        m, AugLagAlg(AlwaysWorseAlg()), x0;
-        options = AugLagOptions(max_iter = 5, filter = false, watchdog = true),
+        m,
+        AugLagAlg(AlwaysWorseAlg()),
+        x0;
+        options=AugLagOptions(max_iter=5, filter=false, watchdog=true),
     )
     @test norm(r_off.minimizer, Inf) > 1e-2
     @test norm(r_on.minimizer, Inf) <= 0.2
     @test norm(r_on.minimizer, Inf) < norm(r_off.minimizer, Inf) / 2
     # the slack parameter is validated
-    @test_throws ArgumentError AugLagOptions(watchdog_tol = -0.1)
+    @test_throws ArgumentError AugLagOptions(watchdog_tol=-0.1)
 end
 
 @testitem "AugLagAlg: newton exact-Hessian subproblem solves (both sources)" begin
@@ -398,18 +402,22 @@ end
     JuMP.@constraint(jm, x[1]^2 + x[2] - 2 == 0)   # nonlinear → expression path
     dm = DictModel(jm)
     x0 = NonconvexCore.getinit(dm)
-    r = optimize(dm, AugLagAlg(), x0; options = AugLagOptions(max_iter = 100, curvature = :newton))
+    r = optimize(
+        dm, AugLagAlg(), x0; options=AugLagOptions(max_iter=100, curvature=:newton)
+    )
     @test norm(r.minimizer[:x] - [1.0, 1.0]) < 1e-2
     # plain model: the Hessian comes from AD
     m = NonconvexCore.Model(x -> (x[1] - 1)^2 + (x[2] - 1)^2)
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
     add_eq_constraint!(m, x -> x[1] + x[2] - 1)
     add_ineq_constraint!(m, x -> x[1] - x[2] - 0.5)
-    r2 = optimize(m, AugLagAlg(), [0.0, 0.0]; options = AugLagOptions(max_iter = 40, curvature = :newton))
+    r2 = optimize(
+        m, AugLagAlg(), [0.0, 0.0]; options=AugLagOptions(max_iter=40, curvature=:newton)
+    )
     @test norm(r2.minimizer - [0.5, 0.5]) < 5e-2
     # guard rails: PBM penalties are not supported
     @test_throws ArgumentError optimize(
-        dm, AugLagAlg(), x0; options = AugLagOptions(curvature = :newton, penalty = :pbm)
+        dm, AugLagAlg(), x0; options=AugLagOptions(curvature=:newton, penalty=:pbm)
     )
 end
 
@@ -418,9 +426,11 @@ end
     m = Model(x -> (x[1] - 1)^2 + (x[2] - 1)^2)
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
     add_eq_constraint!(m, x -> x[1] + x[2] - 1)
-    r = optimize(m, AugLagAlg(), [0.0, 0.0]; options = AugLagOptions(max_iter = 40, box_barrier = true))
+    r = optimize(
+        m, AugLagAlg(), [0.0, 0.0]; options=AugLagOptions(max_iter=40, box_barrier=true)
+    )
     @test norm(r.minimizer - [0.5, 0.5]) < 1e-3
-    @test_throws ArgumentError AugLagOptions(box_barrier_scale = 0.0)
+    @test_throws ArgumentError AugLagOptions(box_barrier_scale=0.0)
 end
 
 @testitem "AugLagAlg: auto rho_init calibration" begin
@@ -428,8 +438,9 @@ end
     m = Model(x -> (x[1] - 1)^2 + (x[2] - 1)^2)
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
     add_eq_constraint!(m, x -> x[1] + x[2] - 1)
-    r = optimize(m, AugLagAlg(), [0.0, 0.0];
-        options = AugLagOptions(max_iter = 40, auto_rho_init = true))
+    r = optimize(
+        m, AugLagAlg(), [0.0, 0.0]; options=AugLagOptions(max_iter=40, auto_rho_init=true)
+    )
     @test norm(r.minimizer - [0.5, 0.5]) < 1e-3
 end
 
@@ -439,8 +450,12 @@ end
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
     add_eq_constraint!(m, x -> x[1] + x[2] - 1)
     add_ineq_constraint!(m, x -> x[1] - x[2] - 0.5)
-    r = optimize(m, AugLagAlg(), [0.0, 0.0];
-        options = AugLagOptions(max_iter = 40, penalty = :pbm, pbm_adaptive = true))
+    r = optimize(
+        m,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options=AugLagOptions(max_iter=40, penalty=:pbm, pbm_adaptive=true),
+    )
     @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
 end
 
@@ -454,8 +469,9 @@ end
         minimizer::X
         minimum::Float64
     end
-    NonconvexCore.solver_capabilities(::NaNAlg) =
-        ConstraintCapabilities(; box = true, continuous = true, infinite_bounds = true)
+    NonconvexCore.solver_capabilities(::NaNAlg) = ConstraintCapabilities(;
+        box=true, continuous=true, infinite_bounds=true
+    )
     struct NW{M,X} <: Workspace
         model::M
         x0::X
@@ -469,10 +485,15 @@ end
     m = Model(x -> x[1]^2 + x[2]^2)
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
     add_eq_constraint!(m, x -> x[1] + x[2] - 1)
-    r_off = optimize(m, AugLagAlg(NaNAlg()), [0.0, 0.0];
-        options = AugLagOptions(max_iter = 3, filter = false))
-    r_on = optimize(m, AugLagAlg(NaNAlg()), [0.0, 0.0];
-        options = AugLagOptions(max_iter = 3, filter = false, restore = true))
+    r_off = optimize(
+        m, AugLagAlg(NaNAlg()), [0.0, 0.0]; options=AugLagOptions(max_iter=3, filter=false)
+    )
+    r_on = optimize(
+        m,
+        AugLagAlg(NaNAlg()),
+        [0.0, 0.0];
+        options=AugLagOptions(max_iter=3, filter=false, restore=true),
+    )
     @test abs(r_off.minimizer[1] + r_off.minimizer[2] - 1) > 0.5   # stayed at x0
     @test abs(r_on.minimizer[1] + r_on.minimizer[2] - 1) < 1e-6    # restored feasible
 end
@@ -498,7 +519,12 @@ end
         AugLagAlg(),
         [1.0];
         options=AugLagOptions(;
-            max_iter=20, rho_init=10.0, rho_incr=1.2, rho_max=12.0, rho_decr=10.0, omega0=0.1
+            max_iter=20,
+            rho_init=10.0,
+            rho_incr=1.2,
+            rho_max=12.0,
+            rho_decr=10.0,
+            omega0=0.1,
         ),
     )
     @test abs(r.minimizer[1] - 1.0) < 1e-4
@@ -632,10 +658,27 @@ end
     @test η2 == max(opts.eta0 / ρ2, opts.ctol)
     @test ω2 == max(1 / ρ2, sqrt(eps(Float64)))
     # the gentler :default schedule is still available
-    opts_def = AugLagOptions(; rho_init=10.0, rho_incr=10.0, rho_max=1e4, eta0=0.5,
-        ctol=1e-6, outer_schedule=:default)
+    opts_def = AugLagOptions(;
+        rho_init=10.0,
+        rho_incr=10.0,
+        rho_max=1e4,
+        eta0=0.5,
+        ctol=1e-6,
+        outer_schedule=:default,
+    )
     ρ3, η3, ω3 = NonconvexAugLagLab._escalate_penalty!(
-        10.0, 0.5, 1.0, [1000.0], Float64[], 1000.0, opts_def, [1], Int[], eq_fs, ineq_fs, [5.0]
+        10.0,
+        0.5,
+        1.0,
+        [1000.0],
+        Float64[],
+        1000.0,
+        opts_def,
+        [1],
+        Int[],
+        eq_fs,
+        ineq_fs,
+        [5.0],
     )
     @test η3 == max(opts_def.eta0 / ρ3^0.1, opts_def.ctol)
     @test ω3 == max(1 / ρ3^0.1, sqrt(eps(Float64)))

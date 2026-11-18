@@ -16,16 +16,16 @@ end
     m = Model(x -> x[1]^2)
     addvar!(m, [-5.0], [5.0])
     add_sd_constraint!(m, x -> [x[1] - 2.0;;])
-    r = optimize(m, AugLagAlg(), [0.0]; options = AugLagOptions(two_level = true))
+    r = optimize(m, AugLagAlg(), [0.0]; options=AugLagOptions(two_level=true))
     @test abs(r.minimizer[1] - 2.0) < 1e-3
     # guards: requires relaxed sd constraints, positive parameters
     m2 = Model(x -> x[1]^2)
     addvar!(m2, [-5.0], [5.0])
     @test_throws ArgumentError optimize(
-        m2, AugLagAlg(), [0.0]; options = AugLagOptions(two_level = true)
+        m2, AugLagAlg(), [0.0]; options=AugLagOptions(two_level=true)
     )
-    @test_throws ArgumentError AugLagOptions(two_level_iters = 0)
-    @test_throws ArgumentError AugLagOptions(two_level_tau = 0.0)
+    @test_throws ArgumentError AugLagOptions(two_level_iters=0)
+    @test_throws ArgumentError AugLagOptions(two_level_tau=0.0)
 end
 
 @testitem "AugLagAlg: logdet nonlinear-rescaling kernels" begin
@@ -47,18 +47,19 @@ end
     addvar!(m, [-5.0], [5.0])
     add_sd_constraint!(m, x -> [x[1] - 2.0;;])
     opts = SQSDPOptions(
-        max_iter = 30,
-        sub_solver = BarrierAlg(IpoptAlg()),
-        sub_options = BarrierOptions(sub_options = IpoptOptions()),
+        max_iter=30,
+        sub_solver=BarrierAlg(IpoptAlg()),
+        sub_options=BarrierOptions(sub_options=IpoptOptions()),
     )
-    r = optimize(m, SQSDPAlg(), [3.0]; options = opts)
+    r = optimize(m, SQSDPAlg(), [3.0]; options=opts)
     @test abs(r.minimizer[1] - 2.0) < 1e-3
     @test abs(r.minimum - 4.0) < 1e-3
     # the sub-solver is required
     @test_throws ArgumentError optimize(m, SQSDPAlg(), [3.0])
 end
 
-@testitem "AugLagAlg: sd kept hard requires the sub-solver to support it" begin    using NonconvexAugLagLab, NonconvexIpopt, NonconvexSemidefinite, Test, LinearAlgebra
+@testitem "AugLagAlg: sd kept hard requires the sub-solver to support it" begin
+    using NonconvexAugLagLab, NonconvexIpopt, NonconvexSemidefinite, Test, LinearAlgebra
     m = Model(x -> x[1]^2)
     addvar!(m, [-5.0], [5.0])
     add_sd_constraint!(m, x -> [x[1] - 2.0;;])

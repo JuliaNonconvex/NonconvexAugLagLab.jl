@@ -47,7 +47,9 @@ end
     using NonconvexAugLagLab, Test, LinearAlgebra
     m = Model(x -> (1 - x[1])^2 + 100 * (x[2] - x[1]^2)^2)
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
-    r = optimize(m, QuasiNewtonAlg(NewtonTRApprox(); globalization=:trustregion), [-1.2, 1.0])
+    r = optimize(
+        m, QuasiNewtonAlg(NewtonTRApprox(); globalization=:trustregion), [-1.2, 1.0]
+    )
     @test norm(r.minimizer - [1.0, 1.0]) < 1e-3
 end
 
@@ -167,7 +169,9 @@ end
     )
     @test norm(rtr.minimizer) < 1e-8
     @test rtr.iter == 1
-    rtron = optimize(m, QuasiNewtonAlg(TwiceIdentityApprox(); globalization=:tron), [0.5, 0.5])
+    rtron = optimize(
+        m, QuasiNewtonAlg(TwiceIdentityApprox(); globalization=:tron), [0.5, 0.5]
+    )
     @test norm(rtron.minimizer) < 1e-8
     @test rtron.iter == 1
 end
@@ -251,7 +255,9 @@ end
     m3 = Model(x -> (x[1] - 1)^2 + 2 * (x[2] - 2)^2)
     addvar!(m3, [0.0, 0.0], [1.0, Inf])
     r3 = optimize(
-        m3, QuasiNewtonAlg(; globalization=:tron, tron_cauchy=true, max_iter=500), [0.1, 0.1]
+        m3,
+        QuasiNewtonAlg(; globalization=:tron, tron_cauchy=true, max_iter=500),
+        [0.1, 0.1],
     )
     @test norm(r3.minimizer - [1.0, 2.0]) < 1e-4
     # Second-order corrections (rejected step, soc rescue).
@@ -260,7 +266,11 @@ end
     r4 = optimize(
         m4,
         QuasiNewtonAlg(
-            NewtonTRApprox(); globalization=:trustregion, soc=true, delta0=10.0, max_iter=500
+            NewtonTRApprox();
+            globalization=:trustregion,
+            soc=true,
+            delta0=10.0,
+            max_iter=500,
         ),
         [0.1],
     )
@@ -274,7 +284,9 @@ end
     m6 = Model(x -> x[1]^2 + 100 * x[2]^2)
     addvar!(m6, [-10.0, -10.0], [10.0, 10.0])
     r6 = optimize(
-        m6, QuasiNewtonAlg(; globalization=:trustregion, tol=1e-10, max_iter=500), [1.0, 1.0]
+        m6,
+        QuasiNewtonAlg(; globalization=:trustregion, tol=1e-10, max_iter=500),
+        [1.0, 1.0],
     )
     @test norm(r6.minimizer) < 1e-3
 end
