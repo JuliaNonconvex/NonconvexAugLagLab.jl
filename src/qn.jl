@@ -154,6 +154,75 @@ function update!(H::LBFGSApprox, s, y)
 end
 
 # ------------------------------------------------------------------
+# Limited-memory SR1 (the classic trust-region pairing: SR1 captures
+# indefiniteness, which BFGS cannot on nonconvex objectives)
+# ------------------------------------------------------------------
+"""
+    LimitedMemorySR1Approx(memory; H0 = IdentityPreconditioner())
+
+Limited-memory symmetric rank-one. Stores the last `memory` pairs and
+applies `B v = B0 v + Σ_k u_k (u_k'v)/(u_k's_k)` with `u_k = y_k − B0 s_k`
+(the fixed-base L-SR1); pairs failing the safeguard
+`|s'u| ≥ 1e-8 ‖s‖‖u‖` are rejected. Intended for `globalization =
+:trustregion` subproblems, where an indefinite Hessian model is desirable.
+"""
+mutable struct LimitedMemorySR1Approx{P<:AbstractPreconditioner} <: AbstractHessianApprox
+    memory::Int
+    B0::P
+    s::Vector{Vector{Float64}}
+    u::Vector{Vector{Float64}}
+    α::Vector{Float64}
+end
+function LimitedMemorySR1Approx(memory::Int=10; H0=IdentityPreconditioner())
+    return LimitedMemorySR1Approx(
+        memory, H0, Vector{Vector{Float64}}(), Vector{Vector{Float64}}(), Float64[]
+    )
+end
+
+init!(H::LimitedMemorySR1Approx, n::Int, x0) = reset!(H)
+function reset!(H::LimitedMemorySR1Approx)
+    empty!(H.s)
+    empty!(H.u)
+    empty!(H.α)
+    return H
+end
+
+function apply!(Bv, H::LimitedMemorySR1Approx, v)
+    apply!(Bv, H.B0, v)
+    for k in eachindex(H.s)
+        Bv .+= H.α[k] .* dot(H.u[k], v) .* H.u[k]
+    end
+    return Bv
+end
+
+# SR1 has no cheap inverse recursion; solve! falls back to the base operator
+# (the trust-region paths only need apply!).
+function solve!(d, H::LimitedMemorySR1Approx, g)
+    solve!(d, H.B0, g)
+    return d
+end
+
+function update!(H::LimitedMemorySR1Approx, s, y)
+    B0s = similar(s, Float64)
+    apply!(B0s, H.B0, s)
+    u = y .- B0s
+    su = dot(s, u)
+    # safeguard (Nocedal-Wright 6.26): reject near-degenerate denominators
+    abs(su) >= 1e-8 * norm(s) * norm(u) || return H
+    push!(H.s, copy(s))
+    push!(H.u, u)
+    push!(H.α, inv(su))
+    if length(H.s) > H.memory
+        popfirst!(H.s)
+        popfirst!(H.u)
+        popfirst!(H.α)
+    end
+    return H
+end
+
+_initialized(H::LimitedMemorySR1Approx, n::Int) = !isempty(H.s) && length(H.s[1]) == n
+
+# ------------------------------------------------------------------
 # Dense BFGS (inverse by default)
 # ------------------------------------------------------------------
 """
@@ -302,7 +371,7 @@ end
 
 Exact Hessian of the (augmented Lagrangian) objective at every iterate,
 differentiated through `NonconvexCore.value_gradient`. Used together with
-`QuasiNewtonAlg(; linesearch = :trustregion)` for the Newton trust-region
+`QuasiNewtonAlg(; globalization = :trustregion)` for the Newton trust-region
 method (Steihaug–Toint CG).
 """
 mutable struct NewtonTRApprox <: AbstractHessianApprox
@@ -324,27 +393,36 @@ function apply!(Hv, H::NewtonTRApprox, v)
 end
 solve!(d, H::NewtonTRApprox, g) = copyto!(d, g)
 
+# Newton-type approximations evaluate the Hessian exactly at every iterate
+# through `hessfun` (AD-based NewtonTRApprox, or the JuMP-evaluator-based
+# JumpNewtonTRApprox); no secant updates apply to them.
+_is_newton(::NewtonTRApprox) = true
+_is_newton(::Any) = false
+
+# The Steihaug preconditioner of an approximation, when it carries one.
+_steihaug_precond(a) = hasproperty(a, :precond) ? a.precond : nothing
+
 # ------------------------------------------------------------------
 # Driver
 # ------------------------------------------------------------------
 """
-    QuasiNewtonAlg(approx = LBFGSApprox(10); linesearch = :backtracking,
-                   max_iter = 200, tol = 1e-6, damping = true, Δ0 = 1.0)
+    QuasiNewtonAlg(approx = LBFGSApprox(10); globalization = :backtracking,
+                   max_iter = 200, tol = 1e-6, damping = true, delta0 = 1.0)
 
 A smooth box-constrained quasi-Newton optimizer: `approx` is any
 [`AbstractHessianApprox`](@ref) (L-BFGS with an optional preconditioner, dense
-or structured BFGS, or the exact-Hessian Newton trust region). `linesearch` is
+or structured BFGS, or the exact-Hessian Newton trust region). `globalization` is
 `:backtracking` (Armijo), `:wolfe` (strong Wolfe) or `:trustregion`
 (Steihaug–Toint with a projected step). `damping` enables Powell damping of the
 secant pairs for nonconvex objectives.
 """
 struct QuasiNewtonAlg{A<:AbstractHessianApprox} <: AbstractOptimizer
     approx::A
-    linesearch::Symbol
+    globalization::Symbol
     max_iter::Int
     tol::Real
     damping::Bool
-    Δ0::Real
+    delta0::Real
     reset::Bool
     nonmonotone::Bool
     soc::Bool
@@ -371,27 +449,27 @@ end
 
 function QuasiNewtonAlg(
     approx::AbstractHessianApprox=LBFGSApprox(10);
-    linesearch::Symbol=:backtracking,
+    globalization::Symbol=:backtracking,
     max_iter::Int=200,
     tol::Real=1e-6,
     damping::Bool=true,
-    Δ0::Real=1.0,
+    delta0::Real=1.0,
     reset::Bool=true,
     nonmonotone::Bool=false,
     soc::Bool=false,
     levenberg::Bool=true,
     tron_cauchy::Bool=false,
 )
-    linesearch in (:backtracking, :wolfe, :trustregion, :tron) || throw(
-        ArgumentError("linesearch must be :backtracking, :wolfe, :trustregion or :tron")
+    globalization in (:backtracking, :wolfe, :trustregion, :tron) || throw(
+        ArgumentError("globalization must be :backtracking, :wolfe, :trustregion or :tron"),
     )
     return QuasiNewtonAlg(
         approx,
-        linesearch,
+        globalization,
         max_iter,
         tol,
         damping,
-        Δ0,
+        delta0,
         reset,
         nonmonotone,
         soc,
@@ -489,14 +567,14 @@ function optimize!(workspace::QuasiNewtonWorkspace)
     # Core value_gradient may reuse its output buffer across calls: copy it
     # out immediately, never hold a reference across another gradient call.
     g = copy(gradfun(x))
-    Δ = optimizer.Δ0
+    Δ = optimizer.delta0
     τ = optimizer.levenberg ? 1e-8 : 0.0
     merits = Float64[]
     M = 5
     for iter in 1:optimizer.max_iter
         counter[] += 1
         d = similar(x)
-        if optimizer.linesearch === :tron
+        if optimizer.globalization === :tron
             # TRON: projected-CG trust-region step with active-set tracking.
             d = _tron_subproblem(v -> _hessmatvec(approx, v), g, x, lb, ub, Δ, τ)
             d = _project(x, d, lb, ub)
@@ -520,7 +598,7 @@ function optimize!(workspace::QuasiNewtonWorkspace)
                 fx = fnew
                 g .= gradfun(x)
                 norm(g, Inf) < optimizer.tol && break
-                Δ = min(10Δ, optimizer.Δ0 * 10)
+                Δ = min(10Δ, optimizer.delta0 * 10)
                 τ = optimizer.levenberg ? max(τ / 2, 1e-10) : 0.0
             else
                 Δ = max(Δ / 2, 1e-10)
@@ -528,13 +606,13 @@ function optimize!(workspace::QuasiNewtonWorkspace)
             end
             continue
         end
-        if optimizer.linesearch === :trustregion
+        if optimizer.globalization === :trustregion
             # Steihaug-Toint CG with the current Hessian model
-            Hmat = approx isa NewtonTRApprox ? approx.hessfun(x) : nothing
-            if approx isa NewtonTRApprox
+            Hmat = _is_newton(approx) ? approx.hessfun(x) : nothing
+            if _is_newton(approx)
                 approx.H .= Hmat
             end
-            d = _steihaug(approx, g, Δ, τ)
+            d, negcurv = _steihaug(approx, g, Δ, τ, _steihaug_precond(approx))
             d = _project(x, d, lb, ub)
             norm(d) < 1e-12 && break
             xnew = x .+ d
@@ -558,13 +636,13 @@ function optimize!(workspace::QuasiNewtonWorkspace)
                 fx = fnew
                 g .= gradfun(x)
                 norm(g, Inf) < optimizer.tol && break
-                Δ = min(10Δ, optimizer.Δ0 * 10)
+                Δ = min(10Δ, optimizer.delta0 * 10)
                 τ = optimizer.levenberg ? max(τ / 2, 1e-10) : 0.0
             elseif optimizer.soc
                 # Second-order correction (Ipopt, opt-in): re-solve the model
                 # with the gradient evaluated at the rejected trial point.
                 gsoc = gradfun(xnew)
-                dsoc = _steihaug(approx, gsoc, Δ, τ)
+                dsoc, _ = _steihaug(approx, gsoc, Δ, τ, _steihaug_precond(approx))
                 dsoc = _project(x, dsoc, lb, ub)
                 xnsoc = x .+ dsoc
                 fnsoc = fobj(xnsoc)
@@ -578,7 +656,7 @@ function optimize!(workspace::QuasiNewtonWorkspace)
                     fx = fnsoc
                     g .= gradfun(x)
                     norm(g, Inf) < optimizer.tol && break
-                    Δ = min(10Δ, optimizer.Δ0 * 10)
+                    Δ = min(10Δ, optimizer.delta0 * 10)
                     τ = optimizer.levenberg ? max(τ / 2, 1e-10) : 0.0
                 else
                     Δ = max(Δ / 2, 1e-10)
@@ -586,7 +664,13 @@ function optimize!(workspace::QuasiNewtonWorkspace)
                 end
             else
                 Δ = max(Δ / 2, 1e-10)
-                τ = optimizer.levenberg ? min(τ * 2, 1e4) : 0.0
+                # inertia-driven regularization: grow τ faster when the CG
+                # step came from a negative-curvature boundary hit
+                τ = if optimizer.levenberg
+                    negcurv ? min(τ * 4, 1e4) : min(τ * 2, 1e4)
+                else
+                    0.0
+                end
             end
             continue
         end
@@ -599,7 +683,7 @@ function optimize!(workspace::QuasiNewtonWorkspace)
         xnew = x .+ α .* d
         s = xnew .- x
         y = gradfun(xnew) .- g
-        if optimizer.damping && !(approx isa NewtonTRApprox)
+        if optimizer.damping && !_is_newton(approx)
             Bs = similar(y)
             apply!(Bs, approx, s)
             y = _damped_secant(y, s, Bs)
@@ -761,13 +845,22 @@ end
 
 # Steihaug–Toint CG for the trust-region subproblem
 # min ⟨g,d⟩ + ½ dᵀ(B + τI)d, ‖d‖ ≤ Δ (Levenberg dual regularization)
-function _steihaug(approx, g, Δ, τ=0.0)
+function _steihaug(approx, g, Δ, τ=0.0, M=nothing)
     n = length(g)
     d = zeros(n)
     r = copy(g)
-    p = .-g
+    # preconditioned CG: z = M⁻¹r; unpreconditioned z = r
+    z = if M === nothing
+        copy(g)
+    else
+        zi = zeros(n)
+        ldiv!(zi, M, r)
+        zi
+    end
+    p = .-z
+    zr = dot(z, r)
     rnorm2 = dot(r, r)
-    rnorm2 < 1e-14 && return d
+    rnorm2 < 1e-14 && return d, false
     for _ in 1:n
         Bp = _hessmatvec(approx, p) .+ τ .* p
         pBp = dot(p, Bp)
@@ -777,7 +870,7 @@ function _steihaug(approx, g, Δ, τ=0.0)
             b = 2 * dot(d, p)
             c = dot(d, d) - Δ^2
             τ = _root_of_quadratic(a, b, c)
-            return d .+ τ .* p
+            return d .+ τ .* p, true
         end
         α = rnorm2 / pBp
         dnew = d .+ α .* p
@@ -786,17 +879,26 @@ function _steihaug(approx, g, Δ, τ=0.0)
             b = 2 * dot(d, p)
             c = dot(d, d) - Δ^2
             τ = _root_of_quadratic(a, b, c)
-            return d .+ τ .* p
+            return d .+ τ .* p, false
         end
         d .= dnew
         r .+= α .* Bp
         rnorm2new = dot(r, r)
         rnorm2new < 1e-14 && break
-        β = rnorm2new / rnorm2
-        p .= .-r .+ β .* p
+        z = if M === nothing
+            copy(r)
+        else
+            zi = zeros(n)
+            ldiv!(zi, M, r)
+            zi
+        end
+        zrnew = dot(z, r)
+        β = zrnew / zr
+        p .= .-z .+ β .* p
+        zr = zrnew
         rnorm2 = rnorm2new
     end
-    return d
+    return d, false
 end
 
 function _root_of_quadratic(a, b, c)

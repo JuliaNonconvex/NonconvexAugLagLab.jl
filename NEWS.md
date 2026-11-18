@@ -1,5 +1,155 @@
 # NEWS
 
+## Unreleased
+
+- **Proximal regularization (opt-in)**: `AugLagOptions(prox = τ)` adds
+  `τ/2‖x − x̄‖²` to the AL subproblems. 10% faster on Rosetta case5 with
+  slightly better feasibility (151.7 vs 169.2 s, viol 0.584 vs 0.599); on
+  TopOpt local-stress the single-level solve is 32% faster and more
+  feasible but converges to a heavier design (anchor bias), while the
+  3-stage SIMP continuation wins outright: 2.7× faster (204 vs 560 s) and
+  a lighter final design (obj 0.186 vs 0.187) at viol 5.3e-9 — opt-in.
+  Prox composes with every penalty mode and with `curvature = :sr1`; the
+  `curvature = :newton` subproblems now add the τI term to their exact Hessians.
+  Combinations measured on Rosetta case5: prox+PBM is 13% faster with a
+  lower f but less feasible (159.5 s, viol 0.524 vs 183.4 s, 0.399);
+  prox+SR1 is 27% faster but far from the optimum (f = 14187, viol 0.158
+  vs f = 17576, viol 0.016) — not recommended.
+- **L-SR1 subproblem curvature (opt-in)**: `AugLagOptions(curvature = :sr1)`
+  uses limited-memory symmetric rank-one for the trust-region subproblems.
+  Massive Rosetta case5 win (80 vs 219 s, viol 0.016 vs 0.60) but slower on
+  TopOpt — opt-in, L-BFGS stays the default.
+- **Auto rho_init calibration (opt-in)**: `AugLagOptions(auto_rho_init = true)`
+  calibrates the initial penalty from ‖∇f(x0)‖ / ‖c̃⁺(x0)‖. Wins Rosetta
+  case5 (viol 0.34 vs 0.60 at 200 outer iterations) but loses TopOpt
+  (near-feasible starts → over-large penalty); opt-in, off by default.
+- **Ipopt-style restoration trigger (opt-in)**: `AugLagOptions(restore = true,
+  restore_stall = k, restore_tol = t, restore_tol_mode = :relative|:absolute,
+  restore_prox = τ)` enters the feasibility-restoration phase not only on
+  subproblem blow-ups (existing `restore`) but also when feasibility
+  stalls: the violation improves by less than `restore_tol` (relative or
+  absolute) over `restore_stall` outer iterations. The restoration
+  minimizes the raw squared violations over the box with the built-in
+  quasi-Newton driver, in the formulation-scaled variables (diagonal
+  inverse premultiplier from the JᵀJ diagonal), with an optional
+  per-variable pseudo-Huber anchor (`restore_prox`); the restored point
+  replaces the iterate, the equality multipliers are re-estimated there,
+  and the most-feasible point (restoration or final iterate) is reported.
+  Measured on Rosetta AC-OPF case5: viol 0.60 → 1.6e-6 with f = 17858
+  (the true optimum) at ~1.8× the default time — a decisive opt-in win
+  (both tolerance modes). On the TopOpt SAND tutorial it fires but cannot
+  close the equilibrium gap (first-order KᵀK conditioning wall; the
+  nested solve is the documented NAND fix); `restore_stall = 0` (default)
+  keeps the blow-up-only trigger.
+- **Breaking (unreleased branch)**: the `QuasiNewtonAlg` step-strategy option
+  is renamed `linesearch` → `globalization` (the values include
+  `:trustregion` and `:tron`, which are not line searches). The
+  `AugLagOptions.sub_options` named tuple forwards `globalization` now.
+- **Breaking (unreleased branch)**: `sub_approx` is renamed `curvature` and
+  subsumes the old `newton` flag — the curvature models are now
+  `curvature ∈ (:lbfgs, :sr1, :newton)` (`AugLagOptions(newton = true)`
+  becomes `AugLagOptions(curvature = :newton)`). The Greek option names
+  are ASCII-ified: `ρ_init/ρ_max/ρ_incr/ρ_decr/auto_ρ_init` →
+  `rho_init/rho_max/rho_incr/rho_decr/auto_rho_init`, `η₀` → `eta0`,
+  `ω₀` → `omega0`, `elastic_μ` → `elastic_mu`, and the
+  `QuasiNewtonAlg` trust-region radius `Δ0` → `delta0`.
+
+- **Defaults updated from the Rosetta measurements**: `outer_schedule = :bm`
+  and `sub_tol_schedule = :eta2` are now the defaults (16% faster each on
+  Rosetta case5 with the same or better feasibility; `:bm` also 13% faster
+  on the TopOpt single-level solve). The box barrier is automatic by
+  subproblem order (`box_barrier = missing`): on with `curvature = :newton`, off
+  with the first-order subproblems. Confirmed on the TopOpt local-stress
+  benchmarks (first-order, PR #356 subproblem budget): 14% faster on the
+  single-level p=3 solve (11 vs 13 outer iterations) and 4% faster with a
+  lighter feasible design on the SIMP continuation, no feasibility
+  regressions.
+
+- **Nonmonotone watchdog (opt-in)**: `AugLagOptions(watchdog = true)`
+  adds a Birgin–Martínez-style nonmonotone acceptance test to the outer
+  loop — a step is accepted only when its AL merit does not exceed the
+  recursive-mean reference `f̄ ← (1−τ)f̄ + τ·merit` (`watchdog_tau`, default
+  0.5; the reference starts at the first accepted merit and is frozen on
+  rejected steps so persistent failures escalate the penalty), with an
+  optional relative slack `merit ≤ (1 + watchdog_tol)·f̄` (`watchdog_tol`,
+  default 0.0). Combined with `filter = true`, both tests must pass.
+  Measured mixed: inert on the TopOpt local-stress problem (bit-for-bit
+  identical trajectories) and a wash on Rosetta case5, but on Rosetta
+  cases 14/118 it hurts — with merit-increasing subproblem steps the
+  watchdog rejects them outright and the iterate can freeze (case118 ends
+  at the start point, f = 0, viol 23 vs 0.62 for the default). A positive
+  `watchdog_tol` relaxes the rejection and is the intended setting for
+  such problems. Kept as an opt-in safety net.
+- **Outer tolerance schedule (opt-in)**: `AugLagOptions(outer_schedule = :bm)`
+  switches the feasibility/accuracy targets to the Birgin–Martínez
+  complexity scaling (both tighten with the full `1/ρ` factor on good steps
+  and reset with `1/ρ` on escalation) instead of the default gentler
+  `ρ^-0.9` / `ρ^-0.1` exponents. Measured consistently faster: on the
+  TopOpt local-stress single-level `p = 3` solve it converges in 11 vs 13
+  outer iterations (312 vs 360 s) at a slightly worse final accuracy, and
+  on Rosetta AC-OPF case5 it is 16% faster with marginally better
+  feasibility. Also re-measured on Rosetta case5 (300 outer iterations):
+  `sub_tol_schedule = :eta2` is 16% faster with the identical trajectory,
+  and `penalty = :pbm` / `:mixed` make better feasibility progress than
+  `:quadratic` (viol 0.334 vs 0.369) at ~8% less time — the opposite of
+  the TopOpt measurement, so `:quadratic` stays the default.
+- **Newton subproblem solves (experimental, opt-in)**:
+  `AugLagOptions(curvature = :newton)` uses exact Hessians for the AL
+  subproblems — from the MathOptInterface evaluator for JuMP-converted
+  models (with a stale-Cholesky-preconditioned Steihaug CG), from AD
+  otherwise. Measured on Rosetta AC-OPF case5 with `rho_init = 100`:
+  converges to `viol = 1e-6` in 86 s while the L-BFGS subproblem solves
+  stall at viol ≈ 0.34 after 268 s; with the automatic box barrier it
+  converges in 13 outer iterations (10.9 s warm) to the exact optimum at
+  an O(μ)-floor bound bias.
+- **Adaptive PBM barrier (opt-in)**: `AugLagOptions(pbm_adaptive = true)`
+  tracks each inequality group's barrier coefficient to the complementarity
+  of its implied duals instead of the global penalty. Measured on Rosetta
+  AC-OPF case5: ~10% faster (256 vs 284 s) at the same feasibility.
+- **Restoration phase (opt-in)**: `AugLagOptions(restore = true)` recovers
+  from subproblem blow-ups with a feasibility-only solve (squared
+  violations of the relaxed constraints over the box) instead of reverting
+  to the previous point — validated by a NaN-returning subsolver test
+  (recovers the feasible point [0.5, 0.5] instead of staying at x0).
+- **Box-barrier subproblems (experimental, opt-in)**:
+  `AugLagOptions(box_barrier = true)` barrierifies the subproblem's box
+  bounds Ipopt-style (log barrier with a C² extension, κ-driven μ
+  adaptation, bound-push initialization), with the hard box still projected
+  (fraction-to-boundary at τ = 1). Measured on Rosetta AC-OPF case5 with
+  `curvature = :newton` and `rho_init = 100`: converges in 12 outer iterations (43.8 s)
+  to f = 17553 (the true optimum) at viol 3.5e-8. Second-order only: with
+  the first-order (L-BFGS) subproblems it degrades feasibility on case5
+  (viol 0.66 vs 0.40). The Steihaug CG also gained inertia-driven
+  regularization (τ grows faster after negative-curvature rejections;
+  neutral on the measured benchmarks, kept as the Ipopt-correct mechanism).
+- **SQSDP (experimental, first cut)**: `SQSDPAlg` / `SQSDPOptions`
+  implement sequential quadratic semidefinite programming (Freund-Jarre-
+  Vogelbusch style): at each iterate the constraints are linearized (the
+  semidefinite one becomes an LMI) and a QP-with-LMI subproblem is solved
+  for the step by an injected sub-solver (e.g. `BarrierAlg(IpoptAlg())`),
+  globalized by the AL merit with L-BFGS curvature. First-cut verdicts:
+  on the BMI it finds the most stable closed loop of all the sd algorithms
+  (λ = −1.14 vs −0.82/−1.07) but is slow (barrier-Ipopt subproblems), and
+  on the covariance MLE it lands short (f = 56.1 vs f* = 28.7) — exact
+  second-order curvature and a faster LSDP sub-solver are the known next
+  steps.
+- **Two-level semi-proximal inner loop (experimental, opt-in)**:
+  `AugLagOptions(two_level = true)` alternates the sd multiplier projection
+  with prox-augmented subproblem solves (SDPNAL+-style sPADMM adapted to
+  nonlinear `P(x)`). Measured: 12× faster on the N=8 covariance MLE (1.9 vs
+  23.2 s, same 1.3e-8 accuracy) and 2.7× faster on the BMI (5.7 vs 15.6 s,
+  more stable closed loop).
+- **Logdet sd kernels (experimental)**: `penalty = :logdet` and
+  `:mixed_logdet` replace the projected quadratic semidefinite penalty with
+  the logdet nonlinear rescaling `φ(P) = -(1/ρ) logdet P + ⟨Y, P⟩`
+  (Polyak–Teboulle / Kočvara–Stingl modified barrier for the PSD cone,
+  clean-room), with the multiplier update `Y ← Π_{S₊ⁿ}(P⁻¹/ρ)` and a
+  projected-quadratic fallback outside the cone. Measured on the N=8
+  covariance MLE: both converge but land short of the projected quadratic
+  (|f-f*| = 0.39 vs 1.3e-8) — the barrier fixed point needs
+  complementarity-aware multiplier updates; kept experimental until that
+  is added.
+
 ## 0.2.10
 
 - Fixed the elastic-mode Anderson acceleration residual: the slack is now included (`ρw(c − s)`), matching the fixed-point map actually being iterated.

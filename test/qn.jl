@@ -47,7 +47,9 @@ end
     using NonconvexAugLagLab, Test, LinearAlgebra
     m = Model(x -> (1 - x[1])^2 + 100 * (x[2] - x[1]^2)^2)
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
-    r = optimize(m, QuasiNewtonAlg(NewtonTRApprox(); linesearch=:trustregion), [-1.2, 1.0])
+    r = optimize(
+        m, QuasiNewtonAlg(NewtonTRApprox(); globalization=:trustregion), [-1.2, 1.0]
+    )
     @test norm(r.minimizer - [1.0, 1.0]) < 1e-3
 end
 
@@ -163,11 +165,13 @@ end
     m = Model(x -> sum(x .^ 2))
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
     rtr = optimize(
-        m, QuasiNewtonAlg(TwiceIdentityApprox(); linesearch=:trustregion), [0.5, 0.5]
+        m, QuasiNewtonAlg(TwiceIdentityApprox(); globalization=:trustregion), [0.5, 0.5]
     )
     @test norm(rtr.minimizer) < 1e-8
     @test rtr.iter == 1
-    rtron = optimize(m, QuasiNewtonAlg(TwiceIdentityApprox(); linesearch=:tron), [0.5, 0.5])
+    rtron = optimize(
+        m, QuasiNewtonAlg(TwiceIdentityApprox(); globalization=:tron), [0.5, 0.5]
+    )
     @test norm(rtron.minimizer) < 1e-8
     @test rtron.iter == 1
 end
@@ -177,12 +181,12 @@ end
     # Box-constrained quadratic with the optimum on a bound.
     m = Model(x -> (x[1] - 1)^2 + 2 * (x[2] - 2)^2)
     addvar!(m, [0.0, 0.0], [1.0, Inf])
-    r = optimize(m, QuasiNewtonAlg(; linesearch=:tron, max_iter=500), [0.1, 0.1])
+    r = optimize(m, QuasiNewtonAlg(; globalization=:tron, max_iter=500), [0.1, 0.1])
     @test norm(r.minimizer - [1.0, 2.0]) < 1e-4
     # Nonconvex objective with a saddle at the origin.
     m2 = Model(x -> x[1]^4 - 2 * x[1]^2)
     addvar!(m2, [-2.0], [2.0])
-    r2 = optimize(m2, QuasiNewtonAlg(; linesearch=:tron, max_iter=500), [0.1])
+    r2 = optimize(m2, QuasiNewtonAlg(; globalization=:tron, max_iter=500), [0.1])
     @test abs(abs(r2.minimizer[1]) - 1.0) < 1e-3
     @test abs(r2.minimum + 1.0) < 1e-4
     # The AL wrapper accepts :tron through sub_options.
@@ -193,7 +197,7 @@ end
         m3,
         AugLagAlg(),
         [1.5, 1.5];
-        options=AugLagOptions(sub_options=(; max_iter=200, tol=1e-6, linesearch=:tron)),
+        options=AugLagOptions(sub_options=(; max_iter=200, tol=1e-6, globalization=:tron)),
     )
     @test norm(r3.minimizer - [1.0, 1.0]) < 1e-3
 end
@@ -251,7 +255,9 @@ end
     m3 = Model(x -> (x[1] - 1)^2 + 2 * (x[2] - 2)^2)
     addvar!(m3, [0.0, 0.0], [1.0, Inf])
     r3 = optimize(
-        m3, QuasiNewtonAlg(; linesearch=:tron, tron_cauchy=true, max_iter=500), [0.1, 0.1]
+        m3,
+        QuasiNewtonAlg(; globalization=:tron, tron_cauchy=true, max_iter=500),
+        [0.1, 0.1],
     )
     @test norm(r3.minimizer - [1.0, 2.0]) < 1e-4
     # Second-order corrections (rejected step, soc rescue).
@@ -260,21 +266,27 @@ end
     r4 = optimize(
         m4,
         QuasiNewtonAlg(
-            NewtonTRApprox(); linesearch=:trustregion, soc=true, Δ0=10.0, max_iter=500
+            NewtonTRApprox();
+            globalization=:trustregion,
+            soc=true,
+            delta0=10.0,
+            max_iter=500,
         ),
         [0.1],
     )
     @test abs(abs(r4.minimizer[1]) - 1.0) < 1e-2
     # Negative curvature in TRON: exact (Newton) Hessian is indefinite near 0.
     r5 = optimize(
-        m4, QuasiNewtonAlg(NewtonTRApprox(); linesearch=:tron, max_iter=500), [0.1]
+        m4, QuasiNewtonAlg(NewtonTRApprox(); globalization=:tron, max_iter=500), [0.1]
     )
     @test abs(abs(r5.minimizer[1]) - 1.0) < 1e-2
     # Steihaug CG runs >= 2 sweeps on an ill-conditioned quadratic.
     m6 = Model(x -> x[1]^2 + 100 * x[2]^2)
     addvar!(m6, [-10.0, -10.0], [10.0, 10.0])
     r6 = optimize(
-        m6, QuasiNewtonAlg(; linesearch=:trustregion, tol=1e-10, max_iter=500), [1.0, 1.0]
+        m6,
+        QuasiNewtonAlg(; globalization=:trustregion, tol=1e-10, max_iter=500),
+        [1.0, 1.0],
     )
     @test norm(r6.minimizer) < 1e-3
 end

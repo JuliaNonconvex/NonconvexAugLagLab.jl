@@ -11,6 +11,53 @@ using NonconvexAugLagLab, NonconvexIpopt, NonconvexSemidefinite, Test, LinearAlg
     @test abs(r.minimum - 4.0) < 1e-4
 end
 
+@testitem "AugLagAlg: two-level semi-proximal inner loop" begin
+    using NonconvexAugLagLab, NonconvexSemidefinite, Test, LinearAlgebra
+    m = Model(x -> x[1]^2)
+    addvar!(m, [-5.0], [5.0])
+    add_sd_constraint!(m, x -> [x[1] - 2.0;;])
+    r = optimize(m, AugLagAlg(), [0.0]; options=AugLagOptions(two_level=true))
+    @test abs(r.minimizer[1] - 2.0) < 1e-3
+    # guards: requires relaxed sd constraints, positive parameters
+    m2 = Model(x -> x[1]^2)
+    addvar!(m2, [-5.0], [5.0])
+    @test_throws ArgumentError optimize(
+        m2, AugLagAlg(), [0.0]; options=AugLagOptions(two_level=true)
+    )
+    @test_throws ArgumentError AugLagOptions(two_level_iters=0)
+    @test_throws ArgumentError AugLagOptions(two_level_tau=0.0)
+end
+
+@testitem "AugLagAlg: logdet nonlinear-rescaling kernels" begin
+    using NonconvexAugLagLab, NonconvexSemidefinite, Test, LinearAlgebra
+    m = Model(x -> x[1]^2)
+    addvar!(m, [-5.0], [5.0])
+    add_sd_constraint!(m, x -> [x[1] - 2.0;;])
+    for penalty in (:logdet, :mixed_logdet)
+        r = optimize(m, AugLagAlg(), [0.0]; options=AugLagOptions(penalty=penalty))
+        @test abs(r.minimizer[1] - 2.0) < 1e-3
+        @test abs(r.minimum - 4.0) < 1e-3
+    end
+end
+
+@testitem "AugLagAlg: SQSDP sequential quadratic semidefinite programming" begin
+    using NonconvexAugLagLab, NonconvexSemidefinite, NonconvexIpopt, Test, LinearAlgebra
+    # min x² s.t. x ≥ 2 via a 1x1 LMI x - 2 ≥ 0 → x = 2.
+    m = Model(x -> x[1]^2)
+    addvar!(m, [-5.0], [5.0])
+    add_sd_constraint!(m, x -> [x[1] - 2.0;;])
+    opts = SQSDPOptions(
+        max_iter=30,
+        sub_solver=BarrierAlg(IpoptAlg()),
+        sub_options=BarrierOptions(sub_options=IpoptOptions()),
+    )
+    r = optimize(m, SQSDPAlg(), [3.0]; options=opts)
+    @test abs(r.minimizer[1] - 2.0) < 1e-3
+    @test abs(r.minimum - 4.0) < 1e-3
+    # the sub-solver is required
+    @test_throws ArgumentError optimize(m, SQSDPAlg(), [3.0])
+end
+
 @testitem "AugLagAlg: sd kept hard requires the sub-solver to support it" begin
     using NonconvexAugLagLab, NonconvexIpopt, NonconvexSemidefinite, Test, LinearAlgebra
     m = Model(x -> x[1]^2)
@@ -37,7 +84,7 @@ end
     @test dm.sd_constraints.fs[1] isa NonconvexSemidefinite.BlockSDConstraint
 
     r = NonconvexCore.optimize(
-        dm, AugLagAlg(), [2.0, 2.0]; options=AugLagOptions(ρ_init=100.0)
+        dm, AugLagAlg(), [2.0, 2.0]; options=AugLagOptions(rho_init=100.0)
     )
     @test abs(r.minimizer[1] - 1.0) < 5e-2
     @test abs(r.minimizer[2] - 1.0) < 5e-2
