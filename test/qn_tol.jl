@@ -14,10 +14,10 @@
             m,
             AugLagAlg(),
             [0.0, 0.0];
-            options = AugLagOptions(;
-                max_iter = 100,
-                sub_tol_schedule = :fixed,
-                sub_options = (; max_iter = 200, tol = tol, globalization = :trustregion),
+            options=AugLagOptions(;
+                max_iter=100,
+                sub_tol_schedule=:fixed,
+                sub_options=(; max_iter=200, tol=tol, globalization=:trustregion),
             ),
         )
         @test r.minimum < 1.0 + 1e-4
