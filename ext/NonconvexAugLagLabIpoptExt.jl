@@ -8,7 +8,7 @@ using NonconvexAugLagLab
 using NonconvexIpopt: IpoptOptions
 
 function NonconvexAugLagLab._set_sub_tol(alg, o::IpoptOptions, tol)
-    return IpoptOptions((; o.nt..., tol = tol))
+    return IpoptOptions((; o.nt..., tol=tol))
 end
 
 end

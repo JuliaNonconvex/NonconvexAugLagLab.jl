@@ -7,7 +7,7 @@ using NonconvexAugLagLab
 using NonconvexNLopt: NLoptOptions
 
 function NonconvexAugLagLab._set_sub_tol(alg, o::NLoptOptions, tol)
-    return NLoptOptions((; o.nt..., ftol_abs = tol, xtol_abs = tol))
+    return NLoptOptions((; o.nt..., ftol_abs=tol, xtol_abs=tol))
 end
 
 end
