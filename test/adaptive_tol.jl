@@ -86,3 +86,13 @@ end
     @test b.nt.xtol_abs == 2e-3
     @test b.nt.ftol_rel == 0.5
 end
+
+@testitem "first_sub_tol validation and acceptance" begin
+    using Test, NonconvexAugLagLab
+    @test AugLagOptions(first_sub_tol = nothing) isa AugLagOptions
+    @test AugLagOptions(first_sub_tol = 1e-6) isa AugLagOptions
+    # the default tightens the first subproblem
+    @test AugLagOptions().first_sub_tol == 1e-6
+    @test_throws ArgumentError AugLagOptions(first_sub_tol = 0.0)
+    @test_throws ArgumentError AugLagOptions(first_sub_tol = -1.0)
+end

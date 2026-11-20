@@ -310,9 +310,20 @@ end
   on the TopOpt local-stress single-level solve: bit-for-bit the same
   trajectory as the `:eta` schedule at 3% more wall-clock (290.9 vs
   282.2 s) — no TopOpt win, so `:eta` stays the default.
+  The first subproblem is tightened separately by `first_sub_tol` (see
+  below).
   The schedule governs every sub-solver:
   external solvers (Ipopt, MMA, NLopt) receive the current tolerance through
   their options via the package extensions (`_set_sub_tol`).
+- `first_sub_tol`: the first subproblem is solved to
+  `min(sub_tol, first_sub_tol)` (default `1e-6`); the first inner solve
+  selects the local basin the whole solve follows (measured on the TopOpt
+  local-stress problem: the schedule's loose first solve lands in a 4%
+  heavier design's basin), so it is tightened while later subproblems keep
+  the cheap schedule tolerance. Measured: the default `:eta` schedule plus
+  `first_sub_tol = 1e-6` reproduces the light-design trajectory of a
+  fixed-`1e-6` override bit-for-bit at 12.7% less wall-clock (264.6 vs
+  303.1 s). Set `first_sub_tol = nothing` for the pre-0.4.1 behavior.
 - `outer_schedule`: `:bm` (the default) — the Birgin–Martínez complexity
   scaling where both the feasibility target `η` and the subproblem accuracy
   target `ω` tighten with the full `1/ρ` factor on good steps (and reset
@@ -428,6 +439,7 @@ mutable struct AugLagOptions{S,R,W}
     h0::Symbol
     sub_tol_schedule::Symbol
     sub_tol_rel::Real
+    first_sub_tol::Union{Nothing,Real}
     outer_schedule::Symbol
 
     two_level::Bool
@@ -480,6 +492,7 @@ function AugLagOptions(;
     h0::Symbol=:penalty,
     sub_tol_schedule::Symbol=:eta,
     sub_tol_rel::Real=0.1,
+    first_sub_tol=1e-6,
     outer_schedule::Symbol=:bm,
 
     two_level::Bool=false,
@@ -504,6 +517,8 @@ function AugLagOptions(;
     sub_tol_schedule in (:fixed, :eta2, :eta, :relative) ||
         throw(ArgumentError("sub_tol_schedule must be :fixed, :eta2, :eta or :relative"))
     0 < sub_tol_rel < 1 || throw(ArgumentError("sub_tol_rel must be in (0, 1)"))
+    (first_sub_tol === nothing || first_sub_tol > 0) ||
+        throw(ArgumentError("first_sub_tol must be positive or nothing"))
     two_level_iters >= 1 || throw(ArgumentError("two_level_iters must be >= 1"))
     two_level_tau > 0 || throw(ArgumentError("two_level_tau must be positive"))
     box_barrier_scale > 0 || throw(ArgumentError("box_barrier_scale must be positive"))
@@ -561,6 +576,7 @@ function AugLagOptions(;
         h0,
         sub_tol_schedule,
         sub_tol_rel,
+        first_sub_tol,
         outer_schedule,
         two_level,
         two_level_iters,
@@ -1152,6 +1168,7 @@ function optimize!(workspace::AugLagWorkspace)
     levenberg = options.levenberg
     @unpack h0, sub_tol_schedule, tron_cauchy = options
     sub_tol_rel = Float64(options.sub_tol_rel)
+    first_sub_tol = options.first_sub_tol === nothing ? nothing : Float64(options.first_sub_tol)
     outer_schedule = options.outer_schedule
     @unpack two_level, two_level_iters, two_level_tau = options
     @unpack box_barrier_scale = options
@@ -1435,6 +1452,15 @@ function optimize!(workspace::AugLagWorkspace)
         # explicit sub_options.tol override (previously silently ignored for
         # the built-in QN).
         sub_tol = _sub_tol_value(sub_tol_schedule, qn_tol_override, η, vprev, sub_tol_rel)
+        # Optional first-subproblem tightening: the first inner solve
+        # selects the local basin the whole solve follows (measured on the
+        # TopOpt local-stress problem: a loose first solve lands in a
+        # heavier design's basin), so it can be solved more accurately than
+        # the schedule without paying the tight tolerance on later
+        # subproblems.
+        if iter == 1 && first_sub_tol !== nothing
+            sub_tol = min(sub_tol, first_sub_tol)
+        end
         # the barrier parameter relaxes with η but keeps a nonzero floor
         # (like Ipopt's final μ): a vanishing μ lets the soft-bounded
         # iterate leave the box at convergence

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **First-subproblem tightening (new default)**: `AugLagOptions(first_sub_tol
+  = 1e-6)` solves the first subproblem to `min(sub_tol, first_sub_tol)` —
+  the first inner solve selects the local basin the whole solve follows.
+  Measured on the TopOpt local-stress single-level p=3 solve: the default
+  `:eta` schedule plus this tightening reproduces the light-design
+  trajectory of a fixed-`1e-6` subproblem tolerance bit-for-bit at 12.7%
+  less wall-clock (264.6 vs 303.1 s, 11 outer iterations, obj 0.0938 vs
+  0.0976 for the untightened schedule). Set `first_sub_tol = nothing` for
+  the previous behavior.
 - **Projected-gradient stopping for the built-in quasi-Newton solver (new default)**:
   `QuasiNewtonAlg(projected_stop = true)` terminates on the box-projected
   gradient norm — the correct stationarity measure when the optimum sits on
