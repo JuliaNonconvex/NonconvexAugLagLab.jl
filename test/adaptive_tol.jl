@@ -36,3 +36,43 @@
     @test maximum(max.(g, 0.0)) < 1e-4
     @test r.minimum < 1.0 + 1e-4
 end
+
+@testitem "subproblem tolerance schedule values" begin
+    using Test, NonconvexAugLagLab
+    const NAL = NonconvexAugLagLab
+    # :fixed
+    @test NAL._sub_tol_value(:fixed, nothing, 0.5) == 1e-8
+    # :eta2 clamps to [1e-10, 1e-8]
+    @test NAL._sub_tol_value(:eta2, nothing, 0.5) == 1e-8
+    @test NAL._sub_tol_value(:eta2, nothing, 1e-4) == 1e-8
+    @test NAL._sub_tol_value(:eta2, nothing, 1e-6) == 1e-10
+    # :eta clamps to [1e-6, 1e-2]
+    @test NAL._sub_tol_value(:eta, nothing, 0.5) == 1e-2
+    @test NAL._sub_tol_value(:eta, nothing, 0.05) ≈ 2.5e-3
+    @test NAL._sub_tol_value(:eta, nothing, 1e-4) == 1e-6
+    # an explicit sub_options.tol override wins over any schedule
+    @test NAL._sub_tol_value(:eta, 1e-9, 0.5) == 1e-9
+    @test NAL._sub_tol_value(:fixed, 1e-9, 0.5) == 1e-9
+    # invalid schedules are rejected
+    @test_throws ArgumentError NAL._sub_tol_value(:bogus, nothing, 0.5)
+end
+
+@testitem "MMA and NLopt tolerance extensions" begin
+    using Test, NonconvexCore, NonconvexAugLagLab
+    using NonconvexMMA: NonconvexMMA
+    using NonconvexNLopt: NonconvexNLopt
+    const NAL = NonconvexAugLagLab
+
+    mma = NonconvexMMA.MMAOptions(maxiter = 12)
+    a = NAL._set_sub_tol(nothing, mma, 4e-5)
+    @test a.tol.fabs == 4e-5
+    @test a.tol.kkt == 4e-5
+    @test a.maxiter == 12
+    @test a.outer_maxiter == mma.outer_maxiter
+
+    nl = NonconvexNLopt.NLoptOptions(ftol_rel = 0.5)
+    b = NAL._set_sub_tol(nothing, nl, 2e-3)
+    @test b.nt.ftol_abs == 2e-3
+    @test b.nt.xtol_abs == 2e-3
+    @test b.nt.ftol_rel == 0.5
+end
