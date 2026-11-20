@@ -1319,8 +1319,11 @@ function optimize!(workspace::AugLagWorkspace)
     # constraint block to belong to one evaluator, and none kept hard in the
     # subproblem.
     je_plain = nothing
-    if penalty === :quadratic && !use_elastic && isempty(sd_rel) &&
-        sub_alg !== nothing && nameof(typeof(sub_alg)) === :IpoptAlg
+    if penalty === :quadratic &&
+        !use_elastic &&
+        isempty(sd_rel) &&
+        sub_alg !== nothing &&
+        nameof(typeof(sub_alg)) === :IpoptAlg
         je = _jump_evaluator(model.objective)
         if je !== nothing &&
             all(i -> i in eq_rel, 1:length(model.eq_constraints.fs)) &&
@@ -1550,8 +1553,17 @@ function optimize!(workspace::AugLagWorkspace)
             else
                 (z, σ, lam) -> begin
                     H = _jump_al_hessian(
-                        je_plain, z, eq_fs, ineq_fs, scales, y, λ, w_eq, w_ineq,
-                        Ref(ρ), fscale,
+                        je_plain,
+                        z,
+                        eq_fs,
+                        ineq_fs,
+                        scales,
+                        y,
+                        λ,
+                        w_eq,
+                        w_ineq,
+                        Ref(ρ),
+                        fscale,
                         box_barrier ? submodel0.box_min : nothing,
                         box_barrier ? submodel0.box_max : nothing,
                         μref,
@@ -1565,14 +1577,17 @@ function optimize!(workspace::AugLagWorkspace)
                 if lh === nothing
                     optimize(submodel, sub_alg, x_sub)
                 else
-                    optimize(submodel, sub_alg, x_sub; lagrangian_hessian = lh)
+                    optimize(submodel, sub_alg, x_sub; lagrangian_hessian=lh)
                 end
             elseif lh === nothing
-                optimize(submodel, sub_alg, x_sub; options = options.sub_options)
+                optimize(submodel, sub_alg, x_sub; options=options.sub_options)
             else
                 optimize(
-                    submodel, sub_alg, x_sub;
-                    options = options.sub_options, lagrangian_hessian = lh,
+                    submodel,
+                    sub_alg,
+                    x_sub;
+                    options=options.sub_options,
+                    lagrangian_hessian=lh,
                 )
             end
         end
