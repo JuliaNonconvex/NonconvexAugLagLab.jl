@@ -398,6 +398,7 @@ end
     JuMP.@variable(jm, -5 <= x[1:2] <= 5, start=0.0)
     JuMP.@objective(jm, Min, (x[1] - 1)^2 + (x[2] - 1)^2)
     JuMP.@constraint(jm, x[1]^2 + x[2] - 2 == 0)   # nonlinear → expression path
+    JuMP.@constraint(jm, x[1]^2 - x[2] <= 1.0)      # nonlinear ineq (evaluator)
     dm = DictModel(jm)
     x0 = NonconvexCore.getinit(dm)
     r = optimize(
@@ -436,6 +437,7 @@ end
     m = Model(x -> (x[1] - 1)^2 + (x[2] - 1)^2)
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
     add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+    add_ineq_constraint!(m, x -> x[1] - x[2] - 0.5)
     r = optimize(
         m, AugLagAlg(), [0.0, 0.0]; options=AugLagOptions(max_iter=40, auto_rho_init=true)
     )
@@ -784,4 +786,115 @@ end
     @test NonconvexAugLagLab._raw_violation(
         vm, NonconvexAugLagLab.RelaxConstraintSelection(), [2.5, -1.5]
     ) ≈ 0.5
+end
+
+@testitem "AugLagAlg: option branches (sr1, prox, watchdog, schedules, barrier guards)" begin
+    using NonconvexAugLagLab, NonconvexCore, Test, LinearAlgebra
+
+    m = Model(x -> (x[1] - 1)^2 + (x[2] - 1)^2)
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+
+    # curvature = :sr1 (built-in sub-solver, default h0)
+    r_sr1 = optimize(
+        m, AugLagAlg(), [0.0, 0.0]; options=AugLagOptions(max_iter=60, curvature=:sr1)
+    )
+    @test norm(r_sr1.minimizer - [0.5, 0.5]) < 1e-3
+
+    # proximal regularization with the built-in sub-solver
+    r_prox = optimize(
+        m, AugLagAlg(), [0.0, 0.0]; options=AugLagOptions(max_iter=60, prox=1.0)
+    )
+    @test norm(r_prox.minimizer - [0.5, 0.5]) < 1e-3
+
+    # nonmonotone watchdog acceptance
+    r_wd = optimize(
+        m, AugLagAlg(), [0.0, 0.0]; options=AugLagOptions(max_iter=40, watchdog=true)
+    )
+    @test norm(r_wd.minimizer - [0.5, 0.5]) < 1e-3
+
+    # the gentler :default outer schedule
+    r_def = optimize(
+        m,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options=AugLagOptions(max_iter=40, outer_schedule=:default),
+    )
+    @test norm(r_def.minimizer - [0.5, 0.5]) < 1e-3
+
+    # the fixed subproblem tolerance schedule
+    r_fix = optimize(
+        m,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options=AugLagOptions(max_iter=40, sub_tol_schedule=:fixed),
+    )
+    @test norm(r_fix.minimizer - [0.5, 0.5]) < 1e-3
+
+    # guard rails
+    @test_throws ArgumentError optimize(
+        m,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options=AugLagOptions(max_iter=5, box_barrier=true, elastic=true),
+    )
+end
+
+@testitem "AugLagAlg: restoration merit covers the inequality channel" begin
+    using NonconvexAugLagLab, NonconvexCore, Test
+
+    # The restoration's raw merit and its FD column scaling take an ineq
+    # branch; a stall on an eq+ineq model exercises it.
+    struct StuckAlg2 <: NonconvexCore.AbstractOptimizer end
+    NonconvexCore.solver_capabilities(::StuckAlg2) =
+        ConstraintCapabilities(; box=true, continuous=true, infinite_bounds=true)
+    struct StuckResult2{X} <: NonconvexCore.AbstractResult
+        minimizer::X
+        minimum::Float64
+    end
+    struct StuckWS2{M,X} <: Workspace
+        model::M
+        x0::X
+    end
+    function Workspace(model::NonconvexCore.VecModel, ::StuckAlg2, x0; kwargs...)
+        return StuckWS2(model, copy(x0))
+    end
+    NonconvexCore.optimize!(ws::StuckWS2) = StuckResult2(copy(ws.x0), 0.0)
+
+    m = Model(x -> x[1]^2 + x[2]^2)
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+    add_ineq_constraint!(m, x -> x[1] - x[2] - 1)
+    r = optimize(
+        m,
+        AugLagAlg(StuckAlg2()),
+        [0.0, 0.0];
+        options=AugLagOptions(
+            max_iter=10, filter=false, restore=true, restore_stall=2, restore_tol=0.9
+        ),
+    )
+    # the restoration solved min ||x1+x2-1||^2 + ||(x1-x2-1)^+||^2
+    @test abs(sum(r.minimizer) - 1) < 1e-4
+end
+
+@testitem "AugLagAlg: box-barrier mu adaptation" begin
+    using NonconvexAugLagLab, Test
+
+    μ = 1.0
+    l = [0.0, 0.0]
+    u = [1.0, 1.0]
+    δ = 1e-4
+    # far from the bounds: no complementarity, mu decays
+    μ_far = NonconvexAugLagLab._box_barrier_μ(μ, [0.5, 0.5], l, u, δ, 1.0)
+    @test μ_far == max(μ / 2, 1e-4)
+    # near a lower bound with strong implied duals: mu shrinks
+    # (well-complemented, the barrier has done its job)
+    μ_near = NonconvexAugLagLab._box_barrier_μ(μ, [2δ, 0.5], l, u, δ, 1.0)
+    @test μ_near == 0.5
+    # near an upper bound: same on the upper side
+    μ_up = NonconvexAugLagLab._box_barrier_μ(μ, [0.5, 1.0 - 2δ], l, u, δ, 1.0)
+    @test μ_up == 0.5
+    # weak duals near a bound grow mu back up (to the floor at least)
+    μ_grow = NonconvexAugLagLab._box_barrier_μ(1e-6, [2δ, 0.5], l, u, δ, 1.0)
+    @test μ_grow > 1e-6
 end
