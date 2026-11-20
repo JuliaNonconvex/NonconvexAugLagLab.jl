@@ -1625,13 +1625,7 @@ function optimize!(workspace::AugLagWorkspace)
             elseif lh === nothing
                 optimize(submodel, sub_alg, x_sub; options=sub_opts_i)
             else
-                optimize(
-                    submodel,
-                    sub_alg,
-                    x_sub;
-                    options=sub_opts_i,
-                    lagrangian_hessian=lh,
-                )
+                optimize(submodel, sub_alg, x_sub; options=sub_opts_i, lagrangian_hessian=lh)
             end
         end
         x_new = copy(result_i.minimizer)
