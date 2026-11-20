@@ -1311,6 +1311,25 @@ function optimize!(workspace::AugLagWorkspace)
     if box_barrier && use_elastic
         throw(ArgumentError("box_barrier does not support the elastic mode"))
     end
+    # Exact second-order plain subproblems for JuMP-converted models with
+    # the Ipopt sub-solver: the subproblem Lagrangian Hessian is the AL
+    # objective's Hessian assembled from the MathOptInterface evaluator
+    # (nested AD through the JuMP functions is not supported). Requires the
+    # quadratic penalty, no elastic mode, no semidefinite block, every
+    # constraint block to belong to one evaluator, and none kept hard in the
+    # subproblem.
+    je_plain = nothing
+    if penalty === :quadratic && !use_elastic && isempty(sd_rel) &&
+        sub_alg !== nothing && nameof(typeof(sub_alg)) === :IpoptAlg
+        je = _jump_evaluator(model.objective)
+        if je !== nothing &&
+            all(i -> i in eq_rel, 1:length(model.eq_constraints.fs)) &&
+            all(i -> i in ineq_rel, 1:length(model.ineq_constraints.fs)) &&
+            all(_is_jump_block(model.eq_constraints.fs[i], je) for i in eq_rel) &&
+            all(_is_jump_block(model.ineq_constraints.fs[i], je) for i in ineq_rel)
+            je_plain = je
+        end
+    end
     δbar = 1e-4
     μref = Ref(0.0)
     if box_barrier
@@ -1526,10 +1545,35 @@ function optimize!(workspace::AugLagWorkspace)
             end
             r1
         else
-            if options.sub_options === nothing
-                optimize(submodel, sub_alg, x_sub)
+            lh = if je_plain === nothing
+                nothing
             else
-                optimize(submodel, sub_alg, x_sub; options=options.sub_options)
+                (z, σ, lam) -> begin
+                    H = _jump_al_hessian(
+                        je_plain, z, eq_fs, ineq_fs, scales, y, λ, w_eq, w_ineq,
+                        Ref(ρ), fscale,
+                        box_barrier ? submodel0.box_min : nothing,
+                        box_barrier ? submodel0.box_max : nothing,
+                        μref,
+                        δbar,
+                    )
+                    prox > 0 && (H[diagind(H)] .+= prox)
+                    σ .* H
+                end
+            end
+            if options.sub_options === nothing
+                if lh === nothing
+                    optimize(submodel, sub_alg, x_sub)
+                else
+                    optimize(submodel, sub_alg, x_sub; lagrangian_hessian = lh)
+                end
+            elseif lh === nothing
+                optimize(submodel, sub_alg, x_sub; options = options.sub_options)
+            else
+                optimize(
+                    submodel, sub_alg, x_sub;
+                    options = options.sub_options, lagrangian_hessian = lh,
+                )
             end
         end
         x_new = copy(result_i.minimizer)
@@ -1959,6 +2003,16 @@ function _jump_evaluator(obj)
     raw = raw isa NonconvexCore.FlattenedFunction ? NonconvexCore.getrawfunction(raw) : raw
     raw isa NonconvexCore.JuMPModelObjective || return nothing
     return raw.m
+end
+
+# Whether a constraint block belongs to the given JuMP evaluator (one of the
+# JuMP-converted model's own blocks, not a composite of several).
+function _is_jump_block(c, je)
+    raw = c isa NonconvexCore.AbstractConstraint ? NonconvexCore.getfunction(c) : c
+    raw = raw isa NonconvexCore.FlattenedFunction ? NonconvexCore.getrawfunction(raw) : raw
+    raw = raw isa NonconvexCore.FunctionWrapper ? NonconvexCore.getfunction(raw) : raw
+    return (raw isa NonconvexCore.JuMPModelIneq || raw isa NonconvexCore.JuMPModelEq) &&
+           raw.m === je
 end
 
 # ------------------------------------------------------------------
