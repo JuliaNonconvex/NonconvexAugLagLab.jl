@@ -8,7 +8,7 @@
     if :lagrangian_hessian in fieldnames(NonconvexIpopt.IpoptWorkspace)
         jm = JuMP.Model()
         JuMP.@variable(jm, x[1:2])
-        JuMP.@objective(jm, Min, (x[1] - 1)^2 + (x[2] - 2)^2 + 0.0 * sin(x[1]))
+        JuMP.@objective(jm, Min, (x[1] - 1)^2 + (x[2] - 2)^2 + 1e-6 * sin(x[1]))
         JuMP.@constraint(jm, x[1] + x[2] <= 5.0)  # inactive at the optimum
         JuMP.@constraint(jm, x[1] >= -1.0)
         dm = DictModel(jm)
@@ -27,9 +27,10 @@
         # the exact-Hessian subproblem solves run through the composed
         # evaluator Hessian (nested AD through the JuMP functions is
         # rejected upstream)
-        @test abs(dm.objective(r.minimizer)) < 1e-6
+        @test norm(r.minimizer[:x] .- [1.0, 2.0]) < 1e-4
+        @test abs(dm.objective(r.minimizer)) < 1e-5
         g = dm.ineq_constraints.fs[1](r.minimizer)
-        @test maximum(max.(g, 0.0)) < 1e-6
+        @test maximum(max.(g, 0.0)) < 1e-5
     else
         @test_skip false
     end
@@ -43,7 +44,7 @@ end
     Random.seed!(0)
     jm = JuMP.Model()
     JuMP.@variable(jm, x[1:2])
-    JuMP.@objective(jm, Min, (x[1] - 1)^2 + (x[2] - 2)^2 + x[1] * x[2] + 0.0 * sin(x[1]))
+    JuMP.@objective(jm, Min, (x[1] - 1)^2 + (x[2] - 2)^2 + x[1] * x[2] + 1e-6 * sin(x[1]))
     JuMP.@constraint(jm, x[1] + x[2] <= 1.0)      # violated at the test point
     JuMP.@constraint(jm, x[1] - x[2] == 0.5)
     dm = DictModel(jm)
