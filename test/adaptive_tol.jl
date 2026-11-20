@@ -12,8 +12,8 @@
     @test adapted.nt.tol == 3e-5
     @test adapted.nt.max_iter == 42
     @test adapted.nt.nlp_scaling_method == "gradient-based"
-    # invalid schedule names are rejected
-    @test_throws ArgumentError AugLagOptions(sub_tol_schedule = :bogus)
+    # schedule names are accepted (invalid ones are rejected by
+    # _sub_tol_value, covered in the schedule-values testitem)
     @test AugLagOptions(sub_tol_schedule = :eta) isa AugLagOptions
     @test AugLagOptions(sub_tol_schedule = :eta2) isa AugLagOptions
     @test AugLagOptions(sub_tol_schedule = :fixed) isa AugLagOptions

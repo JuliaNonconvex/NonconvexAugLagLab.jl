@@ -590,6 +590,25 @@ end
 # ------------------------------------------------------------------
 # Subproblem construction
 # ------------------------------------------------------------------
+# The sub-solver options with the outer loop's current subproblem tolerance
+# applied (the adaptive sub_tol_schedule governs every sub-solver). The
+# fallback keeps the options unchanged; solver-specific methods live in the
+# package extensions (NonconvexAugLagLabIpoptExt / -MMAExt / -NLoptExt).
+_set_sub_tol(alg, options, tol) = options
+
+# The inner (subproblem) tolerance of one outer iteration: an explicit
+# sub_options.tol override wins; otherwise the schedule - :fixed (1e-8),
+# :eta2 (clamp(eta^2, 1e-10, 1e-8)) or :eta (clamp(eta^2, 1e-6, 1e-2)):
+# loose inner solves while the outer loop only needs rough steps, with a
+# 1e-6 floor for the final accuracy.
+function _sub_tol_value(schedule, tol_override, eta)
+    tol_override !== nothing && return Float64(tol_override)
+    schedule === :fixed && return 1e-8
+    schedule === :eta2 && return clamp(eta^2, 1e-10, 1e-8)
+    schedule === :eta && return clamp(eta^2, 1e-6, 1e-2)
+    throw(ArgumentError("sub_tol_schedule must be :fixed, :eta2 or :eta"))
+end
+
 function _subproblem(
     model::VecModel, sel::RelaxConstraintSelection, weights::Union{Nothing,AbstractVector}
 )
