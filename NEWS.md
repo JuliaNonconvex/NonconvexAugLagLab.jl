@@ -21,6 +21,15 @@
   lighter feasible design (obj 0.0895 vs 0.0938) at the same max solid
   stress and a marginally larger final violation (6.2e-6 vs 5.7e-6) — a
   quality-for-time trade, off by default.
+- **Practical relative subproblem tolerance (opt-in)**:
+  `AugLagOptions(sub_tol_schedule = :relative, sub_tol_rel = τ)` sets the
+  inner tolerance proportional to the current constraint violation
+  (`clamp(τ·v_prev, 1e-10, 1e-2)`, Eckstein–Silva). Measured on the TopOpt
+  local-stress single-level solve: bit-for-bit the same trajectory as the
+  `:eta` schedule at 3% more wall-clock (290.9 vs 282.2 s) — no win, so
+  `:eta` stays the default. The duplicate `_set_sub_tol`/`_sub_tol_value`
+  definitions inside `optimize!` were removed along the way (the inner
+  copies shadowed the module-level ones).
 
 ## 0.4.0
 

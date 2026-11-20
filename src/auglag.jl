@@ -281,13 +281,22 @@ end
   Levenberg damping trades ~30% TopOpt speed for a worse objective and
   feasibility; the filter, stall retry and the two-way ρ decrease are inert
   on the measured benchmarks (kept as safety nets).
-- `sub_tol_schedule`: `:eta` (the default), `:eta2` or `:fixed` (`1e-8`).
-  The default `:eta` schedule loosens the subproblem tolerance as the outer
+- `sub_tol_schedule`: `:eta` (the default), `:eta2`, `:fixed` (`1e-8`) or
+  `:relative`. The default `:eta` schedule loosens the subproblem tolerance as the outer
   feasibility target tightens (clamped to `[1e-6, 1e-2]`): cheap sub-solves
   while the outer loop only needs rough steps, floored at `1e-6` for the
   final accuracy (measured 28% faster than `:eta2` on TopOpt stress with
   4.8x tighter final feasibility). `:eta2` (clamped to `[1e-10, 1e-8]`)
-  remains for maximal final accuracy. The schedule governs every sub-solver:
+  remains for maximal final accuracy. `:relative` sets the inner tolerance
+  proportional to the current constraint violation,
+  `clamp(sub_tol_rel * v_prev, 1e-10, 1e-2)` with `sub_tol_rel` (default
+  `0.1`, must be in `(0, 1)`): the Eckstein–Silva practical relative
+  criterion — the subproblem is solved only to an accuracy comparable to
+  the current infeasibility, so effort concentrates where it pays. Measured
+  on the TopOpt local-stress single-level solve: bit-for-bit the same
+  trajectory as the `:eta` schedule at 3% more wall-clock (290.9 vs
+  282.2 s) — no TopOpt win, so `:eta` stays the default.
+  The schedule governs every sub-solver:
   external solvers (Ipopt, MMA, NLopt) receive the current tolerance through
   their options via the package extensions (`_set_sub_tol`).
 - `outer_schedule`: `:bm` (the default) — the Birgin–Martínez complexity
@@ -403,6 +412,7 @@ mutable struct AugLagOptions{S,R,W}
     levenberg::Bool
     h0::Symbol
     sub_tol_schedule::Symbol
+    sub_tol_rel::Real
     outer_schedule::Symbol
 
     two_level::Bool
@@ -453,6 +463,7 @@ function AugLagOptions(;
     levenberg::Bool=true,
     h0::Symbol=:penalty,
     sub_tol_schedule::Symbol=:eta,
+    sub_tol_rel::Real=0.1,
     outer_schedule::Symbol=:bm,
 
     two_level::Bool=false,
@@ -474,6 +485,9 @@ function AugLagOptions(;
     )
     outer_schedule in (:default, :bm) ||
         throw(ArgumentError("outer_schedule must be :default or :bm"))
+    sub_tol_schedule in (:fixed, :eta2, :eta, :relative) ||
+        throw(ArgumentError("sub_tol_schedule must be :fixed, :eta2, :eta or :relative"))
+    0 < sub_tol_rel < 1 || throw(ArgumentError("sub_tol_rel must be in (0, 1)"))
     two_level_iters >= 1 || throw(ArgumentError("two_level_iters must be >= 1"))
     two_level_tau > 0 || throw(ArgumentError("two_level_tau must be positive"))
     box_barrier_scale > 0 || throw(ArgumentError("box_barrier_scale must be positive"))
@@ -529,6 +543,7 @@ function AugLagOptions(;
         levenberg,
         h0,
         sub_tol_schedule,
+        sub_tol_rel,
         outer_schedule,
         two_level,
         two_level_iters,
@@ -612,15 +627,21 @@ _set_sub_tol(alg, options, tol) = options
 
 # The inner (subproblem) tolerance of one outer iteration: an explicit
 # sub_options.tol override wins; otherwise the schedule - :fixed (1e-8),
-# :eta2 (clamp(eta^2, 1e-10, 1e-8)) or :eta (clamp(eta^2, 1e-6, 1e-2)):
+# :eta2 (clamp(eta^2, 1e-10, 1e-8)), :eta (clamp(eta^2, 1e-6, 1e-2)) or
+# :relative (clamp(sub_tol_rel * vprev, 1e-10, 1e-2), the Eckstein-Silva
+# practical relative criterion: the subproblem only needs to be solved to
+# an accuracy proportional to the current constraint violation):
 # loose inner solves while the outer loop only needs rough steps, with a
 # 1e-6 floor for the final accuracy.
-function _sub_tol_value(schedule, tol_override, eta)
+function _sub_tol_value(schedule, tol_override, eta, vprev, sub_tol_rel)
     tol_override !== nothing && return Float64(tol_override)
     schedule === :fixed && return 1e-8
     schedule === :eta2 && return clamp(eta^2, 1e-10, 1e-8)
     schedule === :eta && return clamp(eta^2, 1e-6, 1e-2)
-    return throw(ArgumentError("sub_tol_schedule must be :fixed, :eta2 or :eta"))
+    schedule === :relative && return clamp(sub_tol_rel * max(vprev, 1e-12), 1e-10, 1e-2)
+    return throw(
+        ArgumentError("sub_tol_schedule must be :fixed, :eta2, :eta or :relative")
+    )
 end
 
 function _subproblem(
@@ -1112,6 +1133,7 @@ function optimize!(workspace::AugLagWorkspace)
     watchdog_tol = Float64(options.watchdog_tol)
     levenberg = options.levenberg
     @unpack h0, sub_tol_schedule, tron_cauchy = options
+    sub_tol_rel = Float64(options.sub_tol_rel)
     outer_schedule = options.outer_schedule
     @unpack two_level, two_level_iters, two_level_tau = options
     @unpack box_barrier_scale = options
@@ -1389,29 +1411,12 @@ function optimize!(workspace::AugLagWorkspace)
         end
         μref[] = Float64(box_barrier_scale)
     end
-    # The sub-solver options with the outer loop's current subproblem
-    # tolerance applied (the adaptive sub_tol_schedule governs every
-    # sub-solver). The fallback keeps the options unchanged; solver-specific
-    # methods live in the package extensions (NonconvexAugLagLabIpoptExt /
-    # -MMAExt / -NLoptExt).
-    _set_sub_tol(alg, options, tol) = options
-    # The inner (subproblem) tolerance of one outer iteration: an explicit
-    # sub_options.tol override wins; otherwise the schedule - :fixed (1e-8),
-    # :eta2 (clamp(eta^2, 1e-10, 1e-8)) or :eta (clamp(eta^2, 1e-6, 1e-2)):
-    # loose inner solves while the outer loop only needs rough steps, with a
-    # 1e-6 floor for the final accuracy.
-    function _sub_tol_value(schedule, tol_override, eta)
-        tol_override !== nothing && return Float64(tol_override)
-        schedule === :fixed && return 1e-8
-        schedule === :eta2 && return clamp(eta^2, 1e-10, 1e-8)
-        schedule === :eta && return clamp(eta^2, 1e-6, 1e-2)
-        return throw(ArgumentError("sub_tol_schedule must be :fixed, :eta2 or :eta"))
-    end
     for iter in 1:max_iter
         # Subproblem tolerance: fixed, adaptive (tied to the outer
-        # feasibility target η), or an explicit sub_options.tol override
-        # (previously silently ignored for the built-in QN).
-        sub_tol = _sub_tol_value(sub_tol_schedule, qn_tol_override, η)
+        # feasibility target η), relative to the current violation, or an
+        # explicit sub_options.tol override (previously silently ignored for
+        # the built-in QN).
+        sub_tol = _sub_tol_value(sub_tol_schedule, qn_tol_override, η, vprev, sub_tol_rel)
         # the barrier parameter relaxes with η but keeps a nonzero floor
         # (like Ipopt's final μ): a vanishing μ lets the soft-bounded
         # iterate leave the box at convergence
