@@ -606,7 +606,7 @@ function _sub_tol_value(schedule, tol_override, eta)
     schedule === :fixed && return 1e-8
     schedule === :eta2 && return clamp(eta^2, 1e-10, 1e-8)
     schedule === :eta && return clamp(eta^2, 1e-6, 1e-2)
-    throw(ArgumentError("sub_tol_schedule must be :fixed, :eta2 or :eta"))
+    return throw(ArgumentError("sub_tol_schedule must be :fixed, :eta2 or :eta"))
 end
 
 function _subproblem(
@@ -1366,7 +1366,7 @@ function optimize!(workspace::AugLagWorkspace)
         schedule === :fixed && return 1e-8
         schedule === :eta2 && return clamp(eta^2, 1e-10, 1e-8)
         schedule === :eta && return clamp(eta^2, 1e-6, 1e-2)
-        throw(ArgumentError("sub_tol_schedule must be :fixed, :eta2 or :eta"))
+        return throw(ArgumentError("sub_tol_schedule must be :fixed, :eta2 or :eta"))
     end
     for iter in 1:max_iter
         # Subproblem tolerance: fixed, adaptive (tied to the outer

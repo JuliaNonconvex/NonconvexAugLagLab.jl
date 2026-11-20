@@ -4,19 +4,19 @@
 
     const NAL = NonconvexAugLagLab
     # the fallback keeps the options unchanged
-    @test NAL._set_sub_tol(nothing, (; max_iter = 7), 1e-4) == (; max_iter = 7)
+    @test NAL._set_sub_tol(nothing, (; max_iter=7), 1e-4) == (; max_iter=7)
     # the Ipopt extension (loaded when NonconvexIpopt is present) overrides
     # only the tolerance
-    opts = NonconvexIpopt.IpoptOptions(max_iter = 42, nlp_scaling_method = "gradient-based")
+    opts = NonconvexIpopt.IpoptOptions(max_iter=42, nlp_scaling_method="gradient-based")
     adapted = NAL._set_sub_tol(nothing, opts, 3e-5)
     @test adapted.nt.tol == 3e-5
     @test adapted.nt.max_iter == 42
     @test adapted.nt.nlp_scaling_method == "gradient-based"
     # schedule names are accepted (invalid ones are rejected by
     # _sub_tol_value, covered in the schedule-values testitem)
-    @test AugLagOptions(sub_tol_schedule = :eta) isa AugLagOptions
-    @test AugLagOptions(sub_tol_schedule = :eta2) isa AugLagOptions
-    @test AugLagOptions(sub_tol_schedule = :fixed) isa AugLagOptions
+    @test AugLagOptions(sub_tol_schedule=:eta) isa AugLagOptions
+    @test AugLagOptions(sub_tol_schedule=:eta2) isa AugLagOptions
+    @test AugLagOptions(sub_tol_schedule=:fixed) isa AugLagOptions
 
     # end-to-end with the Ipopt sub-solver and the default (:eta) schedule:
     # the sub-solver options get the adaptive tolerance each outer iteration
@@ -27,9 +27,8 @@
         m,
         AugLagAlg(NonconvexIpopt.IpoptAlg()),
         [0.0, 0.0];
-        options = AugLagOptions(
-            max_iter = 50,
-            sub_options = NonconvexIpopt.IpoptOptions(max_iter = 200),
+        options=AugLagOptions(
+            max_iter=50, sub_options=NonconvexIpopt.IpoptOptions(max_iter=200)
         ),
     )
     g = m.ineq_constraints.fs[1](r.minimizer)
@@ -63,14 +62,14 @@ end
     using NonconvexNLopt: NonconvexNLopt
     const NAL = NonconvexAugLagLab
 
-    mma = NonconvexMMA.MMAOptions(maxiter = 12)
+    mma = NonconvexMMA.MMAOptions(maxiter=12)
     a = NAL._set_sub_tol(nothing, mma, 4e-5)
     @test a.tol.fabs == 4e-5
     @test a.tol.kkt == 4e-5
     @test a.maxiter == 12
     @test a.outer_maxiter == mma.outer_maxiter
 
-    nl = NonconvexNLopt.NLoptOptions(ftol_rel = 0.5)
+    nl = NonconvexNLopt.NLoptOptions(ftol_rel=0.5)
     b = NAL._set_sub_tol(nothing, nl, 2e-3)
     @test b.nt.ftol_abs == 2e-3
     @test b.nt.xtol_abs == 2e-3
