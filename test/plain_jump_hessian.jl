@@ -5,31 +5,34 @@
     # Requires the lagrangian_hessian hook (JuliaNonconvex/NonconvexIpopt.jl#40).
     # On older NonconvexIpopt the hook argument is dropped silently and the
     # solve would run the corrupted nested-AD path; skip instead.
-    :lagrangian_hessian in fieldnames(NonconvexIpopt.IpoptWorkspace) || return nothing
-
-    jm = JuMP.Model()
-    JuMP.@variable(jm, x[1:2])
-    JuMP.@objective(jm, Min, (x[1] - 1)^2 + (x[2] - 2)^2 + 0.0 * sin(x[1]))
-    JuMP.@constraint(jm, x[1] + x[2] <= 5.0)  # inactive at the optimum
-    JuMP.@constraint(jm, x[1] >= -1.0)
-    dm = DictModel(jm)
-    x0 = NonconvexCore.getinit(dm)
-    r = optimize(
-        dm,
-        AugLagAlg(NonconvexIpopt.IpoptAlg()),
-        x0;
-        options=AugLagOptions(;
-            max_iter=50,
-            sub_options=NonconvexIpopt.IpoptOptions(
-                max_iter=200, hessian_approximation="exact"
+    if :lagrangian_hessian in fieldnames(NonconvexIpopt.IpoptWorkspace)
+        jm = JuMP.Model()
+        JuMP.@variable(jm, x[1:2])
+        JuMP.@objective(jm, Min, (x[1] - 1)^2 + (x[2] - 2)^2 + 0.0 * sin(x[1]))
+        JuMP.@constraint(jm, x[1] + x[2] <= 5.0)  # inactive at the optimum
+        JuMP.@constraint(jm, x[1] >= -1.0)
+        dm = DictModel(jm)
+        x0 = NonconvexCore.getinit(dm)
+        r = optimize(
+            dm,
+            AugLagAlg(NonconvexIpopt.IpoptAlg()),
+            x0;
+            options=AugLagOptions(;
+                max_iter=50,
+                sub_options=NonconvexIpopt.IpoptOptions(
+                    max_iter=200, hessian_approximation="exact"
+                ),
             ),
-        ),
-    )
-    # the exact-Hessian subproblem solves run through the composed evaluator
-    # Hessian (nested AD through the JuMP functions is rejected upstream)
-    @test abs(dm.objective(r.minimizer)) < 1e-6
-    g = dm.ineq_constraints.fs[1](r.minimizer)
-    @test maximum(max.(g, 0.0)) < 1e-6
+        )
+        # the exact-Hessian subproblem solves run through the composed
+        # evaluator Hessian (nested AD through the JuMP functions is
+        # rejected upstream)
+        @test abs(dm.objective(r.minimizer)) < 1e-6
+        g = dm.ineq_constraints.fs[1](r.minimizer)
+        @test maximum(max.(g, 0.0)) < 1e-6
+    else
+        @test_skip false
+    end
 end
 
 @testitem "the composed plain AL Hessian matches finite differences" begin
