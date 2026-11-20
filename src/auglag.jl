@@ -1262,6 +1262,7 @@ function optimize!(workspace::AugLagWorkspace)
         qn_reset = get(qn_opts, :reset, false)
         qn_nonmonotone = get(qn_opts, :nonmonotone, false)
         qn_soc = get(qn_opts, :soc, false)
+        qn_projected_stop = get(qn_opts, :projected_stop, true)
         h0_op = if h0 === :penalty
             DiagonalPreconditioner(fill(1 / (1 + ρ), n + (use_elastic ? m_eq : 0)))
         elseif h0 === :identity
@@ -1559,6 +1560,7 @@ function optimize!(workspace::AugLagWorkspace)
                     tron_cauchy=tron_cauchy,
                     nonmonotone=qn_nonmonotone,
                     soc=qn_soc,
+                    projected_stop=qn_projected_stop,
                 ),
                 x_sub,
             )
@@ -1576,6 +1578,7 @@ function optimize!(workspace::AugLagWorkspace)
                         tron_cauchy=tron_cauchy,
                         nonmonotone=qn_nonmonotone,
                         soc=qn_soc,
+                        projected_stop=qn_projected_stop,
                     ),
                     x_sub,
                 )
@@ -1653,6 +1656,7 @@ function optimize!(workspace::AugLagWorkspace)
                         tron_cauchy=tron_cauchy,
                         nonmonotone=qn_nonmonotone,
                         soc=qn_soc,
+                        projected_stop=qn_projected_stop,
                     ),
                     x_two,
                 )

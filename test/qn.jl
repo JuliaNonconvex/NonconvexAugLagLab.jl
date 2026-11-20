@@ -322,3 +322,30 @@ end
     r = optimize(m, alg, [-1.2, 1.0])
     @test norm(r.minimizer - [1.0, 1.0]) < 1e-3
 end
+
+@testitem "QuasiNewtonAlg: projected-gradient stopping at bound-constrained optima" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra
+    # Unconstrained minimum [1.5, 1.5] lies outside the box: the solution is
+    # [1.0, 1.0] where the RAW gradient is [-1, -1] (nonzero) but the
+    # box-PROJECTED gradient is zero. Without projected stopping the
+    # raw-gradient test can never fire and the driver burns the budget.
+    for globalization in (:backtracking, :trustregion)
+        m = Model(x -> sum((x .- [1.5, 1.5]) .^ 2))
+        addvar!(m, [0.0, 0.0], [1.0, 1.0])
+        r = optimize(
+            m,
+            QuasiNewtonAlg(;
+                max_iter=50,
+                tol=1e-8,
+                globalization=globalization,
+                projected_stop=true,
+            ),
+            [0.5, 0.5],
+        )
+        @test r.minimizer ≈ [1.0, 1.0] atol = 1e-6
+        # the reported KKT residual is the projected-gradient norm
+        @test r.tol.kkt < 1e-6
+        # iterations left on the table: the solver stopped before the budget
+        @test r.iter < 50
+    end
+end

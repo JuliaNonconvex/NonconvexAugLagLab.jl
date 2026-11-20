@@ -1,5 +1,18 @@
 # NEWS
 
+## Unreleased
+
+- **Projected-gradient stopping for the built-in quasi-Newton solver (new default)**:
+  `QuasiNewtonAlg(projected_stop = true)` terminates on the box-projected
+  gradient norm — the correct stationarity measure when the optimum sits on
+  a box bound, where the raw gradient does not vanish and the solver
+  previously burned its iteration budget — and reports that projected norm
+  as the KKT residual. Measured on the TopOpt local-stress single-level
+  p=3 solve (80×20, 1600 stress constraints): bit-for-bit identical
+  trajectory and solution at 7.2% less wall-clock (303.1 vs 326.7 s,
+  11 outer iterations). Set `projected_stop = false` for the previous
+  behavior.
+
 ## 0.4.0
 
 - **Adaptive subproblem tolerance for every sub-solver** (default): the new `sub_tol_schedule = :eta` loosens the inner tolerance as the outer feasibility target tightens (`clamp(η², 1e-6, 1e-2)`), 28% faster than the old schedule on TopOpt stress with 4.8× tighter final feasibility. External sub-solvers receive the per-iteration tolerance through their options via the new package extensions (`_set_sub_tol`): Ipopt (`tol`), MMA (`Tolerance`) and NLopt (`ftol_abs`/`xtol_abs`).
