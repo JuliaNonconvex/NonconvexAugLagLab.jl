@@ -3,8 +3,32 @@ modules = ["NonconvexAugLagLab"]
 doctest_setup = "using NonconvexAugLagLab"
 
 [[pages]]
-title = "Augmented Lagrangian"
+title = "Introduction"
 file = "index.md"
+
+[[pages]]
+title = "Quick start"
+file = "quickstart.md"
+
+[[pages]]
+title = "Options"
+file = "options.md"
+
+[[pages]]
+title = "Semidefinite constraints"
+file = "semidefinite.md"
+
+[[pages]]
+title = "Continuation"
+file = "continuation.md"
+
+[[pages]]
+title = "Quasi-Newton sub-solver"
+file = "subsolvers.md"
+
+[[pages]]
+title = "Result"
+file = "result.md"
 
 [[pages]]
 title = "Theory"
