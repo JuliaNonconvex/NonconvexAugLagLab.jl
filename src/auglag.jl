@@ -274,6 +274,20 @@ end
   (obj 0.0895 vs 0.0938) at the same max solid stress and a marginally
   larger final violation (6.2e-6 vs 5.7e-6) — a quality-for-time trade,
   so it stays off by default.
+- `multiplier_relax`: (opt-in) Eckstein-style adaptive relaxation of the
+  multiplier step: when the subproblem stationarity residual at the
+  accepted iterate (the projected gradient of the subproblem objective,
+  the built-in solver's own stopping metric) exceeds the requested
+  subproblem tolerance, the dual increment is scaled down by the
+  achieved-accuracy ratio `θ = clamp(sub_tol/‖res‖, 0.1, 1)` — a loose
+  inner solve cannot poison the multiplier estimates with a full step.
+  Applies to the equality updates and the classical quadratic inequality
+  updates (the Anderson residuals are scaled to match); the PBM/SD
+  multiplier updates are left unscaled. One extra subproblem-gradient
+  evaluation per outer iteration when enabled. Measured on the TopOpt
+  local-stress single-level solve: 2.1% slower (309.5 vs 303.1 s) but a
+  2.1% lighter feasible design (obj 0.0918 vs 0.0938) with marginally
+  better feasibility — a small quality-for-time trade, off by default.
 - `filter`, `stall_retry`, `selective`, `safeguard`, `two_way`, `levenberg`:
   toggles for the corresponding defaults (all `true`). Re-measured on 0.2.5:
   removing the selective weights costs ~79% TopOpt wall-clock, removing the
@@ -405,6 +419,7 @@ mutable struct AugLagOptions{S,R,W}
     watchdog_tau::Real
     watchdog_tol::Real
     anderson_ineq::Bool
+    multiplier_relax::Bool
     stall_retry::Bool
     selective::Bool
     safeguard::Bool
@@ -456,6 +471,7 @@ function AugLagOptions(;
     watchdog_tau::Real=0.5,
     watchdog_tol::Real=0.0,
     anderson_ineq::Bool=false,
+    multiplier_relax::Bool=false,
     stall_retry::Bool=true,
     selective::Bool=true,
     safeguard::Bool=true,
@@ -536,6 +552,7 @@ function AugLagOptions(;
         watchdog_tau,
         watchdog_tol,
         anderson_ineq,
+        multiplier_relax,
         stall_retry,
         selective,
         safeguard,
@@ -1128,6 +1145,7 @@ function optimize!(workspace::AugLagWorkspace)
     @unpack elastic, elastic_mu, warm_continue = options
     @unpack filter, stall_retry, selective, safeguard, two_way = options
     anderson_ineq = options.anderson_ineq
+    multiplier_relax = options.multiplier_relax
     watchdog = options.watchdog
     watchdog_tau = Float64(options.watchdog_tau)
     watchdog_tol = Float64(options.watchdog_tol)
@@ -1770,18 +1788,35 @@ function optimize!(workspace::AugLagWorkspace)
             # Multiplier updates (the practical ALM condition: update whenever
             # feasibility improved sufficiently, not only once η is reached —
             # this stops the penalty from escalating unnecessarily).
+            # Eckstein-style adaptive relaxation of the multiplier step: when
+            # the subproblem was solved less accurately than requested (its
+            # stationarity residual at the accepted iterate exceeds the
+            # requested tolerance), the dual step is scaled down by the
+            # achieved-accuracy ratio, so a loose inner solve cannot poison
+            # the multiplier estimates. The residual is the projected
+            # gradient of the subproblem objective (the same metric the
+            # built-in quasi-Newton solver uses to stop); the barrier/prox
+            # corrections are ignored (cheap approximation).
+            θ_mult = 1.0
+            if multiplier_relax
+                gal = NonconvexCore.value_gradient(al_sub, x_new)[2]
+                galn = use_elastic ? @view(gal[1:n]) : gal
+                xn = use_elastic ? @view(x_new[1:n]) : x_new
+                pg = _projected_gnorm(galn, xn, submodel0.box_min, submodel0.box_max)
+                θ_mult = clamp(sub_tol / max(pg, sub_tol), 0.1, 1.0)
+            end
             if use_elastic
                 s = x_new[(n + 1):end]
                 off = 0
                 for k in eachindex(eq_rel)
                     ck = _vecval(eq_fs[k](x))
                     sk = s[(off + 1):(off + length(ck))]
-                    y[k] .= y[k] .+ (ρ * w_eq[k]) .* (ck .- sk)
+                    y[k] .= y[k] .+ θ_mult .* (ρ * w_eq[k]) .* (ck .- sk)
                     off += length(ck)
                 end
             else
                 for k in eachindex(eq_rel)
-                    y[k] .= y[k] .+ (ρ * w_eq[k]) .* _vecval(eq_fs[k](x))
+                    y[k] .= y[k] .+ θ_mult .* (ρ * w_eq[k]) .* _vecval(eq_fs[k](x))
                 end
             end
             # Anderson acceleration of the equality multiplier updates.
@@ -1798,12 +1833,12 @@ function optimize!(workspace::AugLagWorkspace)
                     for k in eachindex(eq_rel)
                         ck = _vecval(eq_fs[k](x))
                         sk = s[(off + 1):(off + length(ck))]
-                        append!(resid, (ρ * w_eq[k]) .* (ck .- sk))
+                        append!(resid, θ_mult .* (ρ * w_eq[k]) .* (ck .- sk))
                         off += length(ck)
                     end
                 else
                     for k in eachindex(eq_rel)
-                        append!(resid, (ρ * w_eq[k]) .* _vecval(eq_fs[k](x)))
+                        append!(resid, θ_mult .* (ρ * w_eq[k]) .* _vecval(eq_fs[k](x)))
                     end
                 end
                 y_prev_flat = y_new_flat .- resid
@@ -1838,9 +1873,9 @@ function optimize!(workspace::AugLagWorkspace)
                     λ[k][feas] .= λ[k][feas] ./ (1 .+ λ[k][feas] .* g[feas] ./ cbar)
                     λ[k][.!feas] .= max.(λ[k][.!feas] .+ (ρ * w) .* g[.!feas], 0.0)
                 else
-                    λ[k] .= max.(λ[k] .+ (ρ * w) .* g, 0.0)
+                    λ[k] .= max.(λ[k] .+ θ_mult .* (ρ * w) .* g, 0.0)
                 end
-                anderson_ineq && penalty === :quadratic && append!(ineq_resid, (ρ * w) .* g)
+                anderson_ineq && penalty === :quadratic && append!(ineq_resid, θ_mult .* (ρ * w) .* g)
                 safeguard && clamp!(λ[k], 0.0, 1e8)
                 if pbm_adaptive && penalty in (:pbm, :mixed, :mixed_logdet)
                     # Ipopt-style barrier adaptation: the barrier coefficient

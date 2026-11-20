@@ -30,6 +30,14 @@
   `:eta` stays the default. The duplicate `_set_sub_tol`/`_sub_tol_value`
   definitions inside `optimize!` were removed along the way (the inner
   copies shadowed the module-level ones).
+- **Relaxed multiplier step (opt-in)**: `AugLagOptions(multiplier_relax =
+  true)` scales each dual increment by the achieved-accuracy ratio
+  `θ = clamp(sub_tol/‖res‖, 0.1, 1)` of the subproblem stationarity
+  residual (Eckstein-style adaptive relaxation), so loose inner solves
+  cannot poison the multipliers with a full step. Measured on the TopOpt
+  local-stress single-level solve: 2.1% slower (309.5 vs 303.1 s) but a
+  2.1% lighter feasible design (obj 0.0918 vs 0.0938) with marginally
+  better feasibility — a small quality-for-time trade, off by default.
 
 ## 0.4.0
 

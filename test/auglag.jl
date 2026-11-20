@@ -916,3 +916,24 @@ end
     @test norm(r.minimizer - [0.5, 0.5]) < 1e-3
     @test r.minimum ≈ 0.5 atol = 1e-4
 end
+
+@testitem "AugLagAlg: relaxed multiplier step with loose subproblem solves" begin
+    using NonconvexAugLagLab, Test
+    # loose inner solves (tol = 1e-2) converge with the Eckstein-style
+    # relaxed multiplier step, on eq and ineq multipliers alike.
+    m = Model(x -> (x[1] - 1.0)^2 + (x[2] - 2.0)^2)
+    addvar!(m, [0.0, 0.0], [5.0, 5.0])
+    add_ineq_constraint!(m, x -> [x[1] - 1.5, x[2] - 2.5], [0.0, 0.0])
+    r = optimize(
+        m,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options = AugLagOptions(;
+            max_iter = 200,
+            multiplier_relax = true,
+            sub_options = (; max_iter = 50, tol = 1e-2, globalization = :trustregion),
+        ),
+    )
+    @test norm(r.minimizer - [1.0, 2.0]) < 1e-4
+    @test r.minimum < 1e-6
+end
