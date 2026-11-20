@@ -263,6 +263,17 @@ end
   `watchdog_tol` relaxes the rejection and is the intended setting for such
   problems. Kept as an opt-in safety net for subsolvers that reliably
   return bad steps.
+- `anderson_ineq`: (opt-in) extend the Anderson acceleration (currently
+  equality-only) to the inequality multiplier map of the classical
+  quadratic penalty: the unprojected update `λ + ρw·g` is mixed with the
+  last two iterates (same depth-2 least-squares mixing as the equality
+  block) and the mix is re-projected onto the nonnegative orthant
+  (ADMM-style Anderson with re-projection). Inactive for the PBM penalty
+  modes. Measured on the TopOpt local-stress single-level solve: 4.4%
+  slower (316.3 vs 303.1 s) but lands on a 4.6% lighter feasible design
+  (obj 0.0895 vs 0.0938) at the same max solid stress and a marginally
+  larger final violation (6.2e-6 vs 5.7e-6) — a quality-for-time trade,
+  so it stays off by default.
 - `filter`, `stall_retry`, `selective`, `safeguard`, `two_way`, `levenberg`:
   toggles for the corresponding defaults (all `true`). Re-measured on 0.2.5:
   removing the selective weights costs ~79% TopOpt wall-clock, removing the
@@ -384,6 +395,7 @@ mutable struct AugLagOptions{S,R,W}
     watchdog::Bool
     watchdog_tau::Real
     watchdog_tol::Real
+    anderson_ineq::Bool
     stall_retry::Bool
     selective::Bool
     safeguard::Bool
@@ -433,6 +445,7 @@ function AugLagOptions(;
     watchdog::Bool=false,
     watchdog_tau::Real=0.5,
     watchdog_tol::Real=0.0,
+    anderson_ineq::Bool=false,
     stall_retry::Bool=true,
     selective::Bool=true,
     safeguard::Bool=true,
@@ -508,6 +521,7 @@ function AugLagOptions(;
         watchdog,
         watchdog_tau,
         watchdog_tol,
+        anderson_ineq,
         stall_retry,
         selective,
         safeguard,
@@ -1092,6 +1106,7 @@ function optimize!(workspace::AugLagWorkspace)
     @unpack lsq_multipliers, scaling, keep_all, sub_options, memory = options
     @unpack elastic, elastic_mu, warm_continue = options
     @unpack filter, stall_retry, selective, safeguard, two_way = options
+    anderson_ineq = options.anderson_ineq
     watchdog = options.watchdog
     watchdog_tau = Float64(options.watchdog_tau)
     watchdog_tol = Float64(options.watchdog_tol)
@@ -1220,6 +1235,7 @@ function optimize!(workspace::AugLagWorkspace)
     vprev = Inf
     vnorm = Inf
     and_history = Tuple{Vector{Float64},Vector{Float64}}[]
+    and_ineq_history = Tuple{Vector{Float64},Vector{Float64}}[]
     # Ipopt-style restoration accounting: window of recent violation values
     # (for the stall trigger) and the number of restorations already
     # performed this solve.
@@ -1804,6 +1820,10 @@ function optimize!(workspace::AugLagWorkspace)
                 safeguard && clamp!(y[k], -1e8, 1e8)
             end
             k = 1
+            # flat buffer of the unprojected inequality increments ρw·g
+            # (stashed here so the Anderson mixing below does not
+            # re-evaluate the constraint functions)
+            ineq_resid = Float64[]
             for i in eachindex(ineq_rel)
                 g = _vecval(ineq_fs[i](x))
                 w = w_ineq[k]
@@ -1815,6 +1835,7 @@ function optimize!(workspace::AugLagWorkspace)
                 else
                     λ[k] .= max.(λ[k] .+ (ρ * w) .* g, 0.0)
                 end
+                anderson_ineq && penalty === :quadratic && append!(ineq_resid, (ρ * w) .* g)
                 safeguard && clamp!(λ[k], 0.0, 1e8)
                 if pbm_adaptive && penalty in (:pbm, :mixed, :mixed_logdet)
                     # Ipopt-style barrier adaptation: the barrier coefficient
@@ -1831,6 +1852,27 @@ function optimize!(workspace::AugLagWorkspace)
                     end
                 end
                 k += 1
+            end
+            if anderson_ineq && penalty === :quadratic && !isempty(ineq_resid)
+                # Anderson acceleration of the inequality multiplier map (the
+                # classical quadratic penalty): the depth-2 least-squares mix
+                # of the unprojected iterates λ + ρw·g, re-projected onto the
+                # nonnegative orthant (ADMM-style Anderson with re-projection).
+                λ_new_flat = reduce(vcat, λ; init=Float64[])
+                λ_prev_flat = λ_new_flat .- ineq_resid
+                push!(and_ineq_history, (λ_prev_flat, ineq_resid))
+                length(and_ineq_history) > 2 && popfirst!(and_ineq_history)
+                λ_mixed = _anderson_mix(and_ineq_history, λ_new_flat)
+                off = 0
+                for i in eachindex(ineq_rel)
+                    mk = length(λ[i])
+                    λ[i] .= if safeguard
+                        clamp.(λ_mixed[(off + 1):(off + mk)], 0.0, 1e8)
+                    else
+                        max.(λ_mixed[(off + 1):(off + mk)], 0.0)
+                    end
+                    off += mk
+                end
             end
             _sd_multiplier_update!(model, sd_rel, ρ, x, Y, penalty)
             if outer_schedule === :bm
@@ -1905,6 +1947,7 @@ function optimize!(workspace::AugLagWorkspace)
         η=η,
         ω=ω,
         and_history=copy(and_history),
+        and_ineq_history=copy(and_ineq_history),
         filter_f=copy(filter_f),
         filter_v=copy(filter_v),
         approx=qn_approx,

@@ -12,6 +12,15 @@
   trajectory and solution at 7.2% less wall-clock (303.1 vs 326.7 s,
   11 outer iterations). Set `projected_stop = false` for the previous
   behavior.
+- **Anderson acceleration on the inequality multipliers (opt-in)**:
+  `AugLagOptions(anderson_ineq = true)` extends the depth-2 Anderson
+  mixing from the equality block to the inequality multiplier map of the
+  classical quadratic penalty (the unprojected update is mixed, the mix
+  re-projected onto λ ≥ 0). Measured on the TopOpt local-stress
+  single-level solve: 4.4% slower (316.3 vs 303.1 s) but lands on a 4.6%
+  lighter feasible design (obj 0.0895 vs 0.0938) at the same max solid
+  stress and a marginally larger final violation (6.2e-6 vs 5.7e-6) — a
+  quality-for-time trade, off by default.
 
 ## 0.4.0
 

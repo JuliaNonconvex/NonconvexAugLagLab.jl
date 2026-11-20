@@ -898,3 +898,21 @@ end
     μ_grow = NonconvexAugLagLab._box_barrier_μ(1e-6, [2δ, 0.5], l, u, δ, 1.0)
     @test μ_grow > 1e-6
 end
+
+@testitem "AugLagAlg: Anderson mixing on inequality multipliers" begin
+    using NonconvexAugLagLab, Test
+    # min ‖x − [1,1]‖² s.t. x₁ ≤ 0.5, x₂ ≤ 0.5, x₁ + x₂ ≤ 1.5: the
+    # unconstrained optimum is infeasible, two constraints are active at
+    # [0.5, 0.5] and one is inactive — the mix runs on active+inactive rows.
+    m = Model(x -> sum((x .- [1.0, 1.0]) .^ 2))
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_ineq_constraint!(m, x -> [x[1] - 0.5, x[2] - 0.5, x[1] + x[2] - 1.5], [0.0, 0.0, 0.0])
+    r = optimize(
+        m,
+        AugLagAlg(),
+        [1.0, 1.0];
+        options = AugLagOptions(; max_iter = 200, anderson_ineq = true),
+    )
+    @test norm(r.minimizer - [0.5, 0.5]) < 1e-3
+    @test r.minimum ≈ 0.5 atol = 1e-4
+end
