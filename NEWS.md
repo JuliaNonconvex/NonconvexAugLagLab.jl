@@ -1,5 +1,10 @@
 # NEWS
 
+## 0.4.0
+
+- **Adaptive subproblem tolerance for every sub-solver** (default): the new `sub_tol_schedule = :eta` loosens the inner tolerance as the outer feasibility target tightens (`clamp(η², 1e-6, 1e-2)`), 28% faster than the old schedule on TopOpt stress with 4.8× tighter final feasibility. External sub-solvers receive the per-iteration tolerance through their options via the new package extensions (`_set_sub_tol`): Ipopt (`tol`), MMA (`Tolerance`) and NLopt (`ftol_abs`/`xtol_abs`).
+- **`sub_options.tol` is now honored for the built-in QN** (previously silently ignored) and overrides the schedule.
+- **Exact Hessians for plain ALM subproblems on JuMP models**: with the Ipopt sub-solver, the subproblem Lagrangian Hessian is assembled from the MathOptInterface evaluator (requires NonconvexIpopt 0.9 and NonconvexCore 2.2.8).
 ## 0.3.0
 
 - **Proximal regularization (opt-in)**: `AugLagOptions(prox = τ)` adds
