@@ -84,6 +84,64 @@ function _flags(c)
     return hasfield(typeof(c), :flags) ? c.flags : Set{Symbol}()
 end
 
+"""
+    SecondOrderSelection(; eq = true, ineq = true, labels = nothing)
+
+Selects which relaxed constraint groups contribute their exact
+multiplier-weighted curvature `μᵀ∇²c` to the hybrid Hessian model
+(`curvature = :hybrid`). Each kind entry is `true` (all groups of that
+kind), `false` (none) or a vector of group indices (those only);
+`labels` selects every constraint whose `flags` contain one of the given
+labels. Untagged groups keep only the Gauss-Newton penalty term and
+their multiplier curvature is absorbed by the quasi-Newton remainder.
+Only JuMP-converted blocks support the exact term (MathOptInterface
+Lagrangian-Hessian triplets).
+"""
+struct SecondOrderSelection
+    eq::Union{Bool,AbstractVector{Int}}
+    ineq::Union{Bool,AbstractVector{Int}}
+    labels::Union{Nothing,Set{Symbol}}
+end
+function SecondOrderSelection(; eq=true, ineq=true, labels=nothing)
+    lbls = if labels === nothing
+        nothing
+    elseif labels isa Union{AbstractVector,Tuple,AbstractSet}
+        Set(Symbol.(labels))
+    else
+        Set([Symbol(labels)])
+    end
+    return SecondOrderSelection(eq, ineq, lbls)
+end
+
+function _so_selected(sel::Bool, k, n)
+    return sel
+end
+function _so_selected(sel::AbstractVector{Int}, k, n)
+    return k in sel
+end
+_so_selected(sel, k, n) = false
+function _so_labeled(c, labels)
+    return labels !== nothing && !isempty(intersect(_flags(c), labels))
+end
+
+# Per-group second-order flags of the relaxed constraint groups.
+function _second_order_flags(sel, model, eq_rel, ineq_rel)
+    so_eq = falses(length(eq_rel))
+    so_ineq = falses(length(ineq_rel))
+    sel === nothing && return so_eq, so_ineq
+    for (k, i) in enumerate(eq_rel)
+        so_eq[k] =
+            _so_selected(sel.eq, k, length(eq_rel)) ||
+            _so_labeled(model.eq_constraints.fs[i], sel.labels)
+    end
+    for (k, i) in enumerate(ineq_rel)
+        so_ineq[k] =
+            _so_selected(sel.ineq, k, length(ineq_rel)) ||
+            _so_labeled(model.ineq_constraints.fs[i], sel.labels)
+    end
+    return so_eq, so_ineq
+end
+
 # Relaxation indices of a constraint list: the kind-based selection plus
 # every constraint carrying one of the selected labels. NB: the count is
 # `length(fs.fs)` — `length(::VectorOfFunctions)` is its dimension
@@ -210,11 +268,91 @@ end
   the curvature history is reused across outer iterations).
 - `curvature`: the curvature approximation of the built-in subproblem
   solver, `:lbfgs` (default), `:sr1` (limited-memory symmetric rank-one —
-  captures indefiniteness, intended for the trust-region subproblems) or
+  captures indefiniteness, intended for the trust-region subproblems),
   `:newton` (experimental, opt-in: exact-Hessian Newton trust-region
   solves — MathOptInterface evaluator Hessians for JuMP-converted models,
   AD otherwise, with the stale-Cholesky preconditioned Steihaug CG; the
-  box-barrier mode auto-pairs with it). Measured: `:sr1` is a massive
+  box-barrier mode auto-pairs with it) or `:hybrid` (experimental,
+  opt-in: the trust-region Hessian model sums the exact Gauss-Newton
+  penalty terms `ρw·JᵀJ` of the relaxed constraint groups — matrix-free
+  through one forward finite difference and one reverse pass each, with
+  the inequality rows restricted to the active set frozen at the
+  subproblem iterate — plus an L-BFGS model of the remainder
+  (`λ`-weighted terms; the composite's quasi-Newton part covers the
+  remainder with the structured-secant update (Dennis–Gay–Welsch: the
+  exact terms' curvature is subtracted from the secant pairs, so the
+  QN models only the remainder), and the identity base operator is used
+  since the penalty scale is already exact in the terms). Experimental;
+  measured on the TopOpt local-stress single-level solve: the matvec
+  cost dominates (a forward finite difference + a reverse pass per CG
+  iteration against full-FEA stress constraints) — no completion within
+  20 min vs the 4.5 min L-BFGS baseline; on Rosetta case5 the
+  JuMP-converted blocks use the exact sparse evaluator Jacobian (two
+  sparse matvecs per CG iteration) and, with the `second_order` labels,
+  converge to machine-precision feasibility in 29 outer iterations /
+  34.3 s (see `second_order` below) — faster than SR1 (80 s) and Newton
+  (43.8 s), at a 1.4% higher objective (a different feasible local
+  solution). The remainder-only L-BFGS inverse was also measured as a
+  Steihaug CG preconditioner and is deliberately not wired (it stalled
+  the solve on case5). Opt-in.
+- `curvature = :split` (experimental, opt-in): the split-secant model
+  for problems without exact Hessians — the penalty part
+  `φ = ρ/2‖c‖² + ρ/2‖g⁺‖²` and the remainder `ψ = f + yᵀc + λᵀg⁺` get
+  separate L-BFGS histories: the penalty pair `(s, ∇φ(x⁺) − ∇φ(x))` is
+  the exact directional second derivative of the dominant penalty
+  curvature from gradient differences alone (two reverse passes of the
+  scalar penalty function per accepted step, no Hessian-vector
+  products), the remainder receives the structured-secant corrected
+  pair `(s, y − Δ∇φ)` (Dennis–Gay–Welsch in gradient-difference form),
+  the CG model is the sum of the two two-loop recursions and the
+  penalty model's inverse is the Steihaug preconditioner. Quadratic
+  penalty mode, no elastic mode, any model (no JuMP requirement).
+  Measured on the TopOpt local-stress single-level solve: no completion
+  within 40 min vs the 4.5 min L-BFGS baseline — the two penalty-part
+  reverse passes per accepted step (full FEA adjoints) dominate; the
+  design targets problems with cheap constraint evaluations.
+- `curvature = :fdgrad` (experimental, opt-in): inexact-Newton curvature
+  from one-sided finite differences of the Zygote-computed AL gradient
+  (`Hv = (g(x+εv) − g(x))/ε`, reusing the driver's current gradient so
+  each Hessian-vector product costs one extra gradient evaluation;
+  Zygote cannot be nested and ForwardDiff cannot cross its tape); pair
+  with `cg_maxiter` (via `sub_options`) for a small product budget.
+  Measured on the TopOpt local-stress single-level solve: no completion
+  within 15 min at `cg_maxiter = 5` vs the 4.5 min L-BFGS baseline —
+  the per-CG-iteration gradient evaluations dominate on FEA-heavy
+  constraints; a single CG iteration with the L-BFGS preconditioner
+  (`cg_maxiter = 1`, `precond = true`, plain `:lbfgs`) also loses (no
+  completion within 28 min: steepest-descent-quality steps).
+  Measured: `:sr1` is a massive- `second_order`: (opt-in, with `curvature = :hybrid`) a
+  [`SecondOrderSelection`](@ref) selecting which relaxed constraint
+  groups contribute their exact multiplier-weighted curvature `μᵀ∇²c`
+  (MathOptInterface Lagrangian-Hessian triplets, one sparse assembly
+  per subproblem iterate) on top of the Gauss-Newton term; untagged
+  groups keep the Gauss-Newton term only, with their multiplier
+  curvature absorbed by the L-BFGS remainder. JuMP-converted blocks
+  only. `nothing` (default) disables the exact terms. Measured on
+  Rosetta case5: labeling all groups (with the structured-secant
+  composite update) converges to machine-precision feasibility in
+  29 outer iterations / 34.3 s (viol 9.3e-14, f = 17808 — 1.4% above
+  the 17553 optimum Newton finds, a different feasible local solution)
+  vs 80 s for SR1 and 43.8 s for Newton.
+- `inexact_cg`: (opt-in) pass the subproblem tolerance to the built-in
+  trust-region solver as a relative Steihaug CG residual tolerance
+  (Dembo–Eisenstat–Steihaug inexact Newton: the CG stops once
+  `‖r‖ ≤ sub_tol·‖r₀‖`, so loose subproblems run few Hessian-vector
+  products and the budget tightens to zero as the outer loop
+  converges). `false` (default) keeps the exact CG. Measured on Rosetta
+  case5 (hybrid + all labels): bit-for-bit the same trajectory at 3.6%
+  less wall-clock (251.9 vs 261.4 s) — a small win, off by default
+  pending the TopOpt characterization.
+- `sub_options.cg_maxiter`, `sub_options.precond` (for the built-in
+  quasi-Newton solver): cap the Steihaug CG iterations and enable the
+  L-BFGS two-loop as the CG preconditioner (off by default — the
+  preconditioner changes the steps). Measured on the TopOpt stress
+  solve: `cg_maxiter = 1` + `precond = true` takes
+  steepest-descent-quality steps (no completion within 28 min vs the
+  4.5 min baseline); the split model's penalty-inverse preconditioner
+  also activates through `precond = true`.
   Rosetta AC-OPF case5 win (80 vs 219 s, viol 0.016 vs 0.60, f near the
   true optimum) but slower on the TopOpt local-stress problem (no
   completion within 31 min vs ~6 min for L-BFGS) — opt-in; `:newton` with
@@ -246,6 +384,22 @@ end
   objective (0.198 vs 0.163) with a 3× larger stress violation — the
   faster variant is not close enough in accuracy there, so `:penalty`
   stays the default.
+- `hard_rho`: the penalty weight (default `1e3`, must be positive) for
+  constraints *kept hard* with the built-in sub-solver
+  (`AugLagAlg()` with a partially-relaxing `RelaxConstraintSelection`):
+  the kept equality/inequality constraints are folded into the
+  subproblem objective as the smooth quadratic penalty
+  `hard_rho/2·(‖c‖² + ‖g⁺‖²)` (the ALM-for-relaxed / penalty-for-kept
+  split) and removed from the submodel so the box-only quasi-Newton
+  solver accepts it; the kept constraints' feasibility is traded against
+  `hard_rho` (large values drive their violation to zero). External
+  sub-solvers receive the kept constraints natively instead. Measured on
+  the TopOpt local-stress single-level solve with the stress constraints
+  kept hard: converges in one outer iteration (132.7 s) but leaves the
+  expected `hard_rho` residual — max solid stress 5.7e-4 over the
+  threshold at a 2.2× heavier design; the relaxed ALM is strictly better
+  there, this path is for problems with a cheap-hard/expensive-soft
+  split.
 - `watchdog`, `watchdog_tau`, `watchdog_tol`: Birgin–Martínez-style
   nonmonotone outer acceptance (default `false`). When enabled, a step is
   accepted only if its AL merit does not exceed the recursive-mean reference
@@ -263,6 +417,61 @@ end
   `watchdog_tol` relaxes the rejection and is the intended setting for such
   problems. Kept as an opt-in safety net for subsolvers that reliably
   return bad steps.
+- `anderson_ineq`: (opt-in) extend the Anderson acceleration (currently
+  equality-only) to the inequality multiplier map of the classical
+  quadratic penalty: the unprojected update `λ + ρw·g` is mixed with the
+  last two iterates (same depth-2 least-squares mixing as the equality
+  block) and the mix is re-projected onto the nonnegative orthant
+  (ADMM-style Anderson with re-projection). Inactive for the PBM penalty
+  modes. Measured on the TopOpt local-stress single-level solve (current
+  default config): a wall-clock wash (262.6 vs 264.6 s) with a 4.6%
+  lighter feasible design (obj 0.0895 vs 0.0938, reproduced exactly
+  across configurations) and a marginally larger final violation
+  (6.2e-6 vs 5.7e-6) — no time win, so it stays off by default; the
+  opt-in "light-design recipe". With `anderson_depth = 5` the design is
+  a further 0.2% lighter and the violation beats the default (obj
+  0.0893, viol 5.4e-6) at the same wall-clock.
+- `anderson_depth`: the history depth of the Anderson mixing (default
+  `2`, must be ≥ 1; `1` disables the mixing). Applies to both the
+  equality map and, when `anderson_ineq` is enabled, the inequality map.
+- `multiplier_relax`: (opt-in) Eckstein-style adaptive relaxation of the
+  multiplier step: when the subproblem stationarity residual at the
+  accepted iterate (the projected gradient of the subproblem objective,
+  the built-in solver's own stopping metric) exceeds the requested
+  subproblem tolerance, the dual increment is scaled down by the
+  achieved-accuracy ratio `θ = clamp(sub_tol/‖res‖, 0.1, 1)` — a loose
+  inner solve cannot poison the multiplier estimates with a full step.
+  Applies to the equality updates and the classical quadratic inequality
+  updates (the Anderson residuals are scaled to match); the PBM/SD
+  multiplier updates are left unscaled. One extra subproblem-gradient
+  evaluation per outer iteration when enabled. Measured on the TopOpt
+  local-stress single-level solve: 2.1% slower (309.5 vs 303.1 s) but a
+  2.1% lighter feasible design (obj 0.0918 vs 0.0938) with marginally
+  better feasibility — a small quality-for-time trade, off by default.
+- `spectral_rho`: (opt-in) replace the two-way penalty decrease on good
+  steps with a spectral (Barzilai–Borwein) update of the dual step:
+  `ρ ← ‖Δc‖²/⟨Δc, Δy⟩` from the last two iterates of the dual map
+  (Xu–Figueiredo–Goldstein style), applied only on a credible positive
+  correlation, limited to `[ρ/rho_decr, ρ·rho_incr]` and
+  `[rho_init/10, rho_max]`. Equality and inequality multipliers
+  participate (semidefinite matrices do not); the elastic mode is not
+  supported (falls back to the two-way rule there). Escalation on bad
+  steps is unchanged. Measured on the TopOpt local-stress single-level
+  solve (current default config): 3.0% slower (272.6 vs 264.6 s) and a
+  1.3% heavier design (obj 0.0950 vs 0.0938) — a straight loss, off by
+  default. (An earlier 6.2%-faster measurement was against a
+  fixed-tolerance configuration and does not carry over.)
+- `dual_secant`: (opt-in) Broyden secant correction on the equality
+  multiplier map (the Birgin–Martínez "improving ultimate convergence"
+  device): the inverse secant model of the residual map of `y += ρw·c` is
+  refined with the good-Broyden inverse update from the map's secant
+  pairs, and the multiplier step becomes the quasi-Newton step
+  `y − C·(ρw·c)` (the first step reproduces the plain ascent), safeguarded
+  back to the plain ascent when the model step exceeds twice its norm.
+  Replaces the plain update and the equality Anderson mixing when
+  enabled; inactive for the elastic mode and without relaxed equalities.
+  Awaiting the AC-OPF measurement (the TopOpt stress problem has no
+  relaxed equalities, so the path is inert there).
 - `filter`, `stall_retry`, `selective`, `safeguard`, `two_way`, `levenberg`:
   toggles for the corresponding defaults (all `true`). Re-measured on 0.2.5:
   removing the selective weights costs ~79% TopOpt wall-clock, removing the
@@ -270,15 +479,70 @@ end
   Levenberg damping trades ~30% TopOpt speed for a worse objective and
   feasibility; the filter, stall retry and the two-way ρ decrease are inert
   on the measured benchmarks (kept as safety nets).
-- `sub_tol_schedule`: `:eta` (the default), `:eta2` or `:fixed` (`1e-8`).
-  The default `:eta` schedule loosens the subproblem tolerance as the outer
+- `sub_tol_schedule`: `:eta` (the default), `:eta2`, `:fixed` (`1e-8`) or
+  `:relative`. The default `:eta` schedule loosens the subproblem tolerance as the outer
   feasibility target tightens (clamped to `[1e-6, 1e-2]`): cheap sub-solves
   while the outer loop only needs rough steps, floored at `1e-6` for the
   final accuracy (measured 28% faster than `:eta2` on TopOpt stress with
   4.8x tighter final feasibility). `:eta2` (clamped to `[1e-10, 1e-8]`)
-  remains for maximal final accuracy. The schedule governs every sub-solver:
+  remains for maximal final accuracy. `:relative` sets the inner tolerance
+  proportional to the current constraint violation,
+  `clamp(sub_tol_rel * v_prev, 1e-10, 1e-2)` with `sub_tol_rel` (default
+  `0.1`, must be in `(0, 1)`): the Eckstein–Silva practical relative
+  criterion — the subproblem is solved only to an accuracy comparable to
+  the current infeasibility, so effort concentrates where it pays. Measured
+  on the TopOpt local-stress single-level solve: bit-for-bit the same
+  trajectory as the `:eta` schedule at 3% more wall-clock (290.9 vs
+  282.2 s) — no TopOpt win, so `:eta` stays the default.
+  The first subproblem is tightened separately by `first_sub_tol` (see
+  below).
+  The schedule governs every sub-solver:
   external solvers (Ipopt, MMA, NLopt) receive the current tolerance through
   their options via the package extensions (`_set_sub_tol`).
+- `first_sub_tol`: the first subproblem is solved to
+  `min(sub_tol, first_sub_tol)` (default `1e-6`); the first inner solve
+  selects the local basin the whole solve follows (measured on the TopOpt
+  local-stress problem: the schedule's loose first solve lands in a 4%
+  heavier design's basin), so it is tightened while later subproblems keep
+  the cheap schedule tolerance. Measured: the default `:eta` schedule plus
+  `first_sub_tol = 1e-6` reproduces the light-design trajectory of a
+  fixed-`1e-6` override bit-for-bit at 12.7% less wall-clock (264.6 vs
+  303.1 s). Set `first_sub_tol = nothing` for the pre-0.4.1 behavior.
+- `first_sub_iters`: how many of the leading subproblems get the
+  `first_sub_tol` tightening (default `1`, must be ≥ 1). Measured on the
+  TopOpt single-level solve: `2` is bit-for-bit inert (262.0 vs 264.6 s,
+  identical trajectory) — the basin is selected by the first solve alone.
+- `max_time`: a wall-clock budget in seconds (default `Inf`): no new
+  subproblem is started once the budget is exhausted, and the solve
+  returns the last completed outer iterate.
+- `on_iteration`: (opt-in) a per-iteration callback
+  `on_iteration(iter, x, f(x), vnorm)` called after every accepted outer
+  iterate (with a copy of the iterate); returning `true` stops the loop
+  and reports the just-recorded iterate.
+- `analytical_gradient`: (opt-in) assemble the built-in subproblem's
+  gradient analytically as `∇f + Σ Jᵀv` — one vector-Jacobian product per
+  constraint group through the existing reverse-mode machinery, exposed
+  via a ChainRules rrule (the SDP-extension pattern) — instead of
+  differentiating the composed AL closure. Quadratic penalty mode only
+  (no PBM, elastic or `curvature = :newton`). Measured on the TopOpt
+  local-stress single-level solve: bit-for-bit the same trajectory as
+  the composed-AD path at 17.8% more wall-clock (311.6 vs 264.6 s) — the
+  per-group reverse passes cost more than the single composed pass on
+  this one-group problem; off by default, an architecture/robustness
+  option for multi-group problems.
+- `stop_kkt`, `kkt_tol`: (opt-in) extend the convergence test from
+  feasibility-only to KKT-complete: once `vnorm ≤ ctol`, the solve also
+  requires the box-projected gradient of the scaled Lagrangian at the
+  current multipliers to satisfy `≤ kkt_tol` (default `1e-6`) and the
+  complementarity residual `max |λⱼgⱼ|` over the relaxed inequalities to
+  satisfy `≤ kkt_tol`. Costs one Lagrangian-gradient assembly per outer
+  iteration once feasible. Measured on the TopOpt local-stress
+  single-level solve: at the default `kkt_tol = 1e-6` the stationarity
+  test never fires within 100 outer iterations (the multiplier-error
+  scale is ~ρ·viol, so the Lagrangian residual stalls around 1e-4-1e-3
+  on this 1600-constraint problem) and the solve refines to viol 1.8e-8
+  in 1819.8 s — opt-in, use a looser `kkt_tol` (≳ 1e-4) or bound the run
+  with `max_time`.
 - `outer_schedule`: `:bm` (the default) — the Birgin–Martínez complexity
   scaling where both the feasibility target `η` and the subproblem accuracy
   target `ω` tighten with the full `1/ρ` factor on good steps (and reset
@@ -384,13 +648,29 @@ mutable struct AugLagOptions{S,R,W}
     watchdog::Bool
     watchdog_tau::Real
     watchdog_tol::Real
+    anderson_ineq::Bool
+    anderson_depth::Int
+    multiplier_relax::Bool
+    spectral_rho::Bool
+    dual_secant::Bool
     stall_retry::Bool
     selective::Bool
     safeguard::Bool
     two_way::Bool
     levenberg::Bool
     h0::Symbol
+    hard_rho::Real
     sub_tol_schedule::Symbol
+    sub_tol_rel::Real
+    first_sub_tol::Union{Nothing,Real}
+    first_sub_iters::Int
+    max_time::Real
+    on_iteration::Union{Nothing,Function}
+    analytical_gradient::Bool
+    stop_kkt::Bool
+    kkt_tol::Real
+    second_order::Union{Nothing,SecondOrderSelection}
+    inexact_cg::Bool
     outer_schedule::Symbol
 
     two_level::Bool
@@ -433,13 +713,29 @@ function AugLagOptions(;
     watchdog::Bool=false,
     watchdog_tau::Real=0.5,
     watchdog_tol::Real=0.0,
+    anderson_ineq::Bool=false,
+    anderson_depth::Int=2,
+    multiplier_relax::Bool=false,
+    spectral_rho::Bool=false,
+    dual_secant::Bool=false,
     stall_retry::Bool=true,
     selective::Bool=true,
     safeguard::Bool=true,
     two_way::Bool=true,
     levenberg::Bool=true,
     h0::Symbol=:penalty,
+    hard_rho::Real=1e3,
     sub_tol_schedule::Symbol=:eta,
+    sub_tol_rel::Real=0.1,
+    first_sub_tol=1e-6,
+    first_sub_iters::Int=1,
+    max_time::Real=Inf,
+    on_iteration=nothing,
+    analytical_gradient::Bool=false,
+    stop_kkt::Bool=false,
+    kkt_tol::Real=1e-6,
+    second_order=nothing,
+    inexact_cg::Bool=false,
     outer_schedule::Symbol=:bm,
 
     two_level::Bool=false,
@@ -461,19 +757,34 @@ function AugLagOptions(;
     )
     outer_schedule in (:default, :bm) ||
         throw(ArgumentError("outer_schedule must be :default or :bm"))
+    sub_tol_schedule in (:fixed, :eta2, :eta, :relative) ||
+        throw(ArgumentError("sub_tol_schedule must be :fixed, :eta2, :eta or :relative"))
+    0 < sub_tol_rel < 1 || throw(ArgumentError("sub_tol_rel must be in (0, 1)"))
+    (first_sub_tol === nothing || first_sub_tol > 0) ||
+        throw(ArgumentError("first_sub_tol must be positive or nothing"))
+    first_sub_iters >= 1 || throw(ArgumentError("first_sub_iters must be >= 1"))
+    max_time > 0 || throw(ArgumentError("max_time must be positive"))
+    kkt_tol > 0 || throw(ArgumentError("kkt_tol must be positive"))
+    (second_order === nothing || second_order isa SecondOrderSelection) ||
+        throw(ArgumentError("second_order must be a SecondOrderSelection or nothing"))
     two_level_iters >= 1 || throw(ArgumentError("two_level_iters must be >= 1"))
     two_level_tau > 0 || throw(ArgumentError("two_level_tau must be positive"))
     box_barrier_scale > 0 || throw(ArgumentError("box_barrier_scale must be positive"))
     (box_barrier === true || box_barrier === false || box_barrier === missing) ||
         throw(ArgumentError("box_barrier must be true, false or missing (automatic)"))
-    curvature in (:lbfgs, :sr1, :newton) ||
-        throw(ArgumentError("curvature must be :lbfgs, :sr1 or :newton"))
+    curvature in (:lbfgs, :sr1, :newton, :hybrid, :split, :fdgrad) || throw(
+        ArgumentError(
+            "curvature must be :lbfgs, :sr1, :newton, :hybrid, :split or :fdgrad"
+        ),
+    )
     prox >= 0 || throw(ArgumentError("prox must be non-negative"))
     rho_init > 0 || throw(ArgumentError("rho_init must be positive"))
     rho_incr > 1 || throw(ArgumentError("rho_incr must be > 1"))
     rho_decr > 1 || throw(ArgumentError("rho_decr must be > 1"))
+    hard_rho > 0 || throw(ArgumentError("hard_rho must be positive"))
     0 < watchdog_tau < 1 || throw(ArgumentError("watchdog_tau must be in (0, 1)"))
     watchdog_tol >= 0 || throw(ArgumentError("watchdog_tol must be non-negative"))
+    anderson_depth >= 1 || throw(ArgumentError("anderson_depth must be >= 1"))
     restore_stall >= 0 || throw(ArgumentError("restore_stall must be >= 0"))
     restore_tol_mode in (:relative, :absolute) ||
         throw(ArgumentError("restore_tol_mode must be :relative or :absolute"))
@@ -508,13 +819,29 @@ function AugLagOptions(;
         watchdog,
         watchdog_tau,
         watchdog_tol,
+        anderson_ineq,
+        anderson_depth,
+        multiplier_relax,
+        spectral_rho,
+        dual_secant,
         stall_retry,
         selective,
         safeguard,
         two_way,
         levenberg,
         h0,
+        hard_rho,
         sub_tol_schedule,
+        sub_tol_rel,
+        first_sub_tol,
+        first_sub_iters,
+        max_time,
+        on_iteration,
+        analytical_gradient,
+        stop_kkt,
+        kkt_tol,
+        second_order,
+        inexact_cg,
         outer_schedule,
         two_level,
         two_level_iters,
@@ -568,21 +895,18 @@ function Workspace(
 )
     if optimizer.sub_alg === nothing
         sel = options.relaxed
-        nrelax =
-            length(_relaxed_indices(sel.eq, model.eq_constraints, sel.labels)) +
-            length(_relaxed_indices(sel.ineq, model.ineq_constraints, sel.labels)) +
-            length(_relaxed_indices(sel.sd, model.sd_constraints, sel.labels))
-        ntotal =
-            length(model.eq_constraints.fs) +
-            length(model.ineq_constraints.fs) +
-            length(model.sd_constraints.fs)
-        nrelax == ntotal || throw(
+        nsd = length(_relaxed_indices(sel.sd, model.sd_constraints, sel.labels))
+        ntotal_sd = length(model.sd_constraints.fs)
+        nsd == ntotal_sd || throw(
             ArgumentError(
-                "AugLagAlg() uses the built-in QuasiNewtonAlg which only handles " *
-                "unconstrained/box-constrained subproblems; relax every constraint " *
-                "(`relaxed = RelaxConstraintSelection()`), or pass a sub_alg.",
+                "AugLagAlg() cannot keep semidefinite constraints hard for the " *
+                "built-in QuasiNewtonAlg; relax them (`RelaxConstraintSelection(sd = true)`) " *
+                "or pass a sub_alg.",
             ),
         )
+        # kept (non-relaxed) equality/inequality constraints are allowed:
+        # they are folded into the built-in subproblem as a smooth quadratic
+        # penalty with weight hard_rho (see the hard_rho option).
     end
     return AugLagWorkspace(model, copy(x0), options, optimizer.sub_alg, nothing)
 end
@@ -598,15 +922,19 @@ _set_sub_tol(alg, options, tol) = options
 
 # The inner (subproblem) tolerance of one outer iteration: an explicit
 # sub_options.tol override wins; otherwise the schedule - :fixed (1e-8),
-# :eta2 (clamp(eta^2, 1e-10, 1e-8)) or :eta (clamp(eta^2, 1e-6, 1e-2)):
+# :eta2 (clamp(eta^2, 1e-10, 1e-8)), :eta (clamp(eta^2, 1e-6, 1e-2)) or
+# :relative (clamp(sub_tol_rel * vprev, 1e-10, 1e-2), the Eckstein-Silva
+# practical relative criterion: the subproblem only needs to be solved to
+# an accuracy proportional to the current constraint violation):
 # loose inner solves while the outer loop only needs rough steps, with a
 # 1e-6 floor for the final accuracy.
-function _sub_tol_value(schedule, tol_override, eta)
+function _sub_tol_value(schedule, tol_override, eta, vprev, sub_tol_rel)
     tol_override !== nothing && return Float64(tol_override)
     schedule === :fixed && return 1e-8
     schedule === :eta2 && return clamp(eta^2, 1e-10, 1e-8)
     schedule === :eta && return clamp(eta^2, 1e-6, 1e-2)
-    return throw(ArgumentError("sub_tol_schedule must be :fixed, :eta2 or :eta"))
+    schedule === :relative && return clamp(sub_tol_rel * max(vprev, 1e-12), 1e-10, 1e-2)
+    return throw(ArgumentError("sub_tol_schedule must be :fixed, :eta2, :eta or :relative"))
 end
 
 function _subproblem(
@@ -851,6 +1179,199 @@ function _auglag_objective_scaled(
     return _objective
 end
 
+# Exact Gauss-Newton penalty terms of the relaxed constraint groups at x
+# (for curvature = :hybrid): rho*w*J'J per group, matrix-free, with the
+# inequality rows restricted to the active set frozen at x. JuMP-converted
+# blocks use the exact sparse evaluator Jacobian (two sparse matvecs per
+# CG iteration, one Jacobian evaluation per rebound); the rest use the
+# finite-difference matvec. The evaluator's row order is inequalities
+# first, then equalities; the scaling folds into the jump weights
+# (c = s*c~ so rho*w*J~'J~ = (rho*w/s^2) J'J).
+function _hybrid_terms(
+    x,
+    model,
+    eq_rel,
+    ineq_rel,
+    eq_fs,
+    ineq_fs,
+    w_eq,
+    w_ineq,
+    ρ,
+    je,
+    scales,
+    so_eq,
+    so_ineq,
+    y,
+    λ,
+)
+    neq = length(eq_rel)
+    terms = ()
+    # evaluator-length multiplier vector (row order: inequalities first,
+    # then equalities) for the label-gated exact curvature terms
+    μ = if je !== nothing && (any(so_ineq) || any(so_eq))
+        zeros(je.nineq + je.neq)
+    else
+        nothing
+    end
+    off = 0
+    for (k, i) in enumerate(ineq_rel)
+        gv = _vecval(ineq_fs[k](x))
+        act = gv .> 0
+        if je !== nothing && _is_jump_block(model.ineq_constraints.fs[i], je)
+            rawg = _vecval(model.ineq_constraints.fs[i](x))
+            rows = (off + 1):(off + length(rawg))
+            w = ρ * w_ineq[k] / scales[neq + k]^2
+            terms = (terms..., JumpGaussNewtonTerm(je, rows, w, copy(x), act))
+            if so_ineq[k]
+                s = scales[neq + k]
+                for (j, r) in enumerate(rows)
+                    act[j] && (μ[r] = (λ[k][j] + ρ * w_ineq[k] * gv[j]) / s)
+                end
+            end
+        else
+            terms = (terms..., GaussNewtonTerm(ineq_fs[k], ρ * w_ineq[k], copy(x), act))
+        end
+        off += length(gv)
+    end
+    for (k, i) in enumerate(eq_rel)
+        if je !== nothing && _is_jump_block(model.eq_constraints.fs[i], je)
+            rawc = _vecval(model.eq_constraints.fs[i](x))
+            rows = (off + 1):(off + length(rawc))
+            w = ρ * w_eq[k] / scales[k]^2
+            terms = (terms..., JumpGaussNewtonTerm(je, rows, w, copy(x)))
+            if so_eq[k]
+                s = scales[k]
+                cv = _vecval(eq_fs[k](x))
+                for (j, r) in enumerate(rows)
+                    μ[r] = (y[k][j] + ρ * w_eq[k] * cv[j]) / s
+                end
+            end
+        else
+            terms = (terms..., GaussNewtonTerm(eq_fs[k], ρ * w_eq[k], copy(x)))
+        end
+        off += length(_vecval(eq_fs[k](x)))
+    end
+    μ === nothing || (terms = (terms..., JumpLagrangianTerm(je, μ, copy(x))))
+    return terms
+end
+
+# The penalty part phi = rho/2 (||c||^2 + ||g^+||^2) of the scaled AL
+# objective and its gradient (one reverse pass), for the split-secant
+# curvature model: the penalty secant pair uses the exact gradient
+# difference, and the remainder receives the corrected pair.
+function _penalty_closure(eq_fs, ineq_fs, w_eq, w_ineq, ρ)
+    return x -> begin
+        v = 0.0
+        for (k, c) in enumerate(eq_fs)
+            cv = _vecval(c(x))
+            v += (ρ * w_eq[k] / 2) * dot(cv, cv)
+        end
+        for (k, c) in enumerate(ineq_fs)
+            gp = max.(_vecval(c(x)), 0.0)
+            v += (ρ * w_ineq[k] / 2) * dot(gp, gp)
+        end
+        return v
+    end
+end
+function _penalty_gradient(eq_fs, ineq_fs, w_eq, w_ineq, ρ)
+    φ = _penalty_closure(eq_fs, ineq_fs, w_eq, w_ineq, ρ)
+    return x -> NonconvexCore.value_gradient(φ, x)[2]
+end
+
+# Smooth quadratic penalty over the KEPT (non-relaxed) constraints, folded
+# into the built-in quasi-Newton subproblem objective with weight hard_rho
+# (the ALM-for-relaxed / penalty-for-kept split; the kept constraints are
+# then removed from the submodel so the box-only solver accepts it). The
+# feasibility of the kept constraints is traded against hard_rho (an exact
+# penalty argument: large hard_rho drives their violation to zero).
+function _hard_penalty_objective(obj, kept_eq, kept_ineq, hard_rho, n)
+    return z -> begin
+        v = obj(z)
+        x = length(z) == n ? z : @view(z[1:n])
+        for c in kept_eq.fs
+            cv = _vecval(c(x))
+            v += (hard_rho / 2) * dot(cv, cv)
+        end
+        for c in kept_ineq.fs
+            gv = max.(_vecval(c(x)), 0.0)
+            v += (hard_rho / 2) * dot(gv, gv)
+        end
+        return v
+    end
+end
+
+# Analytical gradient path for the built-in quasi-Newton subproblems (#32):
+# the AL objective's gradient is assembled as grad f + one J'v per
+# constraint group (vector-Jacobian products through the existing
+# reverse-mode machinery, no materialized Jacobian), and exposed to AD via
+# a ChainRules rrule (the same pattern the SDP extension uses for the cone
+# projection), so the prox / box-barrier / hard-penalty wrappers keep
+# working. Quadratic penalty mode only (the PBM branch has its own
+# closed-form derivative, future work).
+struct AnalyticalALObjective{TF,TE,TI,TY,TL,TW,TS} <: Function
+    scaled_obj::TF
+    eq_fs::TE
+    ineq_fs::TI
+    y::TY
+    λ::TL
+    w_eq::TW
+    w_ineq::TW
+    ρ::Float64
+    sd_terms::TS
+end
+
+function (a::AnalyticalALObjective)(x)
+    v = a.scaled_obj(x)
+    for (k, c) in enumerate(a.eq_fs)
+        cv = _vecval(c(x))
+        r = a.ρ * a.w_eq[k]
+        v += dot(a.y[k], cv) + r / 2 * dot(cv, cv)
+    end
+    for (k, c) in enumerate(a.ineq_fs)
+        gv = _vecval(c(x))
+        gp = max.(gv, 0.0)
+        r = a.ρ * a.w_ineq[k]
+        v += dot(a.λ[k], gp) + r / 2 * dot(gp, gp)
+    end
+    return v + a.sd_terms(x)
+end
+
+# ∇L(x) = ∇f(x) + Σ Jᵢ(x)ᵀ (yᵢ + ρ wᵢ c̃ᵢ(x)) + Σ Jⱼ(x)ᵀ (λⱼ + ρ wⱼ gⱼ⁺)
+# (on the violated rows only) + ∇(sd terms); each Jᵀv is one reverse pass.
+function _analytical_al_gradient(a::AnalyticalALObjective, x)
+    _, ∇f = NonconvexCore.value_gradient(a.scaled_obj, x)
+    g = copy(∇f)
+    for (k, c) in enumerate(a.eq_fs)
+        cv = _vecval(c(x))
+        v = a.y[k] .+ (a.ρ * a.w_eq[k]) .* cv
+        gJ = NonconvexCore.value_gradient(z -> dot(_vecval(c(z)), v), x)[2]
+        gJ === nothing || (g .+= gJ)
+    end
+    for (k, c) in enumerate(a.ineq_fs)
+        gv = _vecval(c(x))
+        act = gv .> 0
+        if any(act)
+            v = zero(gv)
+            v[act] = a.λ[k][act] .+ (a.ρ * a.w_ineq[k]) .* gv[act]
+            gJ = NonconvexCore.value_gradient(z -> dot(_vecval(c(z)), v), x)[2]
+            gJ === nothing || (g .+= gJ)
+        end
+    end
+    # the sd terms carry their own exact rrule (the cone-projection one)
+    gsd = NonconvexCore.value_gradient(a.sd_terms, x)[2]
+    gsd === nothing || (g .+= gsd)
+    return g
+end
+
+function ChainRulesCore.rrule(a::AnalyticalALObjective, x)
+    val = a(x)
+    function analytical_pullback(Δ)
+        g = _analytical_al_gradient(a, x)
+        return (ChainRulesCore.NoTangent(), Δ .* g)
+    end
+    return val, analytical_pullback
+end
+
 # Violation measure of the relaxed constraints on the scaled functions.
 function _scaled_violation(eq_fs, ineq_fs, model, sel, x)
     v = Float64[]
@@ -1050,6 +1571,33 @@ function _two_way_step(ρ, options, two_way, vnorm, η)
     return ρ
 end
 
+# Broyden secant correction on the equality multiplier map (Birgin-Martinez
+# "Improving ultimate convergence" device): C is the inverse secant model of
+# the Jacobian of the residual map c(x(y)). It starts as -I (so the first
+# corrected step reproduces the plain ascent y + r) and is refined with the
+# good-Broyden inverse update (Sherman-Morrison) from the secant pairs
+# (dy, dr) of the multiplier map. The corrected step y - C*r replaces the
+# plain ascent, safeguarded: the model step must not exceed twice the plain
+# step's norm, and degenerate denominators leave C unchanged.
+function _dual_secant_init!(bdual::Ref{Any}, m::Int)
+    bdual[] = -Matrix{Float64}(I, m, m)
+    return bdual
+end
+
+function _dual_secant_update!(C, Δy, Δc)
+    dydy = dot(Δy, Δy)
+    dydy > 0 || return C
+    Cdc = C * Δc
+    den = dot(Δy, Cdc)
+    abs(den) > 1e-12 * norm(Δy) * norm(Cdc) || return C
+    # good Broyden inverse update (Sherman-Morrison):
+    #   C += (Δy - C Δc)(Δy'C)/(Δy'CΔc)
+    u = (Δy .- Cdc) ./ den
+    v = C' * Δy
+    C .+= u .* v'
+    return C
+end
+
 # Feasibility-driven penalty update on a bad step: escalate the most
 # violated constraint groups (selective weights, when enabled) or the
 # global penalty when no single group stands out.
@@ -1092,11 +1640,27 @@ function optimize!(workspace::AugLagWorkspace)
     @unpack lsq_multipliers, scaling, keep_all, sub_options, memory = options
     @unpack elastic, elastic_mu, warm_continue = options
     @unpack filter, stall_retry, selective, safeguard, two_way = options
+    anderson_ineq = options.anderson_ineq
+    anderson_depth = options.anderson_depth
+    multiplier_relax = options.multiplier_relax
+    spectral_rho = options.spectral_rho
+    dual_secant = options.dual_secant
     watchdog = options.watchdog
     watchdog_tau = Float64(options.watchdog_tau)
     watchdog_tol = Float64(options.watchdog_tol)
     levenberg = options.levenberg
     @unpack h0, sub_tol_schedule, tron_cauchy = options
+    hard_rho = Float64(options.hard_rho)
+    sub_tol_rel = Float64(options.sub_tol_rel)
+    first_sub_tol =
+        options.first_sub_tol === nothing ? nothing : Float64(options.first_sub_tol)
+    first_sub_iters = options.first_sub_iters
+    max_time = Float64(options.max_time)
+    on_iteration = options.on_iteration
+    analytical_gradient = options.analytical_gradient
+    stop_kkt = options.stop_kkt
+    kkt_tol = Float64(options.kkt_tol)
+    inexact_cg = options.inexact_cg
     outer_schedule = options.outer_schedule
     @unpack two_level, two_level_iters, two_level_tau = options
     @unpack box_barrier_scale = options
@@ -1220,6 +1784,19 @@ function optimize!(workspace::AugLagWorkspace)
     vprev = Inf
     vnorm = Inf
     and_history = Tuple{Vector{Float64},Vector{Float64}}[]
+    # the AL objective ref for the finite-difference-gradient curvature
+    # (updated each outer iteration once the subproblem is built)
+    al_obj_ref = Ref{Any}(nothing)
+    and_ineq_history = Tuple{Vector{Float64},Vector{Float64}}[]
+    # spectral-penalty history: the flat constraint values and multipliers
+    # of the previous good step (the Barzilai-Borwein estimate uses the
+    # last two iterates of the dual map).
+    cflat_prev = nothing
+    yflat_prev = nothing
+    # Broyden dual-secant state (equality multiplier map)
+    bdual = Ref{Any}(nothing)
+    ysec_prev = nothing
+    csec_prev = nothing
     # Ipopt-style restoration accounting: window of recent violation values
     # (for the stall trigger) and the number of restorations already
     # performed this solve.
@@ -1250,18 +1827,24 @@ function optimize!(workspace::AugLagWorkspace)
     qn_nonmonotone = false
     qn_soc = false
     qn_approx = nothing
+    # The built-in quasi-Newton subproblem options (parsed unconditionally
+    # so the loop sites are well-typed for JET; used only when
+    # sub_alg === nothing).
+    qn_opts = if sub_options === nothing
+        (; max_iter=800, tol=1e-8, globalization=:trustregion)
+    else
+        sub_options
+    end
+    qn_base_maxiter = get(qn_opts, :max_iter, 800)
+    qn_tol_override = get(qn_opts, :tol, nothing)
+    qn_globalization = get(qn_opts, :globalization, :trustregion)
+    qn_reset = get(qn_opts, :reset, false)
+    qn_nonmonotone = get(qn_opts, :nonmonotone, false)
+    qn_soc = get(qn_opts, :soc, false)
+    qn_projected_stop = get(qn_opts, :projected_stop, true)
+    qn_cg_maxiter = get(qn_opts, :cg_maxiter, nothing)
+    qn_precond = get(qn_opts, :precond, false)
     if sub_alg === nothing
-        qn_opts = if sub_options === nothing
-            (; max_iter=800, tol=1e-8, globalization=:trustregion)
-        else
-            sub_options
-        end
-        qn_base_maxiter = get(qn_opts, :max_iter, 800)
-        qn_tol_override = get(qn_opts, :tol, nothing)
-        qn_globalization = get(qn_opts, :globalization, :trustregion)
-        qn_reset = get(qn_opts, :reset, false)
-        qn_nonmonotone = get(qn_opts, :nonmonotone, false)
-        qn_soc = get(qn_opts, :soc, false)
         h0_op = if h0 === :penalty
             DiagonalPreconditioner(fill(1 / (1 + ρ), n + (use_elastic ? m_eq : 0)))
         elseif h0 === :identity
@@ -1269,10 +1852,104 @@ function optimize!(workspace::AugLagWorkspace)
         else
             throw(ArgumentError("h0 must be :penalty or :identity"))
         end
+        # the JuMP evaluator behind a JuMP-converted objective, for the
+        # exact-Jacobian hybrid terms
+        je_hybrid =
+            options.curvature === :hybrid ? _jump_evaluator(model.objective) : nothing
+        # per-group second-order flags for the hybrid terms (label-gated)
+        so_eq, so_ineq = _second_order_flags(options.second_order, model, eq_rel, ineq_rel)
         qn_approx = if warm && workspace.state.approx !== nothing
-            workspace.state.approx
+            st_approx = workspace.state.approx
+            if st_approx isa CompositeHessianApprox
+                # keep the warm-started quasi-Newton history but rebuild
+                # the exact terms with this run's penalty state
+                CompositeHessianApprox(
+                    st_approx.qn,
+                    x -> _hybrid_terms(
+                        x,
+                        model,
+                        eq_rel,
+                        ineq_rel,
+                        eq_fs,
+                        ineq_fs,
+                        w_eq,
+                        w_ineq,
+                        ρ,
+                        je_hybrid,
+                        scales,
+                        so_eq,
+                        so_ineq,
+                        y,
+                        λ,
+                    ),
+                )
+            elseif st_approx isa SplitSecantApprox
+                SplitSecantApprox(
+                    st_approx.qn_rem,
+                    st_approx.qn_pen,
+                    _penalty_gradient(eq_fs, ineq_fs, w_eq, w_ineq, ρ),
+                )
+            else
+                st_approx
+            end
         elseif options.curvature === :sr1
             LimitedMemorySR1Approx(memory; H0=h0_op)
+        elseif options.curvature === :hybrid
+            penalty === :quadratic || throw(
+                ArgumentError("curvature = :hybrid requires penalty = :quadratic")
+            )
+            use_elastic && throw(
+                ArgumentError("curvature = :hybrid does not support the elastic mode"),
+            )
+            # the exact Gauss-Newton terms already carry the penalty scale,
+            # so the remainder model starts from the identity
+            base_qn = LBFGSApprox(memory; H0=IdentityPreconditioner())
+            CompositeHessianApprox(
+                base_qn,
+                x -> _hybrid_terms(
+                    x,
+                    model,
+                    eq_rel,
+                    ineq_rel,
+                    eq_fs,
+                    ineq_fs,
+                    w_eq,
+                    w_ineq,
+                    ρ,
+                    je_hybrid,
+                    scales,
+                    so_eq,
+                    so_ineq,
+                    y,
+                    λ,
+                ),
+            )
+        elseif options.curvature === :split
+            penalty === :quadratic ||
+                throw(ArgumentError("curvature = :split requires penalty = :quadratic"))
+            use_elastic && throw(
+                ArgumentError("curvature = :split does not support the elastic mode"),
+            )
+            # split-secant: the penalty part phi and the remainder psi get
+            # separate L-BFGS histories (structured secant from gradient
+            # differences alone - no exact Hessians), and the penalty
+            # model's inverse is the CG preconditioner
+            base_rem = LBFGSApprox(memory; H0=IdentityPreconditioner())
+            base_pen = LBFGSApprox(memory; H0=DiagonalPreconditioner(fill(max(ρ, 1.0), n)))
+            SplitSecantApprox(
+                base_rem, base_pen, _penalty_gradient(eq_fs, ineq_fs, w_eq, w_ineq, ρ)
+            )
+        elseif options.curvature === :fdgrad
+            penalty === :quadratic || throw(
+                ArgumentError("curvature = :fdgrad requires penalty = :quadratic")
+            )
+            use_elastic && throw(
+                ArgumentError("curvature = :fdgrad does not support the elastic mode"),
+            )
+            # inexact Newton from one-sided finite differences of the
+            # Zygote-computed AL gradient (one extra gradient evaluation
+            # per Hessian-vector product); pair with a small cg_maxiter
+            FDGradHessianApprox(z -> NonconvexCore.value_gradient(al_obj_ref[], z)[2])
         else
             LBFGSApprox(memory; H0=h0_op)
         end
@@ -1372,29 +2049,25 @@ function optimize!(workspace::AugLagWorkspace)
         end
         μref[] = Float64(box_barrier_scale)
     end
-    # The sub-solver options with the outer loop's current subproblem
-    # tolerance applied (the adaptive sub_tol_schedule governs every
-    # sub-solver). The fallback keeps the options unchanged; solver-specific
-    # methods live in the package extensions (NonconvexAugLagLabIpoptExt /
-    # -MMAExt / -NLoptExt).
-    _set_sub_tol(alg, options, tol) = options
-    # The inner (subproblem) tolerance of one outer iteration: an explicit
-    # sub_options.tol override wins; otherwise the schedule - :fixed (1e-8),
-    # :eta2 (clamp(eta^2, 1e-10, 1e-8)) or :eta (clamp(eta^2, 1e-6, 1e-2)):
-    # loose inner solves while the outer loop only needs rough steps, with a
-    # 1e-6 floor for the final accuracy.
-    function _sub_tol_value(schedule, tol_override, eta)
-        tol_override !== nothing && return Float64(tol_override)
-        schedule === :fixed && return 1e-8
-        schedule === :eta2 && return clamp(eta^2, 1e-10, 1e-8)
-        schedule === :eta && return clamp(eta^2, 1e-6, 1e-2)
-        return throw(ArgumentError("sub_tol_schedule must be :fixed, :eta2 or :eta"))
-    end
+    t0 = time()
     for iter in 1:max_iter
+        # Wall-clock budget: no new subproblem is started once the budget
+        # is exhausted (the elapsed check is per outer iteration).
+        time() - t0 > max_time && break
         # Subproblem tolerance: fixed, adaptive (tied to the outer
-        # feasibility target η), or an explicit sub_options.tol override
-        # (previously silently ignored for the built-in QN).
-        sub_tol = _sub_tol_value(sub_tol_schedule, qn_tol_override, η)
+        # feasibility target η), relative to the current violation, or an
+        # explicit sub_options.tol override (previously silently ignored for
+        # the built-in QN).
+        sub_tol = _sub_tol_value(sub_tol_schedule, qn_tol_override, η, vprev, sub_tol_rel)
+        # Optional first-subproblems tightening: the first inner solves
+        # select the local basin the whole solve follows (measured on the
+        # TopOpt local-stress problem: a loose first solve lands in a
+        # heavier design's basin), so they can be solved more accurately
+        # than the schedule without paying the tight tolerance on later
+        # subproblems.
+        if iter <= first_sub_iters && first_sub_tol !== nothing
+            sub_tol = min(sub_tol, first_sub_tol)
+        end
         # the barrier parameter relaxes with η but keeps a nonzero floor
         # (like Ipopt's final μ): a vanishing μ lets the soft-bounded
         # iterate leave the box at convergence
@@ -1480,49 +2153,89 @@ function optimize!(workspace::AugLagWorkspace)
                     b_ineq,
                 )
             end
-        al_obj = build_al(sd_terms)
-        make_submodel =
-            o -> if use_elastic
-                VecModel(
-                    Objective(o),
-                    submodel0.eq_constraints,
-                    submodel0.ineq_constraints,
-                    submodel0.sd_constraints,
-                    [submodel0.box_min; fill(-1e3, m_eq)],
-                    [submodel0.box_max; fill(1e3, m_eq)],
-                    [submodel0.init; zeros(m_eq)],
-                    [submodel0.integer; falses(m_eq)],
-                )
-            elseif box_barrier
-                # Ipopt-style box barrier with hard projected bounds: the
-                # barrier smooths the merit near the boundary while the
-                # projection enforces it (fraction-to-boundary at tau = 1), so
-                # the iterate can never leave the box - no soft-bounds bias.
-                VecModel(
-                    Objective(
-                        _box_barrier_objective(
-                            o, submodel0.box_min, submodel0.box_max, μref[], δbar
-                        ),
-                    ),
-                    submodel0.eq_constraints,
-                    submodel0.ineq_constraints,
-                    submodel0.sd_constraints,
-                    submodel0.box_min,
-                    submodel0.box_max,
-                    submodel0.init,
-                    submodel0.integer,
+        al_obj =
+            if analytical_gradient &&
+                penalty === :quadratic &&
+                !use_elastic &&
+                sub_alg === nothing &&
+                options.curvature !== :newton
+                # analytical Jᵀv-based subproblem gradient (issue #32): the
+                # rrule on AnalyticalALObjective supplies the assembled
+                # gradient, and the prox / box-barrier / hard-penalty
+                # wrappers compose through it.
+                AnalyticalALObjective(
+                    scaled_obj, eq_fs, ineq_fs, y, λ, w_eq, w_ineq, Float64(ρ), sd_terms
                 )
             else
-                VecModel(
-                    Objective(o),
-                    submodel0.eq_constraints,
-                    submodel0.ineq_constraints,
-                    submodel0.sd_constraints,
-                    submodel0.box_min,
-                    submodel0.box_max,
-                    submodel0.init,
-                    submodel0.integer,
-                )
+                build_al(sd_terms)
+            end
+        # The built-in quasi-Newton solver handles only box-constrained
+        # subproblems: kept (non-relaxed) constraints are folded into its
+        # objective as a smooth quadratic penalty with weight hard_rho
+        # (the ALM-for-relaxed / penalty-for-kept split). External
+        # sub-solvers receive the kept constraints natively instead.
+        use_hard_penalty =
+            sub_alg === nothing && (
+                !isempty(submodel0.eq_constraints.fs) ||
+                !isempty(submodel0.ineq_constraints.fs)
+            )
+        no_eq = VectorOfFunctions(NonconvexCore.EqConstraint[])
+        no_ineq = VectorOfFunctions(NonconvexCore.IneqConstraint[])
+        make_submodel =
+            o -> begin
+                wo = if use_hard_penalty
+                    _hard_penalty_objective(
+                        o,
+                        submodel0.eq_constraints,
+                        submodel0.ineq_constraints,
+                        Float64(hard_rho),
+                        n,
+                    )
+                else
+                    o
+                end
+                if use_elastic
+                    VecModel(
+                        Objective(wo),
+                        use_hard_penalty ? no_eq : submodel0.eq_constraints,
+                        use_hard_penalty ? no_ineq : submodel0.ineq_constraints,
+                        submodel0.sd_constraints,
+                        [submodel0.box_min; fill(-1e3, m_eq)],
+                        [submodel0.box_max; fill(1e3, m_eq)],
+                        [submodel0.init; zeros(m_eq)],
+                        [submodel0.integer; falses(m_eq)],
+                    )
+                elseif box_barrier
+                    # Ipopt-style box barrier with hard projected bounds: the
+                    # barrier smooths the merit near the boundary while the
+                    # projection enforces it (fraction-to-boundary at tau = 1), so
+                    # the iterate can never leave the box - no soft-bounds bias.
+                    VecModel(
+                        Objective(
+                            _box_barrier_objective(
+                                wo, submodel0.box_min, submodel0.box_max, μref[], δbar
+                            ),
+                        ),
+                        use_hard_penalty ? no_eq : submodel0.eq_constraints,
+                        use_hard_penalty ? no_ineq : submodel0.ineq_constraints,
+                        submodel0.sd_constraints,
+                        submodel0.box_min,
+                        submodel0.box_max,
+                        submodel0.init,
+                        submodel0.integer,
+                    )
+                else
+                    VecModel(
+                        Objective(wo),
+                        use_hard_penalty ? no_eq : submodel0.eq_constraints,
+                        use_hard_penalty ? no_ineq : submodel0.ineq_constraints,
+                        submodel0.sd_constraints,
+                        submodel0.box_min,
+                        submodel0.box_max,
+                        submodel0.init,
+                        submodel0.integer,
+                    )
+                end
             end
         x_sub = use_elastic ? [x; zeros(m_eq)] : x
         al_sub = if prox > 0
@@ -1532,6 +2245,9 @@ function optimize!(workspace::AugLagWorkspace)
         else
             al_obj
         end
+        # the finite-difference-gradient curvature reads the current AL
+        # objective through this ref
+        al_obj_ref[] = al_sub
         submodel = make_submodel(al_sub)
         checksubproblem!(
             submodel,
@@ -1559,6 +2275,10 @@ function optimize!(workspace::AugLagWorkspace)
                     tron_cauchy=tron_cauchy,
                     nonmonotone=qn_nonmonotone,
                     soc=qn_soc,
+                    projected_stop=qn_projected_stop,
+                    cg_tol=inexact_cg ? sub_tol : nothing,
+                    cg_maxiter=qn_cg_maxiter,
+                    precond=qn_precond,
                 ),
                 x_sub,
             )
@@ -1576,6 +2296,10 @@ function optimize!(workspace::AugLagWorkspace)
                         tron_cauchy=tron_cauchy,
                         nonmonotone=qn_nonmonotone,
                         soc=qn_soc,
+                        projected_stop=qn_projected_stop,
+                        cg_tol=inexact_cg ? 10 * sub_tol : nothing,
+                        cg_maxiter=qn_cg_maxiter,
+                        precond=qn_precond,
                     ),
                     x_sub,
                 )
@@ -1653,6 +2377,10 @@ function optimize!(workspace::AugLagWorkspace)
                         tron_cauchy=tron_cauchy,
                         nonmonotone=qn_nonmonotone,
                         soc=qn_soc,
+                        projected_stop=qn_projected_stop,
+                        cg_tol=inexact_cg ? sub_tol : nothing,
+                        cg_maxiter=qn_cg_maxiter,
+                        precond=qn_precond,
                     ),
                     x_two,
                 )
@@ -1739,67 +2467,133 @@ function optimize!(workspace::AugLagWorkspace)
         end
         fx = f_new
         push!(trajectory, (copy(x), fx, vnorm))
+        # Optional per-iteration callback: receives (iter, x, f(x), vnorm)
+        # with a copy of the iterate; returning true stops the loop (the
+        # reported result is the iterate just recorded).
+        if on_iteration !== nothing
+            on_iteration(iter, copy(x), fx, vnorm) && break
+        end
 
         ρ_before = ρ
         if vnorm <= η || vnorm <= ω * vprev
             # Multiplier updates (the practical ALM condition: update whenever
             # feasibility improved sufficiently, not only once η is reached —
             # this stops the penalty from escalating unnecessarily).
-            if use_elastic
-                s = x_new[(n + 1):end]
+            # Eckstein-style adaptive relaxation of the multiplier step: when
+            # the subproblem was solved less accurately than requested (its
+            # stationarity residual at the accepted iterate exceeds the
+            # requested tolerance), the dual step is scaled down by the
+            # achieved-accuracy ratio, so a loose inner solve cannot poison
+            # the multiplier estimates. The residual is the projected
+            # gradient of the subproblem objective (the same metric the
+            # built-in quasi-Newton solver uses to stop); the barrier/prox
+            # corrections are ignored (cheap approximation).
+            θ_mult = 1.0
+            if multiplier_relax
+                gal = NonconvexCore.value_gradient(al_sub, x_new)[2]
+                galn = use_elastic ? @view(gal[1:n]) : gal
+                xn = use_elastic ? @view(x_new[1:n]) : x_new
+                pg = _projected_gnorm(galn, xn, submodel0.box_min, submodel0.box_max)
+                θ_mult = clamp(sub_tol / max(pg, sub_tol), 0.1, 1.0)
+            end
+            if dual_secant && !use_elastic && !isempty(eq_rel)
+                # Broyden secant-corrected equality multiplier update (the
+                # Birgin-Martinez "improving ultimate convergence" device):
+                # C is the inverse secant model of the residual map of
+                # y += theta*rho*w*c; the step becomes the quasi-Newton
+                # step -C*r (the first step reproduces the plain ascent,
+                # C = -I) with the good-Broyden inverse update from the
+                # secant pairs of the map, safeguarded to the plain ascent
+                # when the model step exceeds twice its norm. Replaces the
+                # plain update and the equality Anderson mixing.
+                cflat = Float64[]
+                for k in eachindex(eq_rel)
+                    append!(cflat, θ_mult .* (ρ * w_eq[k]) .* _vecval(eq_fs[k](x)))
+                end
+                yflat = reduce(vcat, y; init=Float64[])
+                if bdual[] === nothing
+                    _dual_secant_init!(bdual, length(yflat))
+                    step = cflat
+                else
+                    if ysec_prev !== nothing
+                        _dual_secant_update!(
+                            bdual[], yflat .- ysec_prev, cflat .- csec_prev
+                        )
+                    end
+                    step = .-(bdual[] * cflat)
+                    norm(step) <= 2 * norm(cflat) || (step = cflat)
+                end
+                ysec_prev = yflat
+                csec_prev = cflat
                 off = 0
                 for k in eachindex(eq_rel)
-                    ck = _vecval(eq_fs[k](x))
-                    sk = s[(off + 1):(off + length(ck))]
-                    y[k] .= y[k] .+ (ρ * w_eq[k]) .* (ck .- sk)
-                    off += length(ck)
+                    mk = length(y[k])
+                    y[k] .= clamp.(
+                        yflat[(off + 1):(off + mk)] .+ step[(off + 1):(off + mk)], -1e8, 1e8
+                    )
+                    off += mk
                 end
             else
-                for k in eachindex(eq_rel)
-                    y[k] .= y[k] .+ (ρ * w_eq[k]) .* _vecval(eq_fs[k](x))
-                end
-            end
-            # Anderson acceleration of the equality multiplier updates.
-            # The residual must match the fixed-point map actually being
-            # iterated: in elastic mode the update is y += ρw(c − s), so the
-            # slack `s` belongs in the residual too (using ρw·c accelerated
-            # the wrong map).
-            if !isempty(eq_rel)
-                y_new_flat = reduce(vcat, y; init=Float64[])
-                resid = Float64[]
                 if use_elastic
                     s = x_new[(n + 1):end]
                     off = 0
                     for k in eachindex(eq_rel)
                         ck = _vecval(eq_fs[k](x))
                         sk = s[(off + 1):(off + length(ck))]
-                        append!(resid, (ρ * w_eq[k]) .* (ck .- sk))
+                        y[k] .= y[k] .+ θ_mult .* (ρ * w_eq[k]) .* (ck .- sk)
                         off += length(ck)
                     end
                 else
                     for k in eachindex(eq_rel)
-                        append!(resid, (ρ * w_eq[k]) .* _vecval(eq_fs[k](x)))
+                        y[k] .= y[k] .+ θ_mult .* (ρ * w_eq[k]) .* _vecval(eq_fs[k](x))
                     end
                 end
-                y_prev_flat = y_new_flat .- resid
-                push!(and_history, (y_prev_flat, resid))
-                length(and_history) > 2 && popfirst!(and_history)
-                y_mixed = _anderson_mix(and_history, y_new_flat)
-                off = 0
-                for k in eachindex(eq_rel)
-                    mk = length(y[k])
-                    y[k] .= if safeguard
-                        clamp.(y_mixed[(off + 1):(off + mk)], -1e8, 1e8)
+                # Anderson acceleration of the equality multiplier updates.
+                # The residual must match the fixed-point map actually being
+                # iterated: in elastic mode the update is y += ρw(c − s), so the
+                # slack `s` belongs in the residual too (using ρw·c accelerated
+                # the wrong map).
+                if !isempty(eq_rel)
+                    y_new_flat = reduce(vcat, y; init=Float64[])
+                    resid = Float64[]
+                    if use_elastic
+                        s = x_new[(n + 1):end]
+                        off = 0
+                        for k in eachindex(eq_rel)
+                            ck = _vecval(eq_fs[k](x))
+                            sk = s[(off + 1):(off + length(ck))]
+                            append!(resid, θ_mult .* (ρ * w_eq[k]) .* (ck .- sk))
+                            off += length(ck)
+                        end
                     else
-                        y_mixed[(off + 1):(off + mk)]
+                        for k in eachindex(eq_rel)
+                            append!(resid, θ_mult .* (ρ * w_eq[k]) .* _vecval(eq_fs[k](x)))
+                        end
                     end
-                    off += mk
+                    y_prev_flat = y_new_flat .- resid
+                    push!(and_history, (y_prev_flat, resid))
+                    length(and_history) > anderson_depth && popfirst!(and_history)
+                    y_mixed = _anderson_mix(and_history, y_new_flat)
+                    off = 0
+                    for k in eachindex(eq_rel)
+                        mk = length(y[k])
+                        y[k] .= if safeguard
+                            clamp.(y_mixed[(off + 1):(off + mk)], -1e8, 1e8)
+                        else
+                            y_mixed[(off + 1):(off + mk)]
+                        end
+                        off += mk
+                    end
                 end
-            end
-            for k in eachindex(eq_rel)
-                safeguard && clamp!(y[k], -1e8, 1e8)
+                for k in eachindex(eq_rel)
+                    safeguard && clamp!(y[k], -1e8, 1e8)
+                end
             end
             k = 1
+            # flat buffer of the unprojected inequality increments ρw·g
+            # (stashed here so the Anderson mixing below does not
+            # re-evaluate the constraint functions)
+            ineq_resid = Float64[]
             for i in eachindex(ineq_rel)
                 g = _vecval(ineq_fs[i](x))
                 w = w_ineq[k]
@@ -1809,8 +2603,11 @@ function optimize!(workspace::AugLagWorkspace)
                     λ[k][feas] .= λ[k][feas] ./ (1 .+ λ[k][feas] .* g[feas] ./ cbar)
                     λ[k][.!feas] .= max.(λ[k][.!feas] .+ (ρ * w) .* g[.!feas], 0.0)
                 else
-                    λ[k] .= max.(λ[k] .+ (ρ * w) .* g, 0.0)
+                    λ[k] .= max.(λ[k] .+ θ_mult .* (ρ * w) .* g, 0.0)
                 end
+                anderson_ineq &&
+                    penalty === :quadratic &&
+                    append!(ineq_resid, θ_mult .* (ρ * w) .* g)
                 safeguard && clamp!(λ[k], 0.0, 1e8)
                 if pbm_adaptive && penalty in (:pbm, :mixed, :mixed_logdet)
                     # Ipopt-style barrier adaptation: the barrier coefficient
@@ -1828,6 +2625,66 @@ function optimize!(workspace::AugLagWorkspace)
                 end
                 k += 1
             end
+            if anderson_ineq && penalty === :quadratic && !isempty(ineq_resid)
+                # Anderson acceleration of the inequality multiplier map (the
+                # classical quadratic penalty): the depth-2 least-squares mix
+                # of the unprojected iterates λ + ρw·g, re-projected onto the
+                # nonnegative orthant (ADMM-style Anderson with re-projection).
+                λ_new_flat = reduce(vcat, λ; init=Float64[])
+                λ_prev_flat = λ_new_flat .- ineq_resid
+                push!(and_ineq_history, (λ_prev_flat, ineq_resid))
+                length(and_ineq_history) > anderson_depth && popfirst!(and_ineq_history)
+                λ_mixed = _anderson_mix(and_ineq_history, λ_new_flat)
+                off = 0
+                for i in eachindex(ineq_rel)
+                    mk = length(λ[i])
+                    λ[i] .= if safeguard
+                        clamp.(λ_mixed[(off + 1):(off + mk)], 0.0, 1e8)
+                    else
+                        max.(λ_mixed[(off + 1):(off + mk)], 0.0)
+                    end
+                    off += mk
+                end
+            end
+            if spectral_rho && !use_elastic && (!isempty(eq_rel) || !isempty(ineq_rel))
+                # Spectral (Barzilai-Borwein) penalty update on the dual map
+                # (Xu-Figueiredo-Goldstein style, ADMM-flavored): the dual
+                # step 1/rho is estimated from the last two iterates as
+                # rho ~ ||dc||^2 / <dc, dy> with dc the change in the
+                # constraint values and dy the change in the multipliers.
+                # Safeguards: only a credible positive correlation updates
+                # rho, the change is limited to [rho/rho_decr, rho*rho_incr]
+                # and the result to [rho_init/10, rho_max]. Replaces the
+                # two-way decrease on good steps (it subsumes it). The
+                # semidefinite multipliers (matrices) are not part of the
+                # flat vectors; the elastic mode is not supported.
+                cflat = Float64[]
+                for k in eachindex(eq_rel)
+                    append!(cflat, _vecval(eq_fs[k](x)))
+                end
+                for i in eachindex(ineq_rel)
+                    append!(cflat, _vecval(ineq_fs[i](x)))
+                end
+                yflat = reduce(vcat, vcat(y, λ); init=Float64[])
+                if cflat_prev !== nothing && yflat_prev !== nothing
+                    Δc = cflat .- cflat_prev
+                    Δy = yflat .- yflat_prev
+                    num = dot(Δc, Δc)
+                    den = dot(Δc, Δy)
+                    if num > 0 && den > 0
+                        ρ_spec = clamp(
+                            num / den,
+                            ρ / Float64(options.rho_decr),
+                            ρ * Float64(options.rho_incr),
+                        )
+                        ρ = clamp(
+                            ρ_spec, Float64(options.rho_init) / 10, Float64(options.rho_max)
+                        )
+                    end
+                end
+                cflat_prev = cflat
+                yflat_prev = yflat
+            end
             _sd_multiplier_update!(model, sd_rel, ρ, x, Y, penalty)
             if outer_schedule === :bm
                 # Birgin-Martinez complexity scaling: η, ω tighten with 1/ρ.
@@ -1839,8 +2696,9 @@ function optimize!(workspace::AugLagWorkspace)
             end
             # Two-way update (Curtis, Jiang & Robinson): once feasibility is
             # nearly attained, back the penalty down so the subproblems stay
-            # well conditioned.
-            ρ = _two_way_step(ρ, options, two_way, vnorm, η)
+            # well conditioned. The spectral update (when enabled) subsumes
+            # this on good steps.
+            spectral_rho || (ρ = _two_way_step(ρ, options, two_way, vnorm, η))
         else
             # Selective penalty update: escalate only the most-violated
             # constraint groups instead of the global penalty.
@@ -1872,7 +2730,32 @@ function optimize!(workspace::AugLagWorkspace)
                 nothing
             end
         end
-        vnorm <= ctol && break
+        # KKT-complete stopping (opt-in): on top of feasibility, require the
+        # stationarity and complementarity residuals to be small — the
+        # box-projected gradient of the scaled Lagrangian at the current
+        # multipliers, and max |λⱼgⱼ| over the relaxed inequalities.
+        stat_ok = true
+        comp_ok = true
+        if stop_kkt && vnorm <= ctol
+            _, ∇f = NonconvexCore.value_gradient(scaled_obj, x)
+            g = copy(∇f)
+            for (k, c) in enumerate(eq_fs)
+                gJ = NonconvexCore.value_gradient(z -> dot(_vecval(c(z)), y[k]), x)[2]
+                gJ === nothing || (g .+= gJ)
+            end
+            for (k, c) in enumerate(ineq_fs)
+                gJ = NonconvexCore.value_gradient(z -> dot(_vecval(c(z)), λ[k]), x)[2]
+                gJ === nothing || (g .+= gJ)
+            end
+            pg = _projected_gnorm(g, x, submodel0.box_min, submodel0.box_max)
+            comp = 0.0
+            for k in eachindex(ineq_rel)
+                comp = max(comp, maximum(abs.(λ[k] .* _vecval(ineq_fs[k](x)))))
+            end
+            stat_ok = pg <= kkt_tol
+            comp_ok = comp <= kkt_tol
+        end
+        vnorm <= ctol && stat_ok && comp_ok && break
     end
     # Report the best restoration point when it is strictly more feasible
     # (in the raw metric the restoration minimizes) than the final
@@ -1901,6 +2784,7 @@ function optimize!(workspace::AugLagWorkspace)
         η=η,
         ω=ω,
         and_history=copy(and_history),
+        and_ineq_history=copy(and_ineq_history),
         filter_f=copy(filter_f),
         filter_v=copy(filter_v),
         approx=qn_approx,

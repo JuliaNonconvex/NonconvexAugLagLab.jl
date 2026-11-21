@@ -17,6 +17,7 @@
     @test AugLagOptions(sub_tol_schedule=:eta) isa AugLagOptions
     @test AugLagOptions(sub_tol_schedule=:eta2) isa AugLagOptions
     @test AugLagOptions(sub_tol_schedule=:fixed) isa AugLagOptions
+    @test AugLagOptions(sub_tol_schedule=:relative) isa AugLagOptions
 
     # end-to-end with the Ipopt sub-solver and the default (:eta) schedule:
     # the sub-solver options get the adaptive tolerance each outer iteration
@@ -40,20 +41,30 @@ end
     using Test, NonconvexAugLagLab
     const NAL = NonconvexAugLagLab
     # :fixed
-    @test NAL._sub_tol_value(:fixed, nothing, 0.5) == 1e-8
+    @test NAL._sub_tol_value(:fixed, nothing, 0.5, 1.0, 0.1) == 1e-8
     # :eta2 clamps to [1e-10, 1e-8]
-    @test NAL._sub_tol_value(:eta2, nothing, 0.5) == 1e-8
-    @test NAL._sub_tol_value(:eta2, nothing, 1e-4) == 1e-8
-    @test NAL._sub_tol_value(:eta2, nothing, 1e-6) == 1e-10
+    @test NAL._sub_tol_value(:eta2, nothing, 0.5, 1.0, 0.1) == 1e-8
+    @test NAL._sub_tol_value(:eta2, nothing, 1e-4, 1.0, 0.1) == 1e-8
+    @test NAL._sub_tol_value(:eta2, nothing, 1e-6, 1.0, 0.1) == 1e-10
     # :eta clamps to [1e-6, 1e-2]
-    @test NAL._sub_tol_value(:eta, nothing, 0.5) == 1e-2
-    @test NAL._sub_tol_value(:eta, nothing, 0.05) ≈ 2.5e-3
-    @test NAL._sub_tol_value(:eta, nothing, 1e-4) == 1e-6
+    @test NAL._sub_tol_value(:eta, nothing, 0.5, 1.0, 0.1) == 1e-2
+    @test NAL._sub_tol_value(:eta, nothing, 0.05, 1.0, 0.1) ≈ 2.5e-3
+    @test NAL._sub_tol_value(:eta, nothing, 1e-4, 1.0, 0.1) == 1e-6
+    # :relative: the inner tolerance tracks the current violation
+    @test NAL._sub_tol_value(:relative, nothing, 0.5, 1e-2, 0.1) == 1e-3
+    @test NAL._sub_tol_value(:relative, nothing, 0.5, 1e-6, 0.1) == 1e-7
+    @test NAL._sub_tol_value(:relative, nothing, 0.5, 1e-12, 0.1) == 1e-10 # vprev floor
+    @test NAL._sub_tol_value(:relative, nothing, 0.5, 1e3, 0.1) == 1e-2    # clamp ceiling
     # an explicit sub_options.tol override wins over any schedule
-    @test NAL._sub_tol_value(:eta, 1e-9, 0.5) == 1e-9
-    @test NAL._sub_tol_value(:fixed, 1e-9, 0.5) == 1e-9
+    @test NAL._sub_tol_value(:eta, 1e-9, 0.5, 1.0, 0.1) == 1e-9
+    @test NAL._sub_tol_value(:fixed, 1e-9, 0.5, 1.0, 0.1) == 1e-9
+    @test NAL._sub_tol_value(:relative, 1e-9, 0.5, 1e-2, 0.1) == 1e-9
     # invalid schedules are rejected
-    @test_throws ArgumentError NAL._sub_tol_value(:bogus, nothing, 0.5)
+    @test_throws ArgumentError NAL._sub_tol_value(:bogus, nothing, 0.5, 1.0, 0.1)
+    # sub_tol_rel must lie in (0, 1)
+    @test AugLagOptions(sub_tol_schedule=:relative, sub_tol_rel=0.5) isa AugLagOptions
+    @test_throws ArgumentError AugLagOptions(sub_tol_schedule=:relative, sub_tol_rel=0.0)
+    @test_throws ArgumentError AugLagOptions(sub_tol_schedule=:relative, sub_tol_rel=1.0)
 end
 
 @testitem "MMA and NLopt tolerance extensions" begin
@@ -74,4 +85,14 @@ end
     @test b.nt.ftol_abs == 2e-3
     @test b.nt.xtol_abs == 2e-3
     @test b.nt.ftol_rel == 0.5
+end
+
+@testitem "first_sub_tol validation and acceptance" begin
+    using Test, NonconvexAugLagLab
+    @test AugLagOptions(first_sub_tol = nothing) isa AugLagOptions
+    @test AugLagOptions(first_sub_tol = 1e-6) isa AugLagOptions
+    # the default tightens the first subproblem
+    @test AugLagOptions().first_sub_tol == 1e-6
+    @test_throws ArgumentError AugLagOptions(first_sub_tol = 0.0)
+    @test_throws ArgumentError AugLagOptions(first_sub_tol = -1.0)
 end

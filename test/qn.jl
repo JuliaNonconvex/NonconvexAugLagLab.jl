@@ -322,3 +322,179 @@ end
     r = optimize(m, alg, [-1.2, 1.0])
     @test norm(r.minimizer - [1.0, 1.0]) < 1e-3
 end
+
+@testitem "QuasiNewtonAlg: projected-gradient stopping at bound-constrained optima" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra
+    # Unconstrained minimum [1.5, 1.5] lies outside the box: the solution is
+    # [1.0, 1.0] where the RAW gradient is [-1, -1] (nonzero) but the
+    # box-PROJECTED gradient is zero. Without projected stopping the
+    # raw-gradient test can never fire and the driver burns the budget.
+    for globalization in (:backtracking, :trustregion)
+        m = Model(x -> sum((x .- [1.5, 1.5]) .^ 2))
+        addvar!(m, [0.0, 0.0], [1.0, 1.0])
+        r = optimize(
+            m,
+            QuasiNewtonAlg(;
+                max_iter=50,
+                tol=1e-8,
+                globalization=globalization,
+                projected_stop=true,
+            ),
+            [0.5, 0.5],
+        )
+        @test r.minimizer ≈ [1.0, 1.0] atol = 1e-6
+        # the reported KKT residual is the projected-gradient norm
+        @test r.tol.kkt < 1e-6
+        # iterations left on the table: the solver stopped before the budget
+        @test r.iter < 50
+    end
+end
+
+@testitem "QuasiNewtonAlg: hybrid curvature Gauss-Newton terms" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra
+    const NAL = NonconvexAugLagLab
+    # the GN matvec matches the explicit w*J'J product
+    c = x -> [x[1] + 2x[2], x[2] - x[1]]
+    x = [0.3, -0.7]
+    w = 3.0
+    t = NAL.GaussNewtonTerm(c, w, copy(x))
+    v = [0.2, -0.4]
+    Hv = zeros(2)
+    NAL.apply_term!(Hv, t, v)
+    J = [1.0 2.0; -1.0 1.0]
+    @test Hv ≈ w * J' * (J * v) atol = 1e-6
+    # the active-set mask restricts the rows exactly
+    c2 = x -> [x[1], x[2]]
+    t2 = NAL.GaussNewtonTerm(c2, 2.0, copy(x), BitVector([true, false]))
+    Hv2 = zeros(2)
+    NAL.apply_term!(Hv2, t2, v)
+    J2 = [1.0 0.0; 0.0 1.0]
+    D = [1.0 0.0; 0.0 0.0]
+    @test Hv2 ≈ 2.0 * J2' * D * (J2 * v) atol = 1e-6
+    # end-to-end with the hybrid curvature
+    m = Model(x -> sum(x .^ 2))
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+    r = optimize(
+        m,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options = AugLagOptions(; max_iter = 200, curvature = :hybrid),
+    )
+    @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
+end
+
+@testitem "QuasiNewtonAlg: hybrid curvature JuMP exact-Jacobian terms" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra, JuMP, NonconvexCore
+    # a JuMP-converted model converges under the hybrid curvature with the
+    # exact sparse Jacobian matvecs
+    jm = JuMP.Model()
+    JuMP.@variable(jm, -5 <= x[1:2] <= 5)
+    JuMP.@objective(jm, Min, sum(x .^ 2))
+    JuMP.@constraint(jm, x[1] + x[2] == 1)
+    JuMP.@constraint(jm, x[1] <= 0.9)
+    dm = NonconvexCore.DictModel(jm)
+    x0 = NonconvexCore.getinit(dm)
+    r = optimize(dm, AugLagAlg(), x0; options = AugLagOptions(; max_iter = 200, curvature = :hybrid))
+    xv = r.minimizer[:x]
+    @test norm(xv - [0.5, 0.5]) < 1e-4
+end
+
+@testitem "QuasiNewtonAlg: hybrid JumpLagrangianTerm exact mu-weighted curvature" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra, JuMP, NonconvexCore
+    # on the quadratic constraint x1^2 + x2^2 <= 10 the mu-weighted
+    # curvature is mu * 2I; the term's matvec must match mu*2*v
+    jm = JuMP.Model()
+    JuMP.@variable(jm, -5 <= x[1:2] <= 5)
+    JuMP.@objective(jm, Min, 0.0)
+    JuMP.@constraint(jm, x[1]^2 + x[2]^2 <= 10)
+    dm = NonconvexCore.DictModel(jm)
+    je = NonconvexAugLagLab._jump_evaluator(dm.objective)
+    @test je !== nothing
+    x = [1.0, 2.0]
+    μ = [1.5]
+    t = NonconvexAugLagLab.JumpLagrangianTerm(je, μ, x)
+    v = [0.3, -0.2]
+    Hv = zeros(2)
+    NonconvexAugLagLab.apply_term!(Hv, t, v)
+    @test Hv ≈ 1.5 * 2.0 .* v atol = 1e-8
+end
+
+@testitem "QuasiNewtonAlg: inexact Steihaug CG tolerance" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra
+    const NAL = NonconvexAugLagLab
+    # a loose relative CG tolerance still returns a valid (descent) step
+    H = NAL.LBFGSApprox(5)
+    NAL.init!(H, 2, zeros(2))
+    g = [1.0, 0.5]
+    d1, _ = NAL._steihaug(H, g, 10.0, 0.0, nothing, 1e-2)
+    d2, _ = NAL._steihaug(H, g, 10.0, 0.0, nothing, nothing)
+    @test norm(d1) > 0
+    @test norm(d2) > 0
+    # both are descent directions for a positive-definite model
+    @test dot(g, d1) < 0
+    @test dot(g, d2) < 0
+    # validation
+    @test_throws ArgumentError NAL.QuasiNewtonAlg(; cg_tol = 0.0)
+end
+
+@testitem "QuasiNewtonAlg: hybrid structured secant and CG preconditioning" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra
+    const NAL = NonconvexAugLagLab
+    qn = NAL.LBFGSApprox(5)
+    comp = NAL.CompositeHessianApprox(qn, x -> ())
+    # the composite deliberately exposes no CG preconditioner (measured
+    # harmful on case5: the remainder-only inverse badly scales the
+    # exact-term-dominated system)
+    @test NAL._steihaug_precond(comp) === nothing
+    # the structured-secant update subtracts the exact terms' curvature
+    # from the secant pair: with a single unit Gauss-Newton term, the QN
+    # receives y - w*J'J*s
+    gn = NAL.GaussNewtonTerm(x -> [x[1]], 2.0, [1.0])
+    comp2 = NAL.CompositeHessianApprox(NAL.LBFGSApprox(2), x -> (gn,))
+    NAL.init!(comp2, 1, [1.0])
+    comp2.terms[] = (gn,)
+    s = [0.5]
+    y = [1.7]
+    y_qn = copy(y)
+    ty = zeros(1)
+    NAL.apply_term!(ty, gn, s)
+    y_qn .-= ty
+    # the QN model's history receives the corrected pair: reproduce via a
+    # fresh L-BFGS and compare the stored secants
+    qn_ref = NAL.LBFGSApprox(2)
+    NAL.init!(qn_ref, 1, [1.0])
+    NAL.update!(qn_ref, s, y_qn)
+    NAL.update!(comp2, s, y)
+    @test comp2.qn.s[1] == qn_ref.s[1]
+    @test comp2.qn.y[1] ≈ qn_ref.y[1]
+    # the two-loop recursion serves as ldiv!
+    qn2 = NAL.LBFGSApprox(5)
+    NAL.init!(qn2, 2, zeros(2))
+    r = [1.0, -0.5]
+    z = zeros(2)
+    NAL.LinearAlgebra.ldiv!(z, qn2, r)
+    @test z == r  # identity base operator, empty history
+end
+
+@testitem "QuasiNewtonAlg: split-secant structured update" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra
+    const NAL = NonconvexAugLagLab
+    # phi = 2*x1^2 with grad phi = [4x1, 0]
+    φgrad = x -> [4x[1], 0.0]
+    rem = NAL.LBFGSApprox(5)
+    pen = NAL.LBFGSApprox(5)
+    H = NAL.SplitSecantApprox(rem, pen, φgrad)
+    NAL.init!(H, 2, zeros(2))
+    x = [1.0, 1.0]
+    xnew = [1.5, 1.2]
+    s = xnew .- x
+    y = [3.0, 1.0]
+    NAL.update!(H, s, y, x, xnew)
+    Δ = φgrad(xnew) .- φgrad(x)
+    @test H.qn_pen.s[1] == s
+    @test H.qn_pen.y[1] ≈ Δ
+    @test H.qn_rem.y[1] ≈ y .- Δ
+    # the penalty model's inverse is the CG preconditioner
+    @test NAL._steihaug_precond(H) === pen
+end
