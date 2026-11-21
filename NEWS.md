@@ -71,6 +71,22 @@
   residual (max solid stress 5.7e-4 over the threshold, 2.2× heavier
   design) — the relaxed ALM is strictly better there; the path targets
   problems with a cheap-hard/expensive-soft constraint split.
+- **Analytical Jᵀv-based subproblem gradient (opt-in)**:
+  `AugLagOptions(analytical_gradient = true)` assembles the built-in
+  subproblem's gradient as `∇f + Σ Jᵀv` (one vector-Jacobian product per
+  constraint group, exposed via a ChainRules rrule; `ChainRulesCore` is
+  now a direct dependency). Measured on the TopOpt local-stress
+  single-level solve: bit-for-bit the same trajectory as the
+  composed-AD path at 17.8% more wall-clock (311.6 vs 264.6 s) — the
+  per-group reverse passes cost more than the single composed pass on
+  this one-group problem; off by default, an architecture/robustness
+  option for multi-group problems.
+- **`max_time` and `on_iteration` options (new)**:
+  `AugLagOptions(max_time = t)` stops the outer loop once the wall-clock
+  budget is exhausted (no new subproblem started past it, the last
+  completed iterate is reported); `AugLagOptions(on_iteration = f)`
+  calls `f(iter, x, f(x), vnorm)` after every accepted outer iterate and
+  stops the loop when `f` returns `true`.
 - **Practical relative subproblem tolerance (opt-in)**:
   `AugLagOptions(sub_tol_schedule = :relative, sub_tol_rel = τ)` sets the
   inner tolerance proportional to the current constraint violation

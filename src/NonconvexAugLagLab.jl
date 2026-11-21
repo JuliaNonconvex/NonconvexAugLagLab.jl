@@ -8,6 +8,7 @@ export IdentityPreconditioner, DiagonalPreconditioner
 export SQSDPAlg, SQSDPOptions, SQSDPResult
 
 using Reexport, Parameters, LinearAlgebra, SparseArrays
+using ChainRulesCore: ChainRulesCore
 @reexport using NonconvexCore
 using NonconvexCore:
     VecModel,

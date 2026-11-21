@@ -1052,3 +1052,37 @@ end
     @test seen[1][1] == 1
     @test seen[3][1] == 3
 end
+
+@testitem "AugLagAlg: analytical AL gradient matches AD" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra, NonconvexCore
+    const NAL = NonconvexAugLagLab
+    f = x -> (x[1] - 1)^2 + x[2]^2
+    c = x -> [x[1] + x[2] - 1.0]
+    g = x -> [x[1] - 0.5, x[2] - 0.5]
+    a = NAL.AnalyticalALObjective(f, [c], [g], [[0.3]], [[0.2, 0.1]], [1.0], [1.0], 10.0, x -> 0.0)
+    ref = z -> begin
+        v = f(z)
+        cv = c(z)
+        v += dot([0.3], cv) + 5.0 * dot(cv, cv)
+        gv = max.(g(z), 0.0)
+        v + dot([0.2, 0.1], gv) + 5.0 * dot(gv, gv)
+    end
+    for x in ([0.4, 0.3], [0.6, 0.6], [0.1, -0.2])
+        va, ga = NonconvexCore.value_gradient(a, x)
+        vr, gr = NonconvexCore.value_gradient(ref, x)
+        @test va ≈ vr atol = 1e-12
+        @test ga ≈ gr atol = 1e-8
+    end
+    # end-to-end with the option on
+    m = Model(x -> sum(x .^ 2))
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+    add_ineq_constraint!(m, x -> [x[1] - 0.9], [0.0])
+    r = optimize(
+        m,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options = AugLagOptions(; max_iter = 200, analytical_gradient = true),
+    )
+    @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
+end

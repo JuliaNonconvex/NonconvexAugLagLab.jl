@@ -381,6 +381,17 @@ end
   `on_iteration(iter, x, f(x), vnorm)` called after every accepted outer
   iterate (with a copy of the iterate); returning `true` stops the loop
   and reports the just-recorded iterate.
+- `analytical_gradient`: (opt-in) assemble the built-in subproblem's
+  gradient analytically as `∇f + Σ Jᵀv` — one vector-Jacobian product per
+  constraint group through the existing reverse-mode machinery, exposed
+  via a ChainRules rrule (the SDP-extension pattern) — instead of
+  differentiating the composed AL closure. Quadratic penalty mode only
+  (no PBM, elastic or `curvature = :newton`). Measured on the TopOpt
+  local-stress single-level solve: bit-for-bit the same trajectory as
+  the composed-AD path at 17.8% more wall-clock (311.6 vs 264.6 s) — the
+  per-group reverse passes cost more than the single composed pass on
+  this one-group problem; off by default, an architecture/robustness
+  option for multi-group problems.
 - `outer_schedule`: `:bm` (the default) — the Birgin–Martínez complexity
   scaling where both the feasibility target `η` and the subproblem accuracy
   target `ω` tighten with the full `1/ρ` factor on good steps (and reset
@@ -504,6 +515,7 @@ mutable struct AugLagOptions{S,R,W}
     first_sub_iters::Int
     max_time::Real
     on_iteration::Union{Nothing,Function}
+    analytical_gradient::Bool
     outer_schedule::Symbol
 
     two_level::Bool
@@ -564,6 +576,7 @@ function AugLagOptions(;
     first_sub_iters::Int=1,
     max_time::Real=Inf,
     on_iteration=nothing,
+    analytical_gradient::Bool=false,
     outer_schedule::Symbol=:bm,
 
     two_level::Bool=false,
@@ -659,6 +672,7 @@ function AugLagOptions(;
         first_sub_iters,
         max_time,
         on_iteration,
+        analytical_gradient,
         outer_schedule,
         two_level,
         two_level_iters,
@@ -1018,6 +1032,78 @@ function _hard_penalty_objective(obj, kept_eq, kept_ineq, hard_rho, n)
     end
 end
 
+# Analytical gradient path for the built-in quasi-Newton subproblems (#32):
+# the AL objective's gradient is assembled as grad f + one J'v per
+# constraint group (vector-Jacobian products through the existing
+# reverse-mode machinery, no materialized Jacobian), and exposed to AD via
+# a ChainRules rrule (the same pattern the SDP extension uses for the cone
+# projection), so the prox / box-barrier / hard-penalty wrappers keep
+# working. Quadratic penalty mode only (the PBM branch has its own
+# closed-form derivative, future work).
+struct AnalyticalALObjective{TF,TE,TI,TY,TL,TW,TS} <: Function
+    scaled_obj::TF
+    eq_fs::TE
+    ineq_fs::TI
+    y::TY
+    λ::TL
+    w_eq::TW
+    w_ineq::TW
+    ρ::Float64
+    sd_terms::TS
+end
+
+function (a::AnalyticalALObjective)(x)
+    v = a.scaled_obj(x)
+    for (k, c) in enumerate(a.eq_fs)
+        cv = _vecval(c(x))
+        r = a.ρ * a.w_eq[k]
+        v += dot(a.y[k], cv) + r / 2 * dot(cv, cv)
+    end
+    for (k, c) in enumerate(a.ineq_fs)
+        gv = _vecval(c(x))
+        gp = max.(gv, 0.0)
+        r = a.ρ * a.w_ineq[k]
+        v += dot(a.λ[k], gp) + r / 2 * dot(gp, gp)
+    end
+    return v + a.sd_terms(x)
+end
+
+# ∇L(x) = ∇f(x) + Σ Jᵢ(x)ᵀ (yᵢ + ρ wᵢ c̃ᵢ(x)) + Σ Jⱼ(x)ᵀ (λⱼ + ρ wⱼ gⱼ⁺)
+# (on the violated rows only) + ∇(sd terms); each Jᵀv is one reverse pass.
+function _analytical_al_gradient(a::AnalyticalALObjective, x)
+    _, ∇f = NonconvexCore.value_gradient(a.scaled_obj, x)
+    g = copy(∇f)
+    for (k, c) in enumerate(a.eq_fs)
+        cv = _vecval(c(x))
+        v = a.y[k] .+ (a.ρ * a.w_eq[k]) .* cv
+        gJ = NonconvexCore.value_gradient(z -> dot(_vecval(c(z)), v), x)[2]
+        gJ === nothing || (g .+= gJ)
+    end
+    for (k, c) in enumerate(a.ineq_fs)
+        gv = _vecval(c(x))
+        act = gv .> 0
+        if any(act)
+            v = zero(gv)
+            v[act] = a.λ[k][act] .+ (a.ρ * a.w_ineq[k]) .* gv[act]
+            gJ = NonconvexCore.value_gradient(z -> dot(_vecval(c(z)), v), x)[2]
+            gJ === nothing || (g .+= gJ)
+        end
+    end
+    # the sd terms carry their own exact rrule (the cone-projection one)
+    gsd = NonconvexCore.value_gradient(a.sd_terms, x)[2]
+    gsd === nothing || (g .+= gsd)
+    return g
+end
+
+function ChainRulesCore.rrule(a::AnalyticalALObjective, x)
+    val = a(x)
+    function analytical_pullback(Δ)
+        g = _analytical_al_gradient(a, x)
+        return (ChainRulesCore.NoTangent(), Δ .* g)
+    end
+    return val, analytical_pullback
+end
+
 # Violation measure of the relaxed constraints on the scaled functions.
 function _scaled_violation(eq_fs, ineq_fs, model, sel, x)
     v = Float64[]
@@ -1303,6 +1389,7 @@ function optimize!(workspace::AugLagWorkspace)
     first_sub_iters = options.first_sub_iters
     max_time = Float64(options.max_time)
     on_iteration = options.on_iteration
+    analytical_gradient = options.analytical_gradient
     outer_schedule = options.outer_schedule
     @unpack two_level, two_level_iters, two_level_tau = options
     @unpack box_barrier_scale = options
@@ -1693,7 +1780,22 @@ function optimize!(workspace::AugLagWorkspace)
                     b_ineq,
                 )
             end
-        al_obj = build_al(sd_terms)
+        al_obj =
+            if analytical_gradient &&
+                penalty === :quadratic &&
+                !use_elastic &&
+                sub_alg === nothing &&
+                options.curvature !== :newton
+                # analytical Jᵀv-based subproblem gradient (issue #32): the
+                # rrule on AnalyticalALObjective supplies the assembled
+                # gradient, and the prox / box-barrier / hard-penalty
+                # wrappers compose through it.
+                AnalyticalALObjective(
+                    scaled_obj, eq_fs, ineq_fs, y, λ, w_eq, w_ineq, Float64(ρ), sd_terms
+                )
+            else
+                build_al(sd_terms)
+            end
         # The built-in quasi-Newton solver handles only box-constrained
         # subproblems: kept (non-relaxed) constraints are folded into its
         # objective as a smooth quadratic penalty with weight hard_rho
