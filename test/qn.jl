@@ -498,3 +498,33 @@ end
     # the penalty model's inverse is the CG preconditioner
     @test NAL._steihaug_precond(H) === pen
 end
+
+@testitem "QuasiNewtonAlg: reference TRON routines" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra
+    const NAL = NonconvexAugLagLab
+    Hv = v -> 2.0 .* v
+    x = [1.0, 1.0]
+    g = [1.0, 0.5]
+    lb = [-10.0, -10.0]
+    ub = [10.0, 10.0]
+    # Cauchy step: satisfies q(s) <= μ0 s'g and ||s|| <= μ1 Δ
+    α, s = NAL._tron_cauchy(x, g, Hv, 10.0, 1.0, lb, ub)
+    @test norm(s) <= 10.0 + 1e-12
+    qs = dot(g, s) + dot(s, Hv(s)) / 2
+    @test qs <= 1e-2 * dot(g, s)
+    @test dot(g, s) < 0
+    # negative curvature rides to the trust-region boundary
+    w, status = NAL._reduced_cg([true, true], v -> -v, [1.0, 0.0], 10.0, 0.1)
+    @test status == :boundary
+    @test norm(w) ≈ 10.0 atol = 1e-8
+    # the projected CG returns a descent step from the Cauchy point
+    d, st = NAL._tron_pcg(x, g, Hv, 10.0, 0.1, zeros(2), lb, ub)
+    @test norm(d) > 0
+    @test dot(g, d) < 0
+    # the Lin-Moré radius update is positive and monotone in the ratio
+    for r in (0.0, 0.1, 0.5, 0.9)
+        @test NAL._tron_radius(1.0, r, 0.5, 4.0) > 0
+    end
+    @test NAL._tron_radius(1.0, 0.0, 0.5, 4.0) <= 1.0
+    @test NAL._tron_radius(1.0, 0.9, 0.5, 4.0) >= 1.0
+end

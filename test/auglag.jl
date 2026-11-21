@@ -1113,3 +1113,28 @@ end
     @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
     @test_throws ArgumentError AugLagOptions(kkt_tol = 0.0)
 end
+
+@testitem "AugLagAlg: objective recovery and infeasibility detection" begin
+    using NonconvexAugLagLab, Test
+    const NAL = NonconvexAugLagLab
+    # recovery identity: f = L - penalty terms (the satisfied inequality
+    # row contributes nothing)
+    eqvals = [[0.3]]
+    ineqvals = [[-0.2], [0.4]]
+    y = [[1.0]]
+    λ = [[0.0], [2.0]]
+    mt = 5.0
+    f = NAL._recover_objective(mt, eqvals, ineqvals, y, λ, [2.0], [1.0, 1.0], 10.0, 1.0)
+    ref = mt - (dot(y[1], eqvals[1]) + 20 / 2 * dot(eqvals[1], eqvals[1])) -
+        (dot(λ[2], [0.4]) + 10 / 2 * 0.4^2)
+    @test f ≈ ref
+    # end-to-end: an infeasible problem is detected via the dual certificate
+    m = Model(x -> sum(x .^ 2))
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] - 0.0)
+    add_eq_constraint!(m, x -> x[1] - 1.0)
+    r = optimize(m, AugLagAlg(), [0.5, 0.0]; options = AugLagOptions(; max_iter = 200))
+    @test r.status == :infeasible
+    # the backward-compatible 4-arg result constructor keeps working
+    @test AugLagResult([0.0], 0.0, nothing, nothing).status == :unknown
+end

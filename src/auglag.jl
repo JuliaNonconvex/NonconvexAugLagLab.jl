@@ -873,6 +873,10 @@ struct AugLagResult{TM1,TM2,R,TR} <: AbstractResult
     minimum::TM2
     results::R
     trajectory::TR
+    status::Symbol
+end
+function AugLagResult(minimizer, minimum, results, trajectory)
+    AugLagResult(minimizer, minimum, results, trajectory, :unknown)
 end
 
 mutable struct AugLagWorkspace{
@@ -1373,7 +1377,9 @@ function ChainRulesCore.rrule(a::AnalyticalALObjective, x)
 end
 
 # Violation measure of the relaxed constraints on the scaled functions.
-function _scaled_violation(eq_fs, ineq_fs, model, sel, x)
+# The relaxed indices are passed in (they are computed once per solve;
+# recomputing the subproblem decomposition per call is a hot-path cost).
+function _scaled_violation(eq_fs, ineq_fs, sd_rel, model, x)
     v = Float64[]
     for c in eq_fs
         append!(v, abs.(_vecval(c(x))))
@@ -1381,11 +1387,50 @@ function _scaled_violation(eq_fs, ineq_fs, model, sel, x)
     for c in ineq_fs
         append!(v, max.(_vecval(c(x)), 0.0))
     end
-    _, _, sd_rel, _ = _subproblem(model, sel, nothing)
     for i in sd_rel
         append!(v, _sd_violation(model, i, x))
     end
     return v
+end
+
+# Raw scaled constraint values at x (signed equalities, inequalities as-is)
+# — the ingredients of the objective recovery and the violation norm, so
+# the hot path evaluates each relaxed constraint exactly once.
+function _scaled_constraint_values(eq_fs, ineq_fs, x)
+    eqvals = [_vecval(c(x)) for c in eq_fs]
+    ineqvals = [_vecval(c(x)) for c in ineq_fs]
+    return eqvals, ineqvals
+end
+
+# Violation vector from precomputed scaled values (without the sd part).
+function _scaled_violation_from(eqvals, ineqvals)
+    v = Float64[]
+    for cv in eqvals
+        append!(v, abs.(cv))
+    end
+    for gv in ineqvals
+        append!(v, max.(gv, 0.0))
+    end
+    return v
+end
+
+# Recover the (unscaled) objective from the AL value and the raw scaled
+# constraint values at the same point (classical quadratic mode):
+#   f = fscale · (L_ρ − Σ (yᵀc̃ + ρw/2‖c̃‖²) − Σ (λᵀg̃⁺ + ρw/2‖g̃⁺‖²)).
+# Saves the extra objective and constraint evaluations of re-evaluating
+# obj(x) after every accepted step (Percival's objective recovery).
+function _recover_objective(mt, eqvals, ineqvals, y, λ, w_eq, w_ineq, ρ, fscale)
+    f = mt
+    for (k, cv) in enumerate(eqvals)
+        r = ρ * w_eq[k]
+        f -= dot(y[k], cv) + r / 2 * dot(cv, cv)
+    end
+    for (k, gv) in enumerate(ineqvals)
+        gp = max.(gv, 0.0)
+        r = ρ * w_ineq[k]
+        f -= dot(λ[k], gp) + r / 2 * dot(gp, gp)
+    end
+    return fscale == 1.0 ? f : f * fscale
 end
 
 # ------------------------------------------------------------------
@@ -1440,8 +1485,7 @@ end
 # between the final main-phase iterate and the best restoration point
 # (the restoration merit minimizes this, while the main phase's internal
 # metric is the scaled violation).
-function _raw_violation(model, relaxed, x)
-    eq_rel, ineq_rel, _, _ = _subproblem(model, relaxed, nothing)
+function _raw_violation(model, eq_rel, ineq_rel, x)
     v = 0.0
     for i in eq_rel
         v = max(v, norm(_vecval(model.eq_constraints.fs[i](x)), Inf))
@@ -1797,6 +1841,8 @@ function optimize!(workspace::AugLagWorkspace)
     bdual = Ref{Any}(nothing)
     ysec_prev = nothing
     csec_prev = nothing
+    # infeasibility verdict (Percival's dual certificate)
+    infeasible_flag = false
     # Ipopt-style restoration accounting: window of recent violation values
     # (for the stall trigger) and the number of restorations already
     # performed this solve.
@@ -1829,21 +1875,24 @@ function optimize!(workspace::AugLagWorkspace)
     qn_approx = nothing
     # The built-in quasi-Newton subproblem options (parsed unconditionally
     # so the loop sites are well-typed for JET; used only when
-    # sub_alg === nothing).
+    # sub_alg === nothing — external sub-solver options are not named
+    # tuples and keep the defaults).
+    qn_opts_is_nt = sub_options === nothing || sub_options isa NamedTuple
     qn_opts = if sub_options === nothing
         (; max_iter=800, tol=1e-8, globalization=:trustregion)
     else
         sub_options
     end
-    qn_base_maxiter = get(qn_opts, :max_iter, 800)
-    qn_tol_override = get(qn_opts, :tol, nothing)
-    qn_globalization = get(qn_opts, :globalization, :trustregion)
-    qn_reset = get(qn_opts, :reset, false)
-    qn_nonmonotone = get(qn_opts, :nonmonotone, false)
-    qn_soc = get(qn_opts, :soc, false)
-    qn_projected_stop = get(qn_opts, :projected_stop, true)
-    qn_cg_maxiter = get(qn_opts, :cg_maxiter, nothing)
-    qn_precond = get(qn_opts, :precond, false)
+    qn_base_maxiter = qn_opts_is_nt ? get(qn_opts, :max_iter, 800) : 800
+    qn_tol_override = qn_opts_is_nt ? get(qn_opts, :tol, nothing) : nothing
+    qn_globalization =
+        qn_opts_is_nt ? get(qn_opts, :globalization, :trustregion) : :trustregion
+    qn_reset = qn_opts_is_nt ? get(qn_opts, :reset, false) : false
+    qn_nonmonotone = qn_opts_is_nt ? get(qn_opts, :nonmonotone, false) : false
+    qn_soc = qn_opts_is_nt ? get(qn_opts, :soc, false) : false
+    qn_projected_stop = qn_opts_is_nt ? get(qn_opts, :projected_stop, true) : true
+    qn_cg_maxiter = qn_opts_is_nt ? get(qn_opts, :cg_maxiter, nothing) : nothing
+    qn_precond = qn_opts_is_nt ? get(qn_opts, :precond, false) : false
     if sub_alg === nothing
         h0_op = if h0 === :penalty
             DiagonalPreconditioner(fill(1 / (1 + ρ), n + (use_elastic ? m_eq : 0)))
@@ -2102,10 +2151,10 @@ function optimize!(workspace::AugLagWorkspace)
             xr = _restore_feasible(
                 eq_fs, ineq_fs, model, relaxed, submodel0, copy(x), restore_prox
             )
-            vraw_r = _raw_violation(model, relaxed, xr)
-            if vraw_r < _raw_violation(model, relaxed, x)
+            vraw_r = _raw_violation(model, eq_rel, ineq_rel, xr)
+            if vraw_r < _raw_violation(model, eq_rel, ineq_rel, x)
                 x = copy(xr)
-                vnorm = norm(_scaled_violation(eq_fs, ineq_fs, model, relaxed, x), Inf)
+                vnorm = norm(_scaled_violation(eq_fs, ineq_fs, sd_rel, model, x), Inf)
                 fx = obj(x)
                 if lsq_multipliers && !isempty(eq_rel)
                     y = _lsq_multipliers_scaled(scaled_obj, eq_fs, x)
@@ -2403,17 +2452,38 @@ function optimize!(workspace::AugLagWorkspace)
         α = 1.0
         accepted = false
         mt = al_obj(x_sub)
+        # Objective recovery ingredients (classical quadratic mode, no
+        # elastic, no sd): the AL value and the raw scaled constraint
+        # values at the accepted point recover f without re-evaluating
+        # anything (Percival's objective recovery, and it also removes the
+        # duplicate constraint evaluation of the violation recomputation).
+        can_recover = penalty === :quadratic && !use_elastic && isempty(sd_rel)
+        eqvals_acc = nothing
+        ineqvals_acc = nothing
+        mt_acc = mt
+        φt_acc = Inf
         for _ in 1:10
             xt = x_sub .+ α .* d
             mt = al_obj(xt)
             xt_orig = use_elastic ? @view(xt[1:n]) : xt
-            φt = norm(_scaled_violation(eq_fs, ineq_fs, model, relaxed, xt_orig), Inf)
+            eqvals, ineqvals = _scaled_constraint_values(eq_fs, ineq_fs, xt_orig)
+            vvals = _scaled_violation_from(eqvals, ineqvals)
+            for i in sd_rel
+                append!(vvals, _sd_violation(model, i, xt_orig))
+            end
+            φt = norm(vvals, Inf)
             if isfinite(mt) &&
                 isfinite(φt) &&
                 _filter_accept(mt, φt) &&
                 (!watchdog || mt <= watchdog_fbar * (1 + watchdog_tol))
                 x_new = xt
                 accepted = true
+                if can_recover
+                    eqvals_acc = eqvals
+                    ineqvals_acc = ineqvals
+                    mt_acc = mt
+                    φt_acc = φt
+                end
                 break
             end
             α *= 0.5
@@ -2431,7 +2501,7 @@ function optimize!(workspace::AugLagWorkspace)
             # No acceptable step: record the current point in the filter and
             # keep it (the outer update will escalate).
             push!(filter_f, al_obj(x_sub))
-            push!(filter_v, norm(_scaled_violation(eq_fs, ineq_fs, model, relaxed, x), Inf))
+            push!(filter_v, norm(_scaled_violation(eq_fs, ineq_fs, sd_rel, model, x), Inf))
         end
         if watchdog && !accepted
             # Watchdog rejection: discard the step entirely and let the outer
@@ -2441,9 +2511,16 @@ function optimize!(workspace::AugLagWorkspace)
             x_new = x_sub
         end
         x = use_elastic ? x_new[1:n] : x_new
-        v = _scaled_violation(eq_fs, ineq_fs, model, relaxed, x)
-        vnorm = norm(v, Inf)
-        f_new = obj(x)
+        vnorm = if accepted && can_recover
+            φt_acc
+        else
+            norm(_scaled_violation(eq_fs, ineq_fs, sd_rel, model, x), Inf)
+        end
+        f_new = if accepted && can_recover
+            _recover_objective(mt_acc, eqvals_acc, ineqvals_acc, y, λ, w_eq, w_ineq, ρ, fscale)
+        else
+            obj(x)
+        end
         ok = isfinite(vnorm) && isfinite(f_new) && vnorm < 1e3 * max(vprev, 1.0)
         if !ok
             # The subproblem blew up (typical of an over-aggressive penalty):
@@ -2457,7 +2534,7 @@ function optimize!(workspace::AugLagWorkspace)
                 x = _restore_feasible(
                     eq_fs, ineq_fs, model, relaxed, submodel0, copy(xgood), restore_prox
                 )
-                vnorm = norm(_scaled_violation(eq_fs, ineq_fs, model, relaxed, x), Inf)
+                vnorm = norm(_scaled_violation(eq_fs, ineq_fs, sd_rel, model, x), Inf)
                 f_new = obj(x)
             else
                 x = _failed_iterate_fallback(trajectory, x_init)
@@ -2755,6 +2832,28 @@ function optimize!(workspace::AugLagWorkspace)
             stat_ok = pg <= kkt_tol
             comp_ok = comp <= kkt_tol
         end
+        # Infeasibility detection (Percival's dual certificate): once the
+        # penalty is capped and the iterate is still infeasible, a
+        # vanishing unit-weight penalty-part gradient ∇(½Σ‖c̃‖² + ½Σ‖g̃⁺‖²)
+        # certifies — up to the tolerances — that no feasible point is
+        # reachable from the relaxation.
+        if !infeasible_flag &&
+            vnorm > ctol &&
+            ρ >= Float64(options.rho_max) &&
+            penalty === :quadratic &&
+            !use_elastic &&
+            (!isempty(eq_rel) || !isempty(ineq_rel))
+            gp = _penalty_gradient(
+                eq_fs, ineq_fs, ones(length(eq_fs)), ones(length(ineq_fs)), 1.0
+            )(
+                x
+            )
+            pgnorm = norm(gp)
+            if pgnorm < sqrt(ctol) * vnorm
+                infeasible_flag = true
+                break
+            end
+        end
         vnorm <= ctol && stat_ok && comp_ok && break
     end
     # Report the best restoration point when it is strictly more feasible
@@ -2762,7 +2861,7 @@ function optimize!(workspace::AugLagWorkspace)
     # main-phase iterate — the main phase is not feasibility-preserving,
     # so its terminal iterate can be infeasible even though a restoration
     # phase reached feasibility earlier.
-    vraw_final = _raw_violation(model, relaxed, x)
+    vraw_final = _raw_violation(model, eq_rel, ineq_rel, x)
     reported_x = (x_rest !== nothing && vraw_rest < vraw_final) ? x_rest : x
     reported_fx = (x_rest !== nothing && vraw_rest < vraw_final) ? fx_rest : fx
     workspace.state = (
@@ -2790,7 +2889,11 @@ function optimize!(workspace::AugLagWorkspace)
         approx=qn_approx,
     )
     return AugLagResult(
-        copy(reported_x), reported_fx, nothing, keep_all ? trajectory : nothing
+        copy(reported_x),
+        reported_fx,
+        nothing,
+        keep_all ? trajectory : nothing,
+        infeasible_flag ? :infeasible : :unknown,
     )
 end
 

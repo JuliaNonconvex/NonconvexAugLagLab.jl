@@ -79,23 +79,24 @@ products — no finite differences and no reverse passes, so the
 per-CG-iteration cost is negligible (the Jacobian evaluation dominates,
 once per subproblem iterate).
 """
-struct JumpGaussNewtonTerm{J,X}
+mutable struct JumpGaussNewtonTerm{J,X}
     je::J
     rows::UnitRange{Int}
     w::Float64
     x::X
     act::Union{Nothing,BitVector}
     J::SparseMatrixCSC{Float64,Int}
+    Jv::Vector{Float64}
 end
 function JumpGaussNewtonTerm(je, rows, w, x, act=nothing)
     J = NonconvexCore.jump_jacobian(je, x)[rows, :]
-    return JumpGaussNewtonTerm(je, rows, w, x, act, J)
+    return JumpGaussNewtonTerm(je, rows, w, x, act, J, zeros(length(rows)))
 end
 
 function apply_term!(Hv, t::JumpGaussNewtonTerm, v)
-    Jv = t.J * v
-    t.act === nothing || (Jv[.!t.act] .= 0.0)
-    mul!(Hv, t.J', Jv, t.w, 1.0)
+    mul!(t.Jv, t.J, v)
+    t.act === nothing || (t.Jv[.!t.act] .= 0.0)
+    mul!(Hv, t.J', t.Jv, t.w, 1.0)
     return Hv
 end
 
@@ -678,14 +679,24 @@ LinearAlgebra.ldiv!(z, H::AbstractHessianApprox, r) = solve!(z, H, r)
 A smooth box-constrained quasi-Newton optimizer: `approx` is any
 [`AbstractHessianApprox`](@ref) (L-BFGS with an optional preconditioner, dense
 or structured BFGS, or the exact-Hessian Newton trust region). `globalization` is
-`:backtracking` (Armijo), `:wolfe` (strong Wolfe) or `:trustregion`
-(Steihaug–Toint with a projected step). `damping` enables Powell damping of the
+`:backtracking` (Armijo), `:wolfe` (strong Wolfe), `:trustregion`
+(Steihaug–Toint with a projected step) or `:tron` (the reference
+Lin–Moré TRON structure mirroring JSOSolvers: a safeguarded
+projected-Cauchy starting point with the search parameter carried across
+iterations, projected CG on the free set with a reduced-gradient exit,
+a projected line search on the free face, and the TRONTrustRegion radius
+rules; `cg_maxiter` caps the face iterations and `cg_tol` (default `0.1`)
+the reduced-CG accuracy; works with every curvature model, first-order
+and exact-Hessian alike). `damping` enables Powell damping of the
 secant pairs for nonconvex objectives. `projected_stop` (default `true`)
 terminates on the box-projected gradient norm (the correct stationarity
 measure when the optimum sits on a bound, where the raw gradient does not
 vanish) instead of the raw gradient norm, and reports that projected norm as
 the KKT residual. Measured on the TopOpt local-stress single-level solve:
-bit-for-bit identical trajectory at 7.2% less wall-clock (303.1 vs 326.7 s).
+bit-for-bit identical trajectory at 7.2% less wall-clock (303.1 vs 326.7 s);
+the reference TRON there does not complete within 13 min vs the 4.5 min
+`:trustregion` default (its per-step Cauchy/line-search matvecs dominate
+on FEA-heavy constraints), so `:tron` stays opt-in.
 """
 struct QuasiNewtonAlg{A<:AbstractHessianApprox} <: AbstractOptimizer
     approx::A
@@ -873,6 +884,12 @@ function optimize!(workspace::QuasiNewtonWorkspace)
     τ = optimizer.levenberg ? 1e-8 : 0.0
     merits = Float64[]
     M = 5
+    # reference-TRON state: the Cauchy search parameter warm-started across
+    # iterations, the success counter for the first-success radius rule,
+    # and the reduced-CG tolerance (the reference default when no cg_tol)
+    αC = 1.0
+    num_success = 0
+    cgtol = optimizer.cg_tol === nothing ? 0.1 : optimizer.cg_tol
     for iter in 1:optimizer.max_iter
         counter[] += 1
         d = similar(x)
@@ -881,38 +898,56 @@ function optimize!(workspace::QuasiNewtonWorkspace)
         # finite-difference Hessian models
         _rebind_terms!(approx, x, g)
         if optimizer.globalization === :tron
-            # TRON: projected-CG trust-region step with active-set tracking.
-            d = _tron_subproblem(v -> _hessmatvec(approx, v), g, x, lb, ub, Δ, τ)
-            d = _project(x, d, lb, ub)
-            if optimizer.tron_cauchy
-                d = _tron_cauchy_refine(d, v -> _hessmatvec(approx, v), g, x, lb, ub, Δ)
+            # Reference TRON (Lin-Moré, the JSOSolvers structure): the
+            # safeguarded projected-Cauchy starting point (α carried across
+            # iterations), projected CG on the free set with a
+            # reduced-gradient exit, a projected line search on the free
+            # face, and the TRONTrustRegion radius rules. Works with every
+            # curvature model (first-order quasi-Newton and exact-Hessian).
+            Hv = v -> begin
+                Hv0 = _hessmatvec(approx, v)
+                Hv0 .+ τ .* v
             end
+            αC, sC = _tron_cauchy(x, g, Hv, Δ, αC, lb, ub)
+            d, _ = _tron_pcg(
+                x, g, Hv, Δ, cgtol, sC, lb, ub; max_cgiter=optimizer.cg_maxiter
+            )
+            d = _project(x, d, lb, ub)
             norm(d) < 1e-12 && break
             xnew = x .+ d
             fnew = fobj(xnew)
             ared = fx - fnew
-            pred = -(dot(g, d) + dot(d, _hessmatvec(approx, d)) / 2)
+            slope = dot(g, d)
+            pred = -(slope + dot(d, _hessmatvec(approx, d)) / 2)
             push!(merits, fx)
             length(merits) > M && popfirst!(merits)
             fref = maximum(merits)
+            ratio = pred > 0 ? ared / pred : -Inf
+            s_norm = norm(d)
+            # first successful step: shrink the radius to the step norm
+            # (the reference's first-success rule), then the four-case
+            # Lin-Moré update on every iteration
+            num_success == 0 && pred > 0 && ratio >= 1e-4 && (Δ = min(Δ, s_norm))
+            γ = fnew - fx - slope
+            αq = γ <= 0 ? 4.0 : max(0.25, -slope / (2γ))
+            Δ = _tron_radius(Δ, ratio, s_norm, αq)
             if pred > 0 &&
-                (ared / pred > 0.1 || (optimizer.nonmonotone && fnew < fref - 1e-2 * pred))
+                (ratio >= 1e-4 || (optimizer.nonmonotone && fnew < fref - 1e-2 * pred))
                 s = d
                 y = copy(gradfun(xnew)) .- g
                 update!(approx, s, y, x, xnew)
                 x .= xnew
                 fx = fnew
                 g .= gradfun(x)
+                num_success += 1
                 stopnorm = if optimizer.projected_stop
                     _projected_gnorm(g, x, lb, ub)
                 else
                     norm(g, Inf)
                 end
                 stopnorm < optimizer.tol && break
-                Δ = min(10Δ, optimizer.delta0 * 10)
                 τ = optimizer.levenberg ? max(τ / 2, 1e-10) : 0.0
             else
-                Δ = max(Δ / 2, 1e-10)
                 τ = optimizer.levenberg ? min(τ * 2, 1e4) : 0.0
             end
             continue
@@ -1177,6 +1212,245 @@ function _tron_truncate(d, p, x, lb, ub, free, Δ)
     τq = (-b + sqrt(disc)) / (2a)
     τ = min(τq, τb)
     return d .+ τ .* p
+end
+
+# ------------------------------------------------------------------
+# Reference TRON (Lin & Moré 1999), mirroring the JSOSolvers
+# implementation: a safeguarded projected-Cauchy starting point (with the
+# search parameter α carried across iterations), projected CG on the free
+# set with a reduced-gradient exit, a projected line search on the free
+# face, and the TRONTrustRegion radius rules.
+# ------------------------------------------------------------------
+
+function _project_step!(s, x, d, lb, ub, α)
+    @inbounds for i in eachindex(x)
+        s[i] = clamp(x[i] + α * d[i], lb[i], ub[i]) - x[i]
+    end
+    return s
+end
+
+# (brkmin, brkmax) of the breakpoints of x + αd against the bounds.
+function _breakpoints(x, d, lb, ub)
+    brkmin = Inf
+    brkmax = 0.0
+    @inbounds for i in eachindex(x)
+        step = if d[i] > 0 && x[i] < ub[i]
+            (ub[i] - x[i]) / d[i]
+        elseif d[i] < 0 && x[i] > lb[i]
+            (lb[i] - x[i]) / d[i]
+        else
+            continue
+        end
+        brkmin = min(brkmin, step)
+        brkmax = max(brkmax, step)
+    end
+    return brkmin, brkmax
+end
+
+# Model value and slope of the trust-region quadratic at the step s:
+# q(s) = g's + s'Hs/2; returns (q, slope), computing Hs via Hv.
+function _quad_model!(Hs, Hv, g, s)
+    Hs .= Hv(s)
+    slope = dot(g, s)
+    q = slope + dot(s, Hs) / 2
+    return q, slope
+end
+
+# Projected Cauchy point of the bounded trust-region subproblem (Lin-Moré):
+# s = P(x - αg) - x with the sufficient-decrease test q(s) ≤ μ₀ s'g and
+# ‖s‖ ≤ μ₁Δ, via interpolation/extrapolation of α (carried across
+# iterations as a warm start).
+function _tron_cauchy(x, g, Hv, Δ, α, lb, ub; μ0=1e-2, μ1=1.0, σ=10.0)
+    s = zeros(length(x))
+    Hs = similar(s)
+    _, brkmax = _breakpoints(x, .-g, lb, ub)
+    _project_step!(s, x, .-g, lb, ub, α)
+    # interpolate or extrapolate
+    s_norm = norm(s)
+    interp = if s_norm > μ1 * Δ
+        true
+    else
+        qs, slope = _quad_model!(Hs, Hv, g, s)
+        qs >= μ0 * slope
+    end
+    if interp
+        while true
+            α /= σ
+            _project_step!(s, x, .-g, lb, ub, α)
+            s_norm = norm(s)
+            if s_norm <= μ1 * Δ
+                qs, slope = _quad_model!(Hs, Hv, g, s)
+                qs < μ0 * slope && break
+            end
+            α < sqrt(nextfloat(0.0)) && break
+        end
+    else
+        αs = α
+        while α <= brkmax
+            α *= σ
+            _project_step!(s, x, .-g, lb, ub, α)
+            s_norm = norm(s)
+            if s_norm <= μ1 * Δ
+                qs, slope = _quad_model!(Hs, Hv, g, s)
+                qs <= μ0 * slope && (αs = α)
+            else
+                break
+            end
+        end
+        α = αs
+        _project_step!(s, x, .-g, lb, ub, α)
+    end
+    return α, s
+end
+
+# Reduced conjugate gradients on the free set:
+#   min ½w'(Z'HZ)w + g_free'w  s.t. ‖w‖ ≤ Δ,
+# with the boundary / negative-curvature / rtol exits; returns (w, status).
+function _reduced_cg(free, Hv, gfree, Δ, cgtol)
+    m = length(gfree)
+    w = zeros(m)
+    r = .-gfree
+    p = copy(r)
+    rr = dot(r, r)
+    gf0 = sqrt(rr)
+    gf0 < 1e-14 && return w, :optimal
+    for _ in 1:m
+        z = zeros(length(free))
+        z[free] .= p
+        Hp = (Hv(z))[free]
+        pHp = dot(p, Hp)
+        if pHp <= 0
+            # negative curvature: ride to the trust-region boundary
+            a = dot(p, p)
+            b = 2 * dot(w, p)
+            c = dot(w, w) - Δ^2
+            disc = max(b^2 - 4a * c, 0.0)
+            τ = (-b + sqrt(disc)) / (2a)
+            w .+= τ .* p
+            return w, :boundary
+        end
+        α = rr / pHp
+        wnew = w .+ α .* p
+        if dot(wnew, wnew) >= Δ^2
+            a = dot(p, p)
+            b = 2 * dot(w, p)
+            c = dot(w, w) - Δ^2
+            disc = max(b^2 - 4a * c, 0.0)
+            τ = (-b + sqrt(disc)) / (2a)
+            w .+= τ .* p
+            return w, :boundary
+        end
+        w .= wnew
+        r .-= α .* Hp
+        rrnew = dot(r, r)
+        sqrt(rrnew) <= cgtol * gf0 && return w, :optimal
+        p .= .-r .+ (rrnew / rr) .* p
+        rr = rrnew
+    end
+    return w, :maxit
+end
+
+# Projected line search along the CG direction on the free face: backtrack
+# from α = 1 with the sufficient-decrease test q(s) ≤ μ₀ s'g, bounded by
+# the face's breakpoints.
+function _tron_linesearch(xw, Hv, g, w, free, lb, ub; μ0=1e-2)
+    d = zeros(length(xw))
+    d[free] .= w
+    brkmin, _ = _breakpoints(xw, d, lb, ub)
+    α = 1.0
+    s = zeros(length(xw))
+    Hs = zeros(length(xw))
+    while α > brkmin
+        _project_step!(s, xw, d, lb, ub, α)
+        qs, slope = _quad_model!(Hs, Hv, g, s)
+        qs <= μ0 * slope && break
+        α /= 2
+    end
+    if α < 1 && α < brkmin
+        α = brkmin
+    end
+    # the step is always taken (the reference's unconditional final
+    # projection; the sufficient-decrease search only engages when the
+    # face breaks within (0, 1))
+    _project_step!(s, xw, d, lb, ub, α)
+    return s[free]
+end
+
+# Projected Newton (CG) on the free set of the bounded trust-region
+# subproblem, starting from the Cauchy step s: identify the active set,
+# run the reduced CG, take a projected line-search step on the face, and
+# exit on the reduced-gradient criterion ‖g_free‖ ≤ cgtol·‖g_free⁰‖.
+function _tron_pcg(x, g, Hv, Δ, cgtol, s, lb, ub; max_cgiter=nothing)
+    n = length(x)
+    maxit = max_cgiter === nothing ? n : min(n, max_cgiter)
+    Hs = similar(s)
+    Hs .= Hv(s)
+    exit_optimal = false
+    exit_pcg = false
+    exit_itmax = false
+    iters = 0
+    xw = x .+ s
+    @inbounds for i in 1:n
+        xw[i] = clamp(xw[i], lb[i], ub[i])
+    end
+    while !(exit_optimal || exit_pcg || exit_itmax)
+        # active-set identification (the reference's tolerance-based test)
+        free = Vector{Bool}(undef, n)
+        @inbounds for i in 1:n
+            δ = if -Inf < lb[i] < ub[i] < Inf
+                min(sqrt(eps(Float64)) * (ub[i] - lb[i]), sqrt(eps(Float64)))
+            else
+                sqrt(eps(Float64))
+            end
+            free[i] =
+                !((lb[i] == xw[i] == ub[i]) || (xw[i] <= lb[i] + δ) || (xw[i] >= ub[i] - δ))
+        end
+        any(free) || (exit_optimal=true; break)
+        gfree = (Hs .+ g)[free]
+        gfnorm = norm(gfree)
+        w, cgstatus = _reduced_cg(free, Hv, gfree, Δ, cgtol)
+        w = _tron_linesearch(xw, Hv, g, w, free, lb, ub)
+        s[free] .+= w
+        Hs .= Hv(s)
+        xw = x .+ s
+        @inbounds for i in 1:n
+            xw[i] = clamp(xw[i], lb[i], ub[i])
+        end
+        gfree2 = (Hs .+ g)[free]
+        if norm(gfree2) <= cgtol * gfnorm
+            exit_optimal = true
+        elseif cgstatus == :boundary
+            exit_pcg = true
+        elseif iters >= maxit
+            exit_itmax = true
+        end
+        iters += 1
+    end
+    status = if exit_optimal
+        "stationary point found"
+    elseif exit_itmax
+        "maximum number of iterations"
+    else
+        "on trust-region boundary"
+    end
+    return s, status
+end
+
+# Lin-Moré trust-region radius update (the TRONTrustRegion four-case
+# formula with the model-quadratic-based factor αq and the reference
+# thresholds/factors).
+function _tron_radius(
+    Δ, ratio, s_norm, αq, σ1=0.25, σ2=0.5, σ3=4.0, max_radius=1 / sqrt(eps(Float64))
+)
+    return if ratio < 1e-4
+        min(max(αq, σ1) * s_norm, σ2 * Δ)
+    elseif ratio < 0.25
+        max(σ1 * Δ, min(αq * s_norm, σ2 * Δ))
+    elseif ratio < 0.75
+        min(max_radius, max(σ1 * Δ, min(αq * s_norm, σ3 * Δ)))
+    else
+        min(max_radius, max(Δ, min(αq * s_norm, σ3 * Δ)))
+    end
 end
 
 # Whether the approximation already holds usable curvature for dimension `n`

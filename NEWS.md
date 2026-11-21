@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- **Reference TRON (opt-in)**: `globalization = :tron` now mirrors the
+  JSOSolvers Lin–Moré structure — a safeguarded projected-Cauchy
+  starting point (search parameter warm-started across iterations),
+  projected CG on the free set with a reduced-gradient exit (`cg_tol`,
+  default 0.1), a projected line search on the free face, and the
+  TRONTrustRegion radius rules — and works with every curvature model
+  (first-order quasi-Newton and exact-Hessian). Measured on the TopOpt
+  local-stress single-level solve: no completion within 13 min vs the
+  4.5 min `:trustregion` default (the per-step matvecs dominate on
+  FEA-heavy constraints), so the default stays `:trustregion`.
+- **Objective recovery (new default path)**: the accepted step's
+  objective is recovered from the AL value and the captured scaled
+  constraint values (`f = fscale·(L_ρ − penalty terms)`, Percival's
+  recovery) instead of re-evaluating `obj(x)` — one fewer objective
+  evaluation per outer iteration, and the violation norm reuses the
+  same capture (the hot path evaluates each relaxed constraint once).
+  Bit-for-bit trajectory-neutral on the TopOpt stress solve (266.9 vs
+  264.6 s, same design).
+- **Infeasibility detection (Percival's dual certificate)**:
+  `AugLagResult` gains a backward-compatible `status` field; once the
+  penalty is capped and the iterate is still infeasible, a vanishing
+  unit-weight penalty-part gradient certifies `status = :infeasible`
+  and stops the loop (classical quadratic mode).
+- **Perf nits**: the relaxed-constraint violation helpers take the
+  precomputed indices (no more `_subproblem` reconstruction per call),
+  and the JuMP Gauss-Newton term reuses its matvec buffer. A candidate
+  fix resetting η/ω on selective weight bumps was measured harmful on
+  the stress default (53% slower) and reverted.
+- **Adaptive subproblem tolerance extension for NonconvexUno**: the new
+  weak-dep extension sets Uno's `primal_tolerance`/`dual_tolerance`
+  from the subproblem tolerance schedule.
+
 - **Spectral penalty update (opt-in)**: `AugLagOptions(spectral_rho = true)`
   replaces the two-way penalty decrease on good steps with a spectral
   (Barzilai–Borwein) update of the dual step, `ρ ← ‖Δc‖²/⟨Δc, Δy⟩` from
