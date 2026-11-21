@@ -238,27 +238,11 @@ end
         x -> x[1] < 1 ? Inf : x[1]^2, [1.0], [-0.9], 1.0, [2.0]
     )
     @test res == (0.0, 1.0)
-    # TRON Cauchy refine, fallback only: a degenerate CG step (d = 0) makes
-    # less than half the Cauchy model decrease with B = I, so the step is
-    # replaced by the Cauchy step (the path search cannot improve on it).
-    dref = NonconvexAugLagLab._tron_cauchy_refine(
-        zeros(2), v -> 1.0 .* v, [1.0, 1.0], [0.5, 0.5], [0.0, 0.0], [1.0, 1.0], 10.0
-    )
-    @test dref == [-0.5, -0.5]
-    # ... and with B = 1.5I the projected-path search shortens the Cauchy
-    # step further (the fallback and the replace branch both fire).
-    dref2 = NonconvexAugLagLab._tron_cauchy_refine(
-        zeros(2), v -> 3.0 .* v, [1.0, 1.0], [0.5, 0.5], [0.0, 0.0], [1.0, 1.0], 10.0
-    )
-    @test norm(dref2 - [-0.375, -0.375]) < 1e-12
-    # TRON + Cauchy fallback / projected-path search.
+    # reference TRON: the box-constrained quadratic converges from a
+    # corner-ish start (the Cauchy + projected CG path).
     m3 = Model(x -> (x[1] - 1)^2 + 2 * (x[2] - 2)^2)
     addvar!(m3, [0.0, 0.0], [1.0, Inf])
-    r3 = optimize(
-        m3,
-        QuasiNewtonAlg(; globalization=:tron, tron_cauchy=true, max_iter=500),
-        [0.1, 0.1],
-    )
+    r3 = optimize(m3, QuasiNewtonAlg(; globalization=:tron, max_iter=500), [0.1, 0.1])
     @test norm(r3.minimizer - [1.0, 2.0]) < 1e-4
     # Second-order corrections (rejected step, soc rescue).
     m4 = Model(x -> x[1]^4 - 2 * x[1]^2)
@@ -302,12 +286,11 @@ end
     @test d == [1.0, 1.0]
     # damped secant: nonpositive sᵀBs returns y unchanged.
     @test NonconvexAugLagLab._damped_secant([1.0], [1.0], [-1.0]) == [1.0]
-    # TRON negative curvature: a negative-definite model rides to the
-    # trust-region boundary.
-    dneg = NonconvexAugLagLab._tron_subproblem(
-        v -> -v, [1.0], [0.0], [-10.0], [10.0], 10.0, 0.0
-    )
-    @test norm(dneg) ≈ 10.0
+    # reference TRON negative curvature: a negative-definite model rides
+    # to the trust-region boundary in the reduced CG
+    wneg, negstatus = NonconvexAugLagLab._reduced_cg([true], v -> -v, [1.0], 10.0, 0.1)
+    @test negstatus == :boundary
+    @test norm(wneg) ≈ 10.0
 end
 
 @testitem "QuasiNewtonAlg: preconditioned Steihaug CG under the trust region" begin
@@ -380,20 +363,28 @@ end
 
 @testitem "QuasiNewtonAlg: hybrid curvature JuMP exact-Jacobian terms" begin
     using NonconvexAugLagLab, Test, LinearAlgebra, JuMP, NonconvexCore
-    # a JuMP-converted model converges under the hybrid curvature with the
-    # exact sparse Jacobian matvecs
+    # a JuMP-converted model with a NONLINEAR (quadratic) constraint
+    # converges under the hybrid curvature: the exact sparse Jacobian
+    # matvecs (JumpGaussNewtonTerm) engage, and with the second-order
+    # labels the exact mu-weighted curvature (JumpLagrangianTerm) does too.
     jm = JuMP.Model()
     JuMP.@variable(jm, -5 <= x[1:2] <= 5)
     JuMP.@objective(jm, Min, sum(x .^ 2))
-    JuMP.@constraint(jm, x[1] + x[2] == 1)
+    JuMP.@NLconstraint(jm, x[1]^2 + x[2] == 1)
     JuMP.@constraint(jm, x[1] <= 0.9)
     dm = NonconvexCore.DictModel(jm)
     x0 = NonconvexCore.getinit(dm)
     r = optimize(
-        dm, AugLagAlg(), x0; options=AugLagOptions(; max_iter=200, curvature=:hybrid)
+        dm,
+        AugLagAlg(),
+        x0;
+        options=AugLagOptions(;
+            max_iter=200, curvature=:hybrid, second_order=SecondOrderSelection()
+        ),
     )
     xv = r.minimizer[:x]
-    @test norm(xv - [0.5, 0.5]) < 1e-4
+    @test abs(xv[1]^2 + xv[2] - 1) < 1e-3
+    @test xv[1] <= 0.9 + 1e-6
 end
 
 @testitem "QuasiNewtonAlg: hybrid JumpLagrangianTerm exact mu-weighted curvature" begin
@@ -523,4 +514,106 @@ end
     end
     @test NAL._tron_radius(1.0, 0.0, 0.5, 4.0) <= 1.0
     @test NAL._tron_radius(1.0, 0.9, 0.5, 4.0) >= 1.0
+end
+
+@testitem "QuasiNewtonAlg: composite/split/fdgrad internals" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra
+    const NAL = NonconvexAugLagLab
+    # CompositeHessianApprox: reset! and the QN inverse as solve!
+    qn = NAL.LBFGSApprox(5)
+    comp = NAL.CompositeHessianApprox(qn, x -> ())
+    NAL.init!(comp, 2, zeros(2))
+    d = zeros(2)
+    NAL.solve!(d, comp, [1.0, -0.5])
+    @test d == [1.0, -0.5]  # identity base operator
+    NAL.reset!(comp)
+    @test isempty(comp.qn.s)
+    # SplitSecantApprox: solve!/apply!/reset! routing
+    rem = NAL.LBFGSApprox(2)
+    pen = NAL.LBFGSApprox(2)
+    φgrad = x -> [2x[1], 0.0]
+    split = NAL.SplitSecantApprox(rem, pen, φgrad)
+    NAL.init!(split, 2, zeros(2))
+    NAL.update!(split, [0.5, 0.0], [1.0, 0.0], [0.0, 0.0], [0.5, 0.0])
+    # the penalty model carries phi's exact secant pair
+    @test split.qn_pen.y[1] ≈ [1.0, 0.0]
+    # solve! delegates to the penalty model (the preconditioner)
+    dd = zeros(2)
+    NAL.solve!(dd, split, [2.0, 0.0])
+    @test dd == [1.0, 0.0]  # two-loop with the pair: H0=I, one pair
+    # apply! sums the two models
+    Bv = zeros(2)
+    NAL.apply!(Bv, split, [1.0, 1.0])
+    @test length(Bv) == 2
+    NAL.reset!(split)
+    @test isempty(split.qn_rem.s) && isempty(split.qn_pen.s)
+    # FDGradHessianApprox: one-sided finite difference of the gradient
+    f = x -> (x[1] - 1)^2 + 2 * x[2]^2
+    grad = x -> [2(x[1] - 1), 4x[2]]
+    H = NAL.FDGradHessianApprox(grad)
+    NAL.init!(H, 2, [0.3, -0.2])
+    NAL._rebind_terms!(H, [0.3, -0.2], grad([0.3, -0.2]))
+    Hv = zeros(2)
+    NAL.apply!(Hv, H, [1.0, 0.5])
+    @test Hv ≈ [2.0, 2.0] atol = 1e-5  # H = diag(2, 4)
+    @test NAL._is_newton(H)
+    NAL.reset!(H)
+    @test isempty(H.x) == false  # reset keeps the allocation
+    dd = zeros(2)
+    NAL.solve!(dd, H, [1.0, 2.0])
+    @test dd == [1.0, 2.0]  # solve! copies the gradient (steepest descent)
+    # the generic _initialized fallback serves approximation types without
+    # their own warm-start state
+    struct _BareApprox <: NAL.AbstractHessianApprox end
+    @test NAL._initialized(_BareApprox(), 2) == false
+    # the L-BFGS two-loop serves as the Steihaug preconditioner
+    P = NAL.LBFGSApprox(3)
+    NAL.init!(P, 2, zeros(2))
+    z = zeros(2)
+    NAL.LinearAlgebra.ldiv!(z, P, [1.0, -0.5])
+    @test z == [1.0, -0.5]
+    dpre, _ = NAL._steihaug(P, [1.0, -0.5], 10.0, 0.0, P)
+    @test dot([1.0, -0.5], dpre) < 0
+end
+
+@testitem "QuasiNewtonAlg: reference TRON line search and iteration-cap exits" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra
+    const NAL = NonconvexAugLagLab
+    # 1D line-search branches: with B = 2I the full step satisfies the
+    # sufficient-decrease test and breaks immediately
+    wfull = NAL._tron_linesearch([0.5], v -> 2.0 .* v, [1.0], [-1.0], [true], [0.0], [10.0])
+    @test wfull == [-0.5]
+    # with B = 10I the decrease fails until the backtrack crosses the
+    # breakpoint (brkmin = 0.3): the fallback clamps the step to it
+    wbrk = NAL._tron_linesearch([0.5], v -> 10.0 .* v, [1.0], [-1.0], [true], [0.2], [10.0])
+    @test wbrk ≈ [-0.3] atol = 1e-12
+    # the PCG with a tiny iteration cap and an unconverged CG takes the
+    # exit_itmax path (nonlinear matvecs keep the reduced CG from
+    # converging in its sweep)
+    Hvnl = v -> [v[1] + 0.01 * v[2]^2, v[2] + 0.01 * v[1]^2]
+    s, status = NAL._tron_pcg(
+        [0.0, 0.0],
+        [1.0, 1.0],
+        Hvnl,
+        10.0,
+        0.0,
+        zeros(2),
+        [-10.0, -10.0],
+        [10.0, 10.0];
+        max_cgiter=0,
+    )
+    @test status == "maximum number of iterations"
+    # and an unconstrained quadratic exits with the stationary status
+    s2, status2 = NAL._tron_pcg(
+        [1.0, 1.0],
+        [1.0, 0.5],
+        v -> 2.0 .* v,
+        10.0,
+        0.1,
+        zeros(2),
+        [-10.0, -10.0],
+        [10.0, 10.0],
+    )
+    @test status2 == "stationary point found"
+    @test dot([1.0, 0.5], s2) < 0
 end

@@ -170,7 +170,6 @@ function apply!(Bv, H::CompositeHessianApprox, v)
     end
     return Bv
 end
-_initialized(H::CompositeHessianApprox, n) = _initialized(H.qn, n)
 _initialized(H::CompositeHessianApprox, n::Int) = _initialized(H.qn, n)
 
 """
@@ -215,9 +214,6 @@ function apply!(Bv, H::SplitSecantApprox, v)
     apply!(Bv2, H.qn_pen, v)
     Bv .+= Bv2
     return Bv
-end
-function _initialized(H::SplitSecantApprox, n)
-    return _initialized(H.qn_rem, n) && _initialized(H.qn_pen, n)
 end
 function _initialized(H::SplitSecantApprox, n::Int)
     return _initialized(H.qn_rem, n) && _initialized(H.qn_pen, n)
@@ -709,7 +705,6 @@ struct QuasiNewtonAlg{A<:AbstractHessianApprox} <: AbstractOptimizer
     nonmonotone::Bool
     soc::Bool
     levenberg::Bool
-    tron_cauchy::Bool
     projected_stop::Bool
     cg_tol::Union{Nothing,Real}
     cg_maxiter::Union{Nothing,Int}
@@ -744,7 +739,6 @@ function QuasiNewtonAlg(
     nonmonotone::Bool=false,
     soc::Bool=false,
     levenberg::Bool=true,
-    tron_cauchy::Bool=false,
     projected_stop::Bool=true,
     cg_tol=nothing,
     cg_maxiter=nothing,
@@ -768,7 +762,6 @@ function QuasiNewtonAlg(
         nonmonotone,
         soc,
         levenberg,
-        tron_cauchy,
         projected_stop,
         cg_tol,
         cg_maxiter,
@@ -1087,131 +1080,6 @@ function optimize!(workspace::QuasiNewtonWorkspace)
         nothing,
         counter[],
     )
-end
-
-# Projected Cauchy point of the bounded trust-region subproblem (the
-# steepest-descent step clipped to the box and the radius; Conn-Gould-Toint
-# §9). Used by TRON's optional fallback.
-function _box_cauchy(g, x, lb, ub, Δ)
-    n = length(g)
-    gp = copy(g)
-    for i in 1:n
-        (x[i] <= lb[i] && g[i] > 0) && (gp[i] = 0.0)
-        (x[i] >= ub[i] && g[i] < 0) && (gp[i] = 0.0)
-    end
-    nrm = norm(gp)
-    nrm < 1e-14 && return zeros(n)
-    τ = min(1.0, Δ / nrm)
-    d = similar(x)
-    for i in 1:n
-        d[i] = clamp(x[i] - τ * gp[i], lb[i], ub[i]) - x[i]
-    end
-    return d
-end
-
-# Lin-Moré safeguard for TRON: if the projected-CG step achieves less than
-# half the projected-Cauchy model decrease, fall back to the Cauchy step,
-# then try shorter steps along the projected path.
-function _tron_cauchy_refine(d, Bv, g, x, lb, ub, Δ)
-    modeldec(dd) = -(dot(g, dd) + dot(dd, Bv(dd)) / 2)
-    dC = _box_cauchy(g, x, lb, ub, Δ)
-    mC = modeldec(dC)
-    mCG = modeldec(d)
-    if mCG < 0.5 * mC
-        d = dC
-        mCG = mC
-    end
-    for α in (0.75, 0.5, 0.25)
-        dα = _project(x, α .* d, lb, ub)
-        mα = modeldec(dα)
-        if mα > mCG
-            d = dα
-            mCG = mα
-        end
-    end
-    return d
-end
-
-# TRON (Lin & Moré 1999): projected conjugate gradients on the free-variable
-# subspace of the bounded trust-region subproblem
-#   min gᵀd + ½ dᵀ(B + τI)d   s.t.  ‖d‖ ≤ Δ  and  l ≤ x + d ≤ u.
-# Variables that hit a bound during the CG sweep are fixed for the rest of
-# the sweep (active-set identification).
-function _tron_subproblem(Bv, g, x, lb, ub, Δ, τ)
-    n = length(g)
-    d = zeros(n)
-    free = trues(n)
-    gp = copy(g)
-    for i in 1:n
-        (x[i] <= lb[i] && g[i] > 0) && (gp[i] = 0.0)
-        (x[i] >= ub[i] && g[i] < 0) && (gp[i] = 0.0)
-    end
-    r = copy(gp)
-    p = .-gp
-    rr = dot(r, r)
-    rr < 1e-20 && return d
-    for _ in 1:n
-        Bp = Bv(p)
-        Bp .+= τ .* p
-        pBp = dot(p, Bp)
-        if pBp <= 0
-            # Negative curvature: ride p to the trust-region boundary (or a
-            # bound, whichever comes first).
-            return _tron_truncate(d, p, x, lb, ub, free, Δ)
-        end
-        α = rr / pBp
-        t = α
-        for i in 1:n
-            free[i] || continue
-            p[i] == 0 && continue
-            t = min(
-                t, p[i] > 0 ? (ub[i] - x[i] - d[i]) / p[i] : (lb[i] - x[i] - d[i]) / p[i]
-            )
-        end
-        dnew = d .+ t .* p
-        if dot(dnew, dnew) >= Δ^2
-            return _tron_truncate(d, p, x, lb, ub, free, Δ)
-        end
-        d .= dnew
-        r .+= t .* Bp
-        # fix variables that reached a bound and zero their residual
-        hitbound = false
-        for i in 1:n
-            free[i] || continue
-            if (x[i] + d[i] <= lb[i] + 1e-12 || x[i] + d[i] >= ub[i] - 1e-12)
-                free[i] = false
-                r[i] = 0.0
-                hitbound = true
-            end
-        end
-        rnew2 = dot(r, r)
-        rnew2 < 1e-20 && return d
-        β = rnew2 / rr
-        rr = rnew2
-        p .= .-r .+ β .* p
-        for i in 1:n
-            free[i] || (p[i] = 0.0)
-        end
-    end
-    return d
-end
-
-# Largest step along p from d that stays inside the bounds and reaches the
-# trust-region boundary.
-function _tron_truncate(d, p, x, lb, ub, free, Δ)
-    τb = Inf
-    for i in eachindex(p)
-        free[i] || continue
-        p[i] == 0 && continue
-        τb = min(τb, p[i] > 0 ? (ub[i] - x[i] - d[i]) / p[i] : (lb[i] - x[i] - d[i]) / p[i])
-    end
-    a = dot(p, p)
-    b = 2 * dot(d, p)
-    c = dot(d, d) - Δ^2
-    disc = max(b^2 - 4a * c, 0.0)
-    τq = (-b + sqrt(disc)) / (2a)
-    τ = min(τq, τb)
-    return d .+ τ .* p
 end
 
 # ------------------------------------------------------------------

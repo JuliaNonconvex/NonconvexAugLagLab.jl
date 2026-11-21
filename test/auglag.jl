@@ -78,6 +78,25 @@ end
     @test r.minimum ≈ 0.5 atol = 1e-4
     # hard_rho must be positive
     @test_throws ArgumentError AugLagOptions(hard_rho=0.0)
+    # the penalty closure's inequality branch (with an active row)
+    φ = NonconvexAugLagLab._penalty_closure(
+        [], [x -> [x[1] - 0.5, x[2] + 1.0]], [], [1.0], 10.0
+    )
+    @test φ([1.0, 0.0]) ≈ 5.0 * 1.25
+    # keeping the EQUALITY hard exercises the kept-eq penalty branch
+    m2 = Model(x -> sum(x .^ 2))
+    addvar!(m2, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m2, x -> x[1] + x[2] - 1)
+    add_ineq_constraint!(m2, x -> [x[1] - 0.9], [0.0])
+    r2 = optimize(
+        m2,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options=AugLagOptions(;
+            max_iter=200, relaxed=RelaxConstraintSelection(eq=false, ineq=true)
+        ),
+    )
+    @test norm(r2.minimizer - [0.5, 0.5]) < 1e-3
 end
 
 @testitem "AugLagAlg: keep_all trajectory" begin
@@ -356,6 +375,19 @@ end
     r = optimize(m, AugLagAlg(), x0; options=AugLagOptions(max_iter=40, outer_schedule=:bm))
     @test norm(r.minimizer - [0.5, 0.5]) < 5e-2
     @test_throws ArgumentError AugLagOptions(outer_schedule=:foo)
+end
+
+@testitem "AugLagAlg: watchdog accept path updates the recursive mean" begin
+    using NonconvexAugLagLab, Test
+    # a well-behaved solve takes only merit-decreasing steps: the watchdog
+    # reference is updated from the first accepted step onward
+    m = Model(x -> (x[1] - 1.0)^2 + (x[2] - 2.0)^2)
+    addvar!(m, [0.0, 0.0], [5.0, 5.0])
+    add_ineq_constraint!(m, x -> [x[1] - 1.5, x[2] - 2.5], [0.0, 0.0])
+    r = optimize(
+        m, AugLagAlg(), [0.0, 0.0]; options=AugLagOptions(; max_iter=100, watchdog=true)
+    )
+    @test norm(r.minimizer - [1.0, 2.0]) < 1e-4
 end
 
 @testitem "AugLagAlg: watchdog safety net rejects merit-increasing subproblem steps" begin
@@ -1129,4 +1161,92 @@ end
     @test r.status == :infeasible
     # the backward-compatible 4-arg result constructor keeps working
     @test AugLagResult([0.0], 0.0, nothing, nothing).status == :unknown
+end
+
+@testitem "AugLagAlg: second-order label selection paths" begin
+    using NonconvexAugLagLab, Test
+    const NAL = NonconvexAugLagLab
+    # a single Symbol label and a collection of labels both parse
+    s1 = NAL.SecondOrderSelection(labels=:second_order)
+    @test s1.labels == Set([:second_order])
+    s2 = NAL.SecondOrderSelection(labels=[:a, "b"])
+    @test s2.labels == Set([:a, :b])
+    # per-kind boolean and index-vector selections
+    @test NAL._so_selected(true, 3, 5)
+    @test !NAL._so_selected(false, 3, 5)
+    @test NAL._so_selected([1, 3], 3, 5)
+    @test !NAL._so_selected([1, 3], 2, 5)
+    # label matching against constraint flags
+    m = Model(x -> sum(x .^ 2))
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1; flags=[:second_order])
+    add_ineq_constraint!(m, x -> x[1] - 0.5)
+    vm, _, _ = NonconvexCore.tovecmodel(m, [0.0, 0.0])
+    eq_rel, ineq_rel, _, _ = NAL._subproblem(vm, NAL.RelaxConstraintSelection(), nothing)
+    so_eq, so_ineq = NAL._second_order_flags(
+        NAL.SecondOrderSelection(eq=false, ineq=false, labels=[:second_order]),
+        vm,
+        eq_rel,
+        ineq_rel,
+    )
+    @test so_eq == [true]
+    @test so_ineq == [false]
+    # the vector form selects the second inequality group only
+    so_eq2, so_ineq2 = NAL._second_order_flags(
+        NAL.SecondOrderSelection(eq=[1], ineq=[2]), vm, eq_rel, ineq_rel
+    )
+    @test so_eq2 == [true]
+    @test so_ineq2 == [false]
+    # the defensive fallback rejects anything else
+    @test !NAL._so_selected(:bogus, 1, 3)
+end
+
+@testitem "AugLagAlg: split and fdgrad curvature modes end-to-end" begin
+    using NonconvexAugLagLab, Test
+    for curv in (:split, :fdgrad)
+        m = Model(x -> sum(x .^ 2))
+        addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+        add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+        add_ineq_constraint!(m, x -> [x[1] - 0.9], [0.0])
+        r = optimize(
+            m,
+            AugLagAlg(),
+            [0.0, 0.0];
+            options=AugLagOptions(; max_iter=200, curvature=curv),
+        )
+        @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
+    end
+    # the split/fdgrad modes reject non-quadratic penalties at solve time
+    m2 = Model(x -> sum(x .^ 2))
+    addvar!(m2, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m2, x -> x[1] + x[2] - 1)
+    @test_throws ArgumentError optimize(
+        m2,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options=AugLagOptions(; max_iter=5, curvature=:split, penalty=:pbm),
+    )
+    @test_throws ArgumentError optimize(
+        m2,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options=AugLagOptions(; max_iter=5, curvature=:fdgrad, penalty=:mixed),
+    )
+end
+
+@testitem "AugLagAlg: warm continuation of the hybrid and split curvature" begin
+    using NonconvexAugLagLab, Test
+    for curv in (:hybrid, :split)
+        m = Model(x -> sum(x .^ 2))
+        addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+        add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+        opts = AugLagOptions(; max_iter=50, curvature=curv, warm_continue=true)
+        vm, x0f, _ = NonconvexCore.tovecmodel(m, [0.0, 0.0])
+        ws = Workspace(vm, AugLagAlg(), x0f; options=opts)
+        r1 = NonconvexCore.optimize!(ws)
+        # the second solve reuses the SAME workspace (the warm rebuild path)
+        r2 = NonconvexCore.optimize!(ws)
+        @test norm(r1.minimizer - [0.5, 0.5]) < 1e-4
+        @test norm(r2.minimizer - [0.5, 0.5]) < 1e-4
+    end
 end

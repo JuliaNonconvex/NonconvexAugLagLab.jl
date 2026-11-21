@@ -684,7 +684,6 @@ mutable struct AugLagOptions{S,R,W}
     restore_tol_mode::Symbol
     restore_prox::Real
     pbm_adaptive::Bool
-    tron_cauchy::Bool
     keep_all::Bool
 end
 function AugLagOptions(;
@@ -749,7 +748,6 @@ function AugLagOptions(;
     restore_tol_mode::Symbol=:relative,
     restore_prox::Real=0.0,
     pbm_adaptive::Bool=false,
-    tron_cauchy::Bool=false,
     keep_all::Bool=false,
 )
     penalty in (:quadratic, :pbm, :mixed, :logdet, :mixed_logdet) || throw(
@@ -854,7 +852,6 @@ function AugLagOptions(;
         restore_tol_mode,
         restore_prox,
         pbm_adaptive,
-        tron_cauchy,
         keep_all,
     )
 end
@@ -975,21 +972,6 @@ end
 # ------------------------------------------------------------------
 _vecval(v::Number) = [v]
 _vecval(v::AbstractVector) = vec(v)
-
-function _relaxed_violation(model, sel, x)
-    eq_rel, ineq_rel, sd_rel, _ = _subproblem(model, sel, nothing)
-    v = Float64[]
-    for i in eq_rel
-        append!(v, abs.(_vecval(model.eq_constraints.fs[i](x))))
-    end
-    for i in ineq_rel
-        append!(v, max.(_vecval(model.ineq_constraints.fs[i](x)), 0.0))
-    end
-    for i in sd_rel
-        append!(v, _sd_violation(model, i, x))
-    end
-    return v
-end
 
 # Extension hook (overridden by NonconvexAugLagLabSDPExt)
 function _sd_violation(model, i, x)
@@ -1700,7 +1682,7 @@ function optimize!(workspace::AugLagWorkspace)
     watchdog_tau = Float64(options.watchdog_tau)
     watchdog_tol = Float64(options.watchdog_tol)
     levenberg = options.levenberg
-    @unpack h0, sub_tol_schedule, tron_cauchy = options
+    @unpack h0, sub_tol_schedule = options
     hard_rho = Float64(options.hard_rho)
     sub_tol_rel = Float64(options.sub_tol_rel)
     first_sub_tol =
@@ -2328,7 +2310,6 @@ function optimize!(workspace::AugLagWorkspace)
                     globalization=qn_globalization,
                     reset=qn_reset,
                     levenberg=levenberg,
-                    tron_cauchy=tron_cauchy,
                     nonmonotone=qn_nonmonotone,
                     soc=qn_soc,
                     projected_stop=qn_projected_stop,
@@ -2349,7 +2330,6 @@ function optimize!(workspace::AugLagWorkspace)
                         globalization=qn_globalization,
                         reset=qn_reset,
                         levenberg=levenberg,
-                        tron_cauchy=tron_cauchy,
                         nonmonotone=qn_nonmonotone,
                         soc=qn_soc,
                         projected_stop=qn_projected_stop,
@@ -2430,7 +2410,6 @@ function optimize!(workspace::AugLagWorkspace)
                         globalization=qn_globalization,
                         reset=qn_reset,
                         levenberg=levenberg,
-                        tron_cauchy=tron_cauchy,
                         nonmonotone=qn_nonmonotone,
                         soc=qn_soc,
                         projected_stop=qn_projected_stop,
