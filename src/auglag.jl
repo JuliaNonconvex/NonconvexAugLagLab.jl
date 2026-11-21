@@ -246,6 +246,22 @@ end
   objective (0.198 vs 0.163) with a 3× larger stress violation — the
   faster variant is not close enough in accuracy there, so `:penalty`
   stays the default.
+- `hard_rho`: the penalty weight (default `1e3`, must be positive) for
+  constraints *kept hard* with the built-in sub-solver
+  (`AugLagAlg()` with a partially-relaxing `RelaxConstraintSelection`):
+  the kept equality/inequality constraints are folded into the
+  subproblem objective as the smooth quadratic penalty
+  `hard_rho/2·(‖c‖² + ‖g⁺‖²)` (the ALM-for-relaxed / penalty-for-kept
+  split) and removed from the submodel so the box-only quasi-Newton
+  solver accepts it; the kept constraints' feasibility is traded against
+  `hard_rho` (large values drive their violation to zero). External
+  sub-solvers receive the kept constraints natively instead. Measured on
+  the TopOpt local-stress single-level solve with the stress constraints
+  kept hard: converges in one outer iteration (132.7 s) but leaves the
+  expected `hard_rho` residual — max solid stress 5.7e-4 over the
+  threshold at a 2.2× heavier design; the relaxed ALM is strictly better
+  there, this path is for problems with a cheap-hard/expensive-soft
+  split.
 - `watchdog`, `watchdog_tau`, `watchdog_tol`: Birgin–Martínez-style
   nonmonotone outer acceptance (default `false`). When enabled, a step is
   accepted only if its AL merit does not exceed the recursive-mean reference
@@ -474,6 +490,7 @@ mutable struct AugLagOptions{S,R,W}
     two_way::Bool
     levenberg::Bool
     h0::Symbol
+    hard_rho::Real
     sub_tol_schedule::Symbol
     sub_tol_rel::Real
     first_sub_tol::Union{Nothing,Real}
@@ -531,6 +548,7 @@ function AugLagOptions(;
     two_way::Bool=true,
     levenberg::Bool=true,
     h0::Symbol=:penalty,
+    hard_rho::Real=1e3,
     sub_tol_schedule::Symbol=:eta,
     sub_tol_rel::Real=0.1,
     first_sub_tol=1e-6,
@@ -573,6 +591,7 @@ function AugLagOptions(;
     rho_init > 0 || throw(ArgumentError("rho_init must be positive"))
     rho_incr > 1 || throw(ArgumentError("rho_incr must be > 1"))
     rho_decr > 1 || throw(ArgumentError("rho_decr must be > 1"))
+    hard_rho > 0 || throw(ArgumentError("hard_rho must be positive"))
     0 < watchdog_tau < 1 || throw(ArgumentError("watchdog_tau must be in (0, 1)"))
     watchdog_tol >= 0 || throw(ArgumentError("watchdog_tol must be non-negative"))
     anderson_depth >= 1 || throw(ArgumentError("anderson_depth must be >= 1"))
@@ -621,6 +640,7 @@ function AugLagOptions(;
         two_way,
         levenberg,
         h0,
+        hard_rho,
         sub_tol_schedule,
         sub_tol_rel,
         first_sub_tol,
@@ -678,21 +698,18 @@ function Workspace(
 )
     if optimizer.sub_alg === nothing
         sel = options.relaxed
-        nrelax =
-            length(_relaxed_indices(sel.eq, model.eq_constraints, sel.labels)) +
-            length(_relaxed_indices(sel.ineq, model.ineq_constraints, sel.labels)) +
-            length(_relaxed_indices(sel.sd, model.sd_constraints, sel.labels))
-        ntotal =
-            length(model.eq_constraints.fs) +
-            length(model.ineq_constraints.fs) +
-            length(model.sd_constraints.fs)
-        nrelax == ntotal || throw(
+        nsd = length(_relaxed_indices(sel.sd, model.sd_constraints, sel.labels))
+        ntotal_sd = length(model.sd_constraints.fs)
+        nsd == ntotal_sd || throw(
             ArgumentError(
-                "AugLagAlg() uses the built-in QuasiNewtonAlg which only handles " *
-                "unconstrained/box-constrained subproblems; relax every constraint " *
-                "(`relaxed = RelaxConstraintSelection()`), or pass a sub_alg.",
+                "AugLagAlg() cannot keep semidefinite constraints hard for the " *
+                "built-in QuasiNewtonAlg; relax them (`RelaxConstraintSelection(sd = true)`) " *
+                "or pass a sub_alg.",
             ),
         )
+        # kept (non-relaxed) equality/inequality constraints are allowed:
+        # they are folded into the built-in subproblem as a smooth quadratic
+        # penalty with weight hard_rho (see the hard_rho option).
     end
     return AugLagWorkspace(model, copy(x0), options, optimizer.sub_alg, nothing)
 end
@@ -963,6 +980,28 @@ function _auglag_objective_scaled(
         return target
     end
     return _objective
+end
+
+# Smooth quadratic penalty over the KEPT (non-relaxed) constraints, folded
+# into the built-in quasi-Newton subproblem objective with weight hard_rho
+# (the ALM-for-relaxed / penalty-for-kept split; the kept constraints are
+# then removed from the submodel so the box-only solver accepts it). The
+# feasibility of the kept constraints is traded against hard_rho (an exact
+# penalty argument: large hard_rho drives their violation to zero).
+function _hard_penalty_objective(obj, kept_eq, kept_ineq, hard_rho, n)
+    return z -> begin
+        v = obj(z)
+        x = length(z) == n ? z : @view(z[1:n])
+        for c in kept_eq.fs
+            cv = _vecval(c(x))
+            v += (hard_rho / 2) * dot(cv, cv)
+        end
+        for c in kept_ineq.fs
+            gv = max.(_vecval(c(x)), 0.0)
+            v += (hard_rho / 2) * dot(gv, gv)
+        end
+        return v
+    end
 end
 
 # Violation measure of the relaxed constraints on the scaled functions.
@@ -1243,6 +1282,7 @@ function optimize!(workspace::AugLagWorkspace)
     watchdog_tol = Float64(options.watchdog_tol)
     levenberg = options.levenberg
     @unpack h0, sub_tol_schedule, tron_cauchy = options
+    hard_rho = Float64(options.hard_rho)
     sub_tol_rel = Float64(options.sub_tol_rel)
     first_sub_tol =
         options.first_sub_tol === nothing ? nothing : Float64(options.first_sub_tol)
@@ -1634,48 +1674,73 @@ function optimize!(workspace::AugLagWorkspace)
                 )
             end
         al_obj = build_al(sd_terms)
+        # The built-in quasi-Newton solver handles only box-constrained
+        # subproblems: kept (non-relaxed) constraints are folded into its
+        # objective as a smooth quadratic penalty with weight hard_rho
+        # (the ALM-for-relaxed / penalty-for-kept split). External
+        # sub-solvers receive the kept constraints natively instead.
+        use_hard_penalty =
+            sub_alg === nothing && (
+                !isempty(submodel0.eq_constraints.fs) ||
+                !isempty(submodel0.ineq_constraints.fs)
+            )
+        no_eq = VectorOfFunctions(NonconvexCore.EqConstraint[])
+        no_ineq = VectorOfFunctions(NonconvexCore.IneqConstraint[])
         make_submodel =
-            o -> if use_elastic
-                VecModel(
-                    Objective(o),
-                    submodel0.eq_constraints,
-                    submodel0.ineq_constraints,
-                    submodel0.sd_constraints,
-                    [submodel0.box_min; fill(-1e3, m_eq)],
-                    [submodel0.box_max; fill(1e3, m_eq)],
-                    [submodel0.init; zeros(m_eq)],
-                    [submodel0.integer; falses(m_eq)],
-                )
-            elseif box_barrier
-                # Ipopt-style box barrier with hard projected bounds: the
-                # barrier smooths the merit near the boundary while the
-                # projection enforces it (fraction-to-boundary at tau = 1), so
-                # the iterate can never leave the box - no soft-bounds bias.
-                VecModel(
-                    Objective(
-                        _box_barrier_objective(
-                            o, submodel0.box_min, submodel0.box_max, μref[], δbar
+            o -> begin
+                wo = if use_hard_penalty
+                    _hard_penalty_objective(
+                        o,
+                        submodel0.eq_constraints,
+                        submodel0.ineq_constraints,
+                        Float64(hard_rho),
+                        n,
+                    )
+                else
+                    o
+                end
+                if use_elastic
+                    VecModel(
+                        Objective(wo),
+                        use_hard_penalty ? no_eq : submodel0.eq_constraints,
+                        use_hard_penalty ? no_ineq : submodel0.ineq_constraints,
+                        submodel0.sd_constraints,
+                        [submodel0.box_min; fill(-1e3, m_eq)],
+                        [submodel0.box_max; fill(1e3, m_eq)],
+                        [submodel0.init; zeros(m_eq)],
+                        [submodel0.integer; falses(m_eq)],
+                    )
+                elseif box_barrier
+                    # Ipopt-style box barrier with hard projected bounds: the
+                    # barrier smooths the merit near the boundary while the
+                    # projection enforces it (fraction-to-boundary at tau = 1), so
+                    # the iterate can never leave the box - no soft-bounds bias.
+                    VecModel(
+                        Objective(
+                            _box_barrier_objective(
+                                wo, submodel0.box_min, submodel0.box_max, μref[], δbar
+                            ),
                         ),
-                    ),
-                    submodel0.eq_constraints,
-                    submodel0.ineq_constraints,
-                    submodel0.sd_constraints,
-                    submodel0.box_min,
-                    submodel0.box_max,
-                    submodel0.init,
-                    submodel0.integer,
-                )
-            else
-                VecModel(
-                    Objective(o),
-                    submodel0.eq_constraints,
-                    submodel0.ineq_constraints,
-                    submodel0.sd_constraints,
-                    submodel0.box_min,
-                    submodel0.box_max,
-                    submodel0.init,
-                    submodel0.integer,
-                )
+                        use_hard_penalty ? no_eq : submodel0.eq_constraints,
+                        use_hard_penalty ? no_ineq : submodel0.ineq_constraints,
+                        submodel0.sd_constraints,
+                        submodel0.box_min,
+                        submodel0.box_max,
+                        submodel0.init,
+                        submodel0.integer,
+                    )
+                else
+                    VecModel(
+                        Objective(wo),
+                        use_hard_penalty ? no_eq : submodel0.eq_constraints,
+                        use_hard_penalty ? no_ineq : submodel0.ineq_constraints,
+                        submodel0.sd_constraints,
+                        submodel0.box_min,
+                        submodel0.box_max,
+                        submodel0.init,
+                        submodel0.integer,
+                    )
+                end
             end
         x_sub = use_elastic ? [x; zeros(m_eq)] : x
         al_sub = if prox > 0

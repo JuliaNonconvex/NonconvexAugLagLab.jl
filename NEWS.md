@@ -59,6 +59,18 @@
   tightening to the first `k` subproblems (default `1`, ≥ 1). Measured
   on the TopOpt single-level solve: `first_sub_iters = 2` is bit-for-bit
   inert — the basin is selected by the first solve alone.
+- **Hard constraints with the built-in sub-solver (new capability)**:
+  `AugLagAlg()` now accepts partially-relaxed problems: kept (non-relaxed)
+  equality/inequality constraints are folded into the built-in
+  quasi-Newton subproblem as a smooth quadratic penalty with the new
+  `hard_rho` option (default `1e3`, the ALM-for-relaxed /
+  penalty-for-kept split) instead of erroring; kept semidefinite
+  constraints still require an external sub-solver. Measured on the
+  TopOpt local-stress single-level solve with the stress constraints
+  kept hard: one outer iteration (132.7 s) with the expected hard_rho
+  residual (max solid stress 5.7e-4 over the threshold, 2.2× heavier
+  design) — the relaxed ALM is strictly better there; the path targets
+  problems with a cheap-hard/expensive-soft constraint split.
 - **Practical relative subproblem tolerance (opt-in)**:
   `AugLagOptions(sub_tol_schedule = :relative, sub_tol_rel = τ)` sets the
   inner tolerance proportional to the current constraint violation

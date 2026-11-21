@@ -58,13 +58,26 @@ end
     @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
 end
 
-@testitem "AugLagAlg: the built-in solver requires full relaxation" begin
+@testitem "AugLagAlg: hard constraints via the built-in penalty split" begin
     using NonconvexAugLagLab, Test, LinearAlgebra
+    # keeping the inequality hard folds it into the built-in subproblem as
+    # a quadratic penalty (hard_rho); the problem still converges.
     m = Model(x -> sum(x .^ 2))
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
     add_eq_constraint!(m, x -> x[1] + x[2] - 1)
-    options = AugLagOptions(relaxed=RelaxConstraintSelection(eq=false))
-    @test_throws ArgumentError optimize(m, AugLagAlg(), [0.0, 0.0], options=options)
+    add_ineq_constraint!(m, x -> [x[1] - 0.9], [0.0])
+    r = optimize(
+        m,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options = AugLagOptions(;
+            max_iter = 200, relaxed = RelaxConstraintSelection(eq = true, ineq = false)
+        ),
+    )
+    @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
+    @test r.minimum ≈ 0.5 atol = 1e-4
+    # hard_rho must be positive
+    @test_throws ArgumentError AugLagOptions(hard_rho = 0.0)
 end
 
 @testitem "AugLagAlg: keep_all trajectory" begin
