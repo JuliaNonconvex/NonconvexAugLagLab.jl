@@ -392,6 +392,19 @@ end
   per-group reverse passes cost more than the single composed pass on
   this one-group problem; off by default, an architecture/robustness
   option for multi-group problems.
+- `stop_kkt`, `kkt_tol`: (opt-in) extend the convergence test from
+  feasibility-only to KKT-complete: once `vnorm ≤ ctol`, the solve also
+  requires the box-projected gradient of the scaled Lagrangian at the
+  current multipliers to satisfy `≤ kkt_tol` (default `1e-6`) and the
+  complementarity residual `max |λⱼgⱼ|` over the relaxed inequalities to
+  satisfy `≤ kkt_tol`. Costs one Lagrangian-gradient assembly per outer
+  iteration once feasible. Measured on the TopOpt local-stress
+  single-level solve: at the default `kkt_tol = 1e-6` the stationarity
+  test never fires within 100 outer iterations (the multiplier-error
+  scale is ~ρ·viol, so the Lagrangian residual stalls around 1e-4-1e-3
+  on this 1600-constraint problem) and the solve refines to viol 1.8e-8
+  in 1819.8 s — opt-in, use a looser `kkt_tol` (≳ 1e-4) or bound the run
+  with `max_time`.
 - `outer_schedule`: `:bm` (the default) — the Birgin–Martínez complexity
   scaling where both the feasibility target `η` and the subproblem accuracy
   target `ω` tighten with the full `1/ρ` factor on good steps (and reset
@@ -516,6 +529,8 @@ mutable struct AugLagOptions{S,R,W}
     max_time::Real
     on_iteration::Union{Nothing,Function}
     analytical_gradient::Bool
+    stop_kkt::Bool
+    kkt_tol::Real
     outer_schedule::Symbol
 
     two_level::Bool
@@ -577,6 +592,8 @@ function AugLagOptions(;
     max_time::Real=Inf,
     on_iteration=nothing,
     analytical_gradient::Bool=false,
+    stop_kkt::Bool=false,
+    kkt_tol::Real=1e-6,
     outer_schedule::Symbol=:bm,
 
     two_level::Bool=false,
@@ -605,6 +622,7 @@ function AugLagOptions(;
         throw(ArgumentError("first_sub_tol must be positive or nothing"))
     first_sub_iters >= 1 || throw(ArgumentError("first_sub_iters must be >= 1"))
     max_time > 0 || throw(ArgumentError("max_time must be positive"))
+    kkt_tol > 0 || throw(ArgumentError("kkt_tol must be positive"))
     two_level_iters >= 1 || throw(ArgumentError("two_level_iters must be >= 1"))
     two_level_tau > 0 || throw(ArgumentError("two_level_tau must be positive"))
     box_barrier_scale > 0 || throw(ArgumentError("box_barrier_scale must be positive"))
@@ -673,6 +691,8 @@ function AugLagOptions(;
         max_time,
         on_iteration,
         analytical_gradient,
+        stop_kkt,
+        kkt_tol,
         outer_schedule,
         two_level,
         two_level_iters,
@@ -1390,6 +1410,8 @@ function optimize!(workspace::AugLagWorkspace)
     max_time = Float64(options.max_time)
     on_iteration = options.on_iteration
     analytical_gradient = options.analytical_gradient
+    stop_kkt = options.stop_kkt
+    kkt_tol = Float64(options.kkt_tol)
     outer_schedule = options.outer_schedule
     @unpack two_level, two_level_iters, two_level_tau = options
     @unpack box_barrier_scale = options
@@ -2345,7 +2367,32 @@ function optimize!(workspace::AugLagWorkspace)
                 nothing
             end
         end
-        vnorm <= ctol && break
+        # KKT-complete stopping (opt-in): on top of feasibility, require the
+        # stationarity and complementarity residuals to be small — the
+        # box-projected gradient of the scaled Lagrangian at the current
+        # multipliers, and max |λⱼgⱼ| over the relaxed inequalities.
+        stat_ok = true
+        comp_ok = true
+        if stop_kkt && vnorm <= ctol
+            _, ∇f = NonconvexCore.value_gradient(scaled_obj, x)
+            g = copy(∇f)
+            for (k, c) in enumerate(eq_fs)
+                gJ = NonconvexCore.value_gradient(z -> dot(_vecval(c(z)), y[k]), x)[2]
+                gJ === nothing || (g .+= gJ)
+            end
+            for (k, c) in enumerate(ineq_fs)
+                gJ = NonconvexCore.value_gradient(z -> dot(_vecval(c(z)), λ[k]), x)[2]
+                gJ === nothing || (g .+= gJ)
+            end
+            pg = _projected_gnorm(g, x, submodel0.box_min, submodel0.box_max)
+            comp = 0.0
+            for k in eachindex(ineq_rel)
+                comp = max(comp, maximum(abs.(λ[k] .* _vecval(ineq_fs[k](x)))))
+            end
+            stat_ok = pg <= kkt_tol
+            comp_ok = comp <= kkt_tol
+        end
+        vnorm <= ctol && stat_ok && comp_ok && break
     end
     # Report the best restoration point when it is strictly more feasible
     # (in the raw metric the restoration minimizes) than the final

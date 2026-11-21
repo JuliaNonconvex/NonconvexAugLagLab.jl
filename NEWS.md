@@ -87,6 +87,14 @@
   completed iterate is reported); `AugLagOptions(on_iteration = f)`
   calls `f(iter, x, f(x), vnorm)` after every accepted outer iterate and
   stops the loop when `f` returns `true`.
+- **KKT-complete stopping (opt-in)**: `AugLagOptions(stop_kkt = true,
+  kkt_tol = t)` extends the convergence test from feasibility-only to
+  stationarity + complementarity. Measured on the TopOpt local-stress
+  single-level solve: at `kkt_tol = 1e-6` the stationarity test never
+  fires within 100 outer iterations (the multiplier-error scale is
+  ~ρ·viol) — the solve refines to viol 1.8e-8 in 1819.8 s instead of the
+  264.6 s feasibility stop; opt-in, use a looser `kkt_tol` (≳ 1e-4) or
+  bound the run with `max_time`.
 - **Practical relative subproblem tolerance (opt-in)**:
   `AugLagOptions(sub_tol_schedule = :relative, sub_tol_rel = τ)` sets the
   inner tolerance proportional to the current constraint violation

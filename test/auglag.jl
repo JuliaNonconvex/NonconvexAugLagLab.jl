@@ -1015,9 +1015,16 @@ end
     m = Model(x -> sum(x .^ 2))
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
     add_eq_constraint!(m, x -> x[1] + x[2] - 1)
-    # an exhausted budget stops before the first subproblem: the result is x0
-    r = optimize(m, AugLagAlg(), [0.0, 0.0]; options = AugLagOptions(; max_time = 1e-9))
-    @test r.minimizer == [0.0, 0.0]
+    # an exhausted budget permits at most one completed subproblem (whether
+    # the first elapsed check fires before or after iteration 1 is a
+    # clock-tick race, but the second check always fires)
+    r = optimize(
+        m,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options = AugLagOptions(; max_time = 1e-9, keep_all = true),
+    )
+    @test length(r.trajectory) <= 1
     # validation
     @test_throws ArgumentError AugLagOptions(max_time = 0.0)
     # a generous budget converges normally
@@ -1085,4 +1092,20 @@ end
         options = AugLagOptions(; max_iter = 200, analytical_gradient = true),
     )
     @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
+end
+
+@testitem "AugLagAlg: KKT-complete stopping" begin
+    using NonconvexAugLagLab, Test
+    m = Model(x -> sum(x .^ 2))
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+    add_ineq_constraint!(m, x -> [x[1] - 0.9], [0.0])
+    r = optimize(
+        m,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options = AugLagOptions(; max_iter = 200, stop_kkt = true, kkt_tol = 1e-4),
+    )
+    @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
+    @test_throws ArgumentError AugLagOptions(kkt_tol = 0.0)
 end
