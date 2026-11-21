@@ -10,6 +10,14 @@
   TopOpt local-stress single-level solve: 6.2% faster (248.2 vs 264.6 s)
   with better feasibility (3.8e-6 vs 5.7e-6) but a 1.3% heavier design
   (obj 0.0950 vs 0.0938) — a speed-for-quality trade, off by default.
+- **Broyden dual-secant correction (opt-in)**: `AugLagOptions(dual_secant =
+  true)` replaces the plain equality-multiplier ascent with a quasi-Newton
+  step `y − C·(ρw·c)`, where `C` is the good-Broyden inverse secant model
+  of the multiplier map's residual (the Birgin–Martínez "improving ultimate
+  convergence" device), safeguarded back to the plain ascent when the model
+  step exceeds twice its norm. Inert on the TopOpt local-stress problem
+  (bit-for-bit identical: it has no relaxed equalities) — awaiting the
+  AC-OPF measurement, off by default.
 - **First-subproblem tightening (new default)**: `AugLagOptions(first_sub_tol
   = 1e-6)` solves the first subproblem to `min(sub_tol, first_sub_tol)` —
   the first inner solve selects the local basin the whole solve follows.

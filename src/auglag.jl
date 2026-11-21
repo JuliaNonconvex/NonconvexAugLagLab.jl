@@ -300,6 +300,17 @@ end
   solve: 6.2% faster (248.2 vs 264.6 s) with better feasibility (3.8e-6
   vs 5.7e-6) but a 1.3% heavier design (obj 0.0950 vs 0.0938) — a
   speed-for-quality trade, off by default.
+- `dual_secant`: (opt-in) Broyden secant correction on the equality
+  multiplier map (the Birgin–Martínez "improving ultimate convergence"
+  device): the inverse secant model of the residual map of `y += ρw·c` is
+  refined with the good-Broyden inverse update from the map's secant
+  pairs, and the multiplier step becomes the quasi-Newton step
+  `y − C·(ρw·c)` (the first step reproduces the plain ascent), safeguarded
+  back to the plain ascent when the model step exceeds twice its norm.
+  Replaces the plain update and the equality Anderson mixing when
+  enabled; inactive for the elastic mode and without relaxed equalities.
+  Awaiting the AC-OPF measurement (the TopOpt stress problem has no
+  relaxed equalities, so the path is inert there).
 - `filter`, `stall_retry`, `selective`, `safeguard`, `two_way`, `levenberg`:
   toggles for the corresponding defaults (all `true`). Re-measured on 0.2.5:
   removing the selective weights costs ~79% TopOpt wall-clock, removing the
@@ -444,6 +455,7 @@ mutable struct AugLagOptions{S,R,W}
     anderson_ineq::Bool
     multiplier_relax::Bool
     spectral_rho::Bool
+    dual_secant::Bool
     stall_retry::Bool
     selective::Bool
     safeguard::Bool
@@ -498,6 +510,7 @@ function AugLagOptions(;
     anderson_ineq::Bool=false,
     multiplier_relax::Bool=false,
     spectral_rho::Bool=false,
+    dual_secant::Bool=false,
     stall_retry::Bool=true,
     selective::Bool=true,
     safeguard::Bool=true,
@@ -583,6 +596,7 @@ function AugLagOptions(;
         anderson_ineq,
         multiplier_relax,
         spectral_rho,
+        dual_secant,
         stall_retry,
         selective,
         safeguard,
@@ -687,9 +701,7 @@ function _sub_tol_value(schedule, tol_override, eta, vprev, sub_tol_rel)
     schedule === :eta2 && return clamp(eta^2, 1e-10, 1e-8)
     schedule === :eta && return clamp(eta^2, 1e-6, 1e-2)
     schedule === :relative && return clamp(sub_tol_rel * max(vprev, 1e-12), 1e-10, 1e-2)
-    return throw(
-        ArgumentError("sub_tol_schedule must be :fixed, :eta2, :eta or :relative")
-    )
+    return throw(ArgumentError("sub_tol_schedule must be :fixed, :eta2, :eta or :relative"))
 end
 
 function _subproblem(
@@ -1133,6 +1145,33 @@ function _two_way_step(ρ, options, two_way, vnorm, η)
     return ρ
 end
 
+# Broyden secant correction on the equality multiplier map (Birgin-Martinez
+# "Improving ultimate convergence" device): C is the inverse secant model of
+# the Jacobian of the residual map c(x(y)). It starts as -I (so the first
+# corrected step reproduces the plain ascent y + r) and is refined with the
+# good-Broyden inverse update (Sherman-Morrison) from the secant pairs
+# (dy, dr) of the multiplier map. The corrected step y - C*r replaces the
+# plain ascent, safeguarded: the model step must not exceed twice the plain
+# step's norm, and degenerate denominators leave C unchanged.
+function _dual_secant_init!(bdual::Ref{Any}, m::Int)
+    bdual[] = -Matrix{Float64}(I, m, m)
+    return bdual
+end
+
+function _dual_secant_update!(C, Δy, Δc)
+    dydy = dot(Δy, Δy)
+    dydy > 0 || return C
+    Cdc = C * Δc
+    den = dot(Δy, Cdc)
+    abs(den) > 1e-12 * norm(Δy) * norm(Cdc) || return C
+    # good Broyden inverse update (Sherman-Morrison):
+    #   C += (Δy - C Δc)(Δy'C)/(Δy'CΔc)
+    u = (Δy .- Cdc) ./ den
+    v = C' * Δy
+    C .+= u .* v'
+    return C
+end
+
 # Feasibility-driven penalty update on a bad step: escalate the most
 # violated constraint groups (selective weights, when enabled) or the
 # global penalty when no single group stands out.
@@ -1178,13 +1217,15 @@ function optimize!(workspace::AugLagWorkspace)
     anderson_ineq = options.anderson_ineq
     multiplier_relax = options.multiplier_relax
     spectral_rho = options.spectral_rho
+    dual_secant = options.dual_secant
     watchdog = options.watchdog
     watchdog_tau = Float64(options.watchdog_tau)
     watchdog_tol = Float64(options.watchdog_tol)
     levenberg = options.levenberg
     @unpack h0, sub_tol_schedule, tron_cauchy = options
     sub_tol_rel = Float64(options.sub_tol_rel)
-    first_sub_tol = options.first_sub_tol === nothing ? nothing : Float64(options.first_sub_tol)
+    first_sub_tol =
+        options.first_sub_tol === nothing ? nothing : Float64(options.first_sub_tol)
     outer_schedule = options.outer_schedule
     @unpack two_level, two_level_iters, two_level_tau = options
     @unpack box_barrier_scale = options
@@ -1314,6 +1355,10 @@ function optimize!(workspace::AugLagWorkspace)
     # last two iterates of the dual map).
     cflat_prev = nothing
     yflat_prev = nothing
+    # Broyden dual-secant state (equality multiplier map)
+    bdual = Ref{Any}(nothing)
+    ysec_prev = nothing
+    csec_prev = nothing
     # Ipopt-style restoration accounting: window of recent violation values
     # (for the stall trigger) and the number of restorations already
     # performed this solve.
@@ -1852,59 +1897,98 @@ function optimize!(workspace::AugLagWorkspace)
                 pg = _projected_gnorm(galn, xn, submodel0.box_min, submodel0.box_max)
                 θ_mult = clamp(sub_tol / max(pg, sub_tol), 0.1, 1.0)
             end
-            if use_elastic
-                s = x_new[(n + 1):end]
+            if dual_secant && !use_elastic && !isempty(eq_rel)
+                # Broyden secant-corrected equality multiplier update (the
+                # Birgin-Martinez "improving ultimate convergence" device):
+                # C is the inverse secant model of the residual map of
+                # y += theta*rho*w*c; the step becomes the quasi-Newton
+                # step -C*r (the first step reproduces the plain ascent,
+                # C = -I) with the good-Broyden inverse update from the
+                # secant pairs of the map, safeguarded to the plain ascent
+                # when the model step exceeds twice its norm. Replaces the
+                # plain update and the equality Anderson mixing.
+                cflat = Float64[]
+                for k in eachindex(eq_rel)
+                    append!(cflat, θ_mult .* (ρ * w_eq[k]) .* _vecval(eq_fs[k](x)))
+                end
+                yflat = reduce(vcat, y; init=Float64[])
+                if bdual[] === nothing
+                    _dual_secant_init!(bdual, length(yflat))
+                    step = cflat
+                else
+                    if ysec_prev !== nothing
+                        _dual_secant_update!(
+                            bdual[], yflat .- ysec_prev, cflat .- csec_prev
+                        )
+                    end
+                    step = .-(bdual[] * cflat)
+                    norm(step) <= 2 * norm(cflat) || (step = cflat)
+                end
+                ysec_prev = yflat
+                csec_prev = cflat
                 off = 0
                 for k in eachindex(eq_rel)
-                    ck = _vecval(eq_fs[k](x))
-                    sk = s[(off + 1):(off + length(ck))]
-                    y[k] .= y[k] .+ θ_mult .* (ρ * w_eq[k]) .* (ck .- sk)
-                    off += length(ck)
+                    mk = length(y[k])
+                    y[k] .= clamp.(
+                        yflat[(off + 1):(off + mk)] .+ step[(off + 1):(off + mk)], -1e8, 1e8
+                    )
+                    off += mk
                 end
             else
-                for k in eachindex(eq_rel)
-                    y[k] .= y[k] .+ θ_mult .* (ρ * w_eq[k]) .* _vecval(eq_fs[k](x))
-                end
-            end
-            # Anderson acceleration of the equality multiplier updates.
-            # The residual must match the fixed-point map actually being
-            # iterated: in elastic mode the update is y += ρw(c − s), so the
-            # slack `s` belongs in the residual too (using ρw·c accelerated
-            # the wrong map).
-            if !isempty(eq_rel)
-                y_new_flat = reduce(vcat, y; init=Float64[])
-                resid = Float64[]
                 if use_elastic
                     s = x_new[(n + 1):end]
                     off = 0
                     for k in eachindex(eq_rel)
                         ck = _vecval(eq_fs[k](x))
                         sk = s[(off + 1):(off + length(ck))]
-                        append!(resid, θ_mult .* (ρ * w_eq[k]) .* (ck .- sk))
+                        y[k] .= y[k] .+ θ_mult .* (ρ * w_eq[k]) .* (ck .- sk)
                         off += length(ck)
                     end
                 else
                     for k in eachindex(eq_rel)
-                        append!(resid, θ_mult .* (ρ * w_eq[k]) .* _vecval(eq_fs[k](x)))
+                        y[k] .= y[k] .+ θ_mult .* (ρ * w_eq[k]) .* _vecval(eq_fs[k](x))
                     end
                 end
-                y_prev_flat = y_new_flat .- resid
-                push!(and_history, (y_prev_flat, resid))
-                length(and_history) > 2 && popfirst!(and_history)
-                y_mixed = _anderson_mix(and_history, y_new_flat)
-                off = 0
-                for k in eachindex(eq_rel)
-                    mk = length(y[k])
-                    y[k] .= if safeguard
-                        clamp.(y_mixed[(off + 1):(off + mk)], -1e8, 1e8)
+                # Anderson acceleration of the equality multiplier updates.
+                # The residual must match the fixed-point map actually being
+                # iterated: in elastic mode the update is y += ρw(c − s), so the
+                # slack `s` belongs in the residual too (using ρw·c accelerated
+                # the wrong map).
+                if !isempty(eq_rel)
+                    y_new_flat = reduce(vcat, y; init=Float64[])
+                    resid = Float64[]
+                    if use_elastic
+                        s = x_new[(n + 1):end]
+                        off = 0
+                        for k in eachindex(eq_rel)
+                            ck = _vecval(eq_fs[k](x))
+                            sk = s[(off + 1):(off + length(ck))]
+                            append!(resid, θ_mult .* (ρ * w_eq[k]) .* (ck .- sk))
+                            off += length(ck)
+                        end
                     else
-                        y_mixed[(off + 1):(off + mk)]
+                        for k in eachindex(eq_rel)
+                            append!(resid, θ_mult .* (ρ * w_eq[k]) .* _vecval(eq_fs[k](x)))
+                        end
                     end
-                    off += mk
+                    y_prev_flat = y_new_flat .- resid
+                    push!(and_history, (y_prev_flat, resid))
+                    length(and_history) > 2 && popfirst!(and_history)
+                    y_mixed = _anderson_mix(and_history, y_new_flat)
+                    off = 0
+                    for k in eachindex(eq_rel)
+                        mk = length(y[k])
+                        y[k] .= if safeguard
+                            clamp.(y_mixed[(off + 1):(off + mk)], -1e8, 1e8)
+                        else
+                            y_mixed[(off + 1):(off + mk)]
+                        end
+                        off += mk
+                    end
                 end
-            end
-            for k in eachindex(eq_rel)
-                safeguard && clamp!(y[k], -1e8, 1e8)
+                for k in eachindex(eq_rel)
+                    safeguard && clamp!(y[k], -1e8, 1e8)
+                end
             end
             k = 1
             # flat buffer of the unprojected inequality increments ρw·g
@@ -1922,7 +2006,9 @@ function optimize!(workspace::AugLagWorkspace)
                 else
                     λ[k] .= max.(λ[k] .+ θ_mult .* (ρ * w) .* g, 0.0)
                 end
-                anderson_ineq && penalty === :quadratic && append!(ineq_resid, θ_mult .* (ρ * w) .* g)
+                anderson_ineq &&
+                    penalty === :quadratic &&
+                    append!(ineq_resid, θ_mult .* (ρ * w) .* g)
                 safeguard && clamp!(λ[k], 0.0, 1e8)
                 if pbm_adaptive && penalty in (:pbm, :mixed, :mixed_logdet)
                     # Ipopt-style barrier adaptation: the barrier coefficient

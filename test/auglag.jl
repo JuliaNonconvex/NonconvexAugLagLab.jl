@@ -956,3 +956,34 @@ end
     @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
     @test r.minimum ≈ 0.5 atol = 1e-4
 end
+
+@testitem "AugLagAlg: Broyden dual-secant correction" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra
+    const NAL = NonconvexAugLagLab
+    # the inverse secant model starts at -I (first step = plain ascent)
+    b = Ref{Any}(nothing)
+    NAL._dual_secant_init!(b, 2)
+    @test b[] == -Matrix{Float64}(I, 2, 2)
+    # one good-Broyden inverse update satisfies the secant condition C⁺Δc = Δy
+    C = copy(b[])
+    Δy = [0.3, -0.1]
+    Δc = [0.1, 0.05]
+    NAL._dual_secant_update!(C, Δy, Δc)
+    @test C * Δc ≈ Δy atol = 1e-12
+    # degenerate denominators leave C unchanged
+    C2 = copy(b[])
+    NAL._dual_secant_update!(C2, zeros(2), Δc)
+    @test C2 == b[]
+    # end-to-end: an equality-constrained solve converges with the correction
+    m = Model(x -> sum(x .^ 2))
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+    r = optimize(
+        m,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options = AugLagOptions(; max_iter = 200, dual_secant = true),
+    )
+    @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
+    @test r.minimum ≈ 0.5 atol = 1e-4
+end
