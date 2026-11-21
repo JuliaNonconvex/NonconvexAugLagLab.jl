@@ -915,6 +915,15 @@ end
     )
     @test norm(r.minimizer - [0.5, 0.5]) < 1e-3
     @test r.minimum ≈ 0.5 atol = 1e-4
+    # depth option: deeper mixing converges, invalid depths are rejected
+    r5 = optimize(
+        m,
+        AugLagAlg(),
+        [1.0, 1.0];
+        options = AugLagOptions(; max_iter = 200, anderson_ineq = true, anderson_depth = 5),
+    )
+    @test norm(r5.minimizer - [0.5, 0.5]) < 1e-3
+    @test_throws ArgumentError AugLagOptions(anderson_depth = 0)
 end
 
 @testitem "AugLagAlg: relaxed multiplier step with loose subproblem solves" begin

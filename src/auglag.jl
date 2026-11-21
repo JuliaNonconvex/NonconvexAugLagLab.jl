@@ -269,11 +269,17 @@ end
   last two iterates (same depth-2 least-squares mixing as the equality
   block) and the mix is re-projected onto the nonnegative orthant
   (ADMM-style Anderson with re-projection). Inactive for the PBM penalty
-  modes. Measured on the TopOpt local-stress single-level solve: 4.4%
-  slower (316.3 vs 303.1 s) but lands on a 4.6% lighter feasible design
-  (obj 0.0895 vs 0.0938) at the same max solid stress and a marginally
-  larger final violation (6.2e-6 vs 5.7e-6) — a quality-for-time trade,
-  so it stays off by default.
+  modes. Measured on the TopOpt local-stress single-level solve (current
+  default config): a wall-clock wash (262.6 vs 264.6 s) with a 4.6%
+  lighter feasible design (obj 0.0895 vs 0.0938, reproduced exactly
+  across configurations) and a marginally larger final violation
+  (6.2e-6 vs 5.7e-6) — no time win, so it stays off by default; the
+  opt-in "light-design recipe". With `anderson_depth = 5` the design is
+  a further 0.2% lighter and the violation beats the default (obj
+  0.0893, viol 5.4e-6) at the same wall-clock.
+- `anderson_depth`: the history depth of the Anderson mixing (default
+  `2`, must be ≥ 1; `1` disables the mixing). Applies to both the
+  equality map and, when `anderson_ineq` is enabled, the inequality map.
 - `multiplier_relax`: (opt-in) Eckstein-style adaptive relaxation of the
   multiplier step: when the subproblem stationarity residual at the
   accepted iterate (the projected gradient of the subproblem objective,
@@ -297,9 +303,10 @@ end
   participate (semidefinite matrices do not); the elastic mode is not
   supported (falls back to the two-way rule there). Escalation on bad
   steps is unchanged. Measured on the TopOpt local-stress single-level
-  solve: 6.2% faster (248.2 vs 264.6 s) with better feasibility (3.8e-6
-  vs 5.7e-6) but a 1.3% heavier design (obj 0.0950 vs 0.0938) — a
-  speed-for-quality trade, off by default.
+  solve (current default config): 3.0% slower (272.6 vs 264.6 s) and a
+  1.3% heavier design (obj 0.0950 vs 0.0938) — a straight loss, off by
+  default. (An earlier 6.2%-faster measurement was against a
+  fixed-tolerance configuration and does not carry over.)
 - `dual_secant`: (opt-in) Broyden secant correction on the equality
   multiplier map (the Birgin–Martínez "improving ultimate convergence"
   device): the inverse secant model of the residual map of `y += ρw·c` is
@@ -347,6 +354,10 @@ end
   `first_sub_tol = 1e-6` reproduces the light-design trajectory of a
   fixed-`1e-6` override bit-for-bit at 12.7% less wall-clock (264.6 vs
   303.1 s). Set `first_sub_tol = nothing` for the pre-0.4.1 behavior.
+- `first_sub_iters`: how many of the leading subproblems get the
+  `first_sub_tol` tightening (default `1`, must be ≥ 1). Measured on the
+  TopOpt single-level solve: `2` is bit-for-bit inert (262.0 vs 264.6 s,
+  identical trajectory) — the basin is selected by the first solve alone.
 - `outer_schedule`: `:bm` (the default) — the Birgin–Martínez complexity
   scaling where both the feasibility target `η` and the subproblem accuracy
   target `ω` tighten with the full `1/ρ` factor on good steps (and reset
@@ -453,6 +464,7 @@ mutable struct AugLagOptions{S,R,W}
     watchdog_tau::Real
     watchdog_tol::Real
     anderson_ineq::Bool
+    anderson_depth::Int
     multiplier_relax::Bool
     spectral_rho::Bool
     dual_secant::Bool
@@ -465,6 +477,7 @@ mutable struct AugLagOptions{S,R,W}
     sub_tol_schedule::Symbol
     sub_tol_rel::Real
     first_sub_tol::Union{Nothing,Real}
+    first_sub_iters::Int
     outer_schedule::Symbol
 
     two_level::Bool
@@ -508,6 +521,7 @@ function AugLagOptions(;
     watchdog_tau::Real=0.5,
     watchdog_tol::Real=0.0,
     anderson_ineq::Bool=false,
+    anderson_depth::Int=2,
     multiplier_relax::Bool=false,
     spectral_rho::Bool=false,
     dual_secant::Bool=false,
@@ -520,6 +534,7 @@ function AugLagOptions(;
     sub_tol_schedule::Symbol=:eta,
     sub_tol_rel::Real=0.1,
     first_sub_tol=1e-6,
+    first_sub_iters::Int=1,
     outer_schedule::Symbol=:bm,
 
     two_level::Bool=false,
@@ -546,6 +561,7 @@ function AugLagOptions(;
     0 < sub_tol_rel < 1 || throw(ArgumentError("sub_tol_rel must be in (0, 1)"))
     (first_sub_tol === nothing || first_sub_tol > 0) ||
         throw(ArgumentError("first_sub_tol must be positive or nothing"))
+    first_sub_iters >= 1 || throw(ArgumentError("first_sub_iters must be >= 1"))
     two_level_iters >= 1 || throw(ArgumentError("two_level_iters must be >= 1"))
     two_level_tau > 0 || throw(ArgumentError("two_level_tau must be positive"))
     box_barrier_scale > 0 || throw(ArgumentError("box_barrier_scale must be positive"))
@@ -559,6 +575,7 @@ function AugLagOptions(;
     rho_decr > 1 || throw(ArgumentError("rho_decr must be > 1"))
     0 < watchdog_tau < 1 || throw(ArgumentError("watchdog_tau must be in (0, 1)"))
     watchdog_tol >= 0 || throw(ArgumentError("watchdog_tol must be non-negative"))
+    anderson_depth >= 1 || throw(ArgumentError("anderson_depth must be >= 1"))
     restore_stall >= 0 || throw(ArgumentError("restore_stall must be >= 0"))
     restore_tol_mode in (:relative, :absolute) ||
         throw(ArgumentError("restore_tol_mode must be :relative or :absolute"))
@@ -594,6 +611,7 @@ function AugLagOptions(;
         watchdog_tau,
         watchdog_tol,
         anderson_ineq,
+        anderson_depth,
         multiplier_relax,
         spectral_rho,
         dual_secant,
@@ -606,6 +624,7 @@ function AugLagOptions(;
         sub_tol_schedule,
         sub_tol_rel,
         first_sub_tol,
+        first_sub_iters,
         outer_schedule,
         two_level,
         two_level_iters,
@@ -1215,6 +1234,7 @@ function optimize!(workspace::AugLagWorkspace)
     @unpack elastic, elastic_mu, warm_continue = options
     @unpack filter, stall_retry, selective, safeguard, two_way = options
     anderson_ineq = options.anderson_ineq
+    anderson_depth = options.anderson_depth
     multiplier_relax = options.multiplier_relax
     spectral_rho = options.spectral_rho
     dual_secant = options.dual_secant
@@ -1226,6 +1246,7 @@ function optimize!(workspace::AugLagWorkspace)
     sub_tol_rel = Float64(options.sub_tol_rel)
     first_sub_tol =
         options.first_sub_tol === nothing ? nothing : Float64(options.first_sub_tol)
+    first_sub_iters = options.first_sub_iters
     outer_schedule = options.outer_schedule
     @unpack two_level, two_level_iters, two_level_tau = options
     @unpack box_barrier_scale = options
@@ -1518,13 +1539,13 @@ function optimize!(workspace::AugLagWorkspace)
         # explicit sub_options.tol override (previously silently ignored for
         # the built-in QN).
         sub_tol = _sub_tol_value(sub_tol_schedule, qn_tol_override, η, vprev, sub_tol_rel)
-        # Optional first-subproblem tightening: the first inner solve
-        # selects the local basin the whole solve follows (measured on the
+        # Optional first-subproblems tightening: the first inner solves
+        # select the local basin the whole solve follows (measured on the
         # TopOpt local-stress problem: a loose first solve lands in a
-        # heavier design's basin), so it can be solved more accurately than
-        # the schedule without paying the tight tolerance on later
+        # heavier design's basin), so they can be solved more accurately
+        # than the schedule without paying the tight tolerance on later
         # subproblems.
-        if iter == 1 && first_sub_tol !== nothing
+        if iter <= first_sub_iters && first_sub_tol !== nothing
             sub_tol = min(sub_tol, first_sub_tol)
         end
         # the barrier parameter relaxes with η but keeps a nonzero floor
@@ -1973,7 +1994,7 @@ function optimize!(workspace::AugLagWorkspace)
                     end
                     y_prev_flat = y_new_flat .- resid
                     push!(and_history, (y_prev_flat, resid))
-                    length(and_history) > 2 && popfirst!(and_history)
+                    length(and_history) > anderson_depth && popfirst!(and_history)
                     y_mixed = _anderson_mix(and_history, y_new_flat)
                     off = 0
                     for k in eachindex(eq_rel)
@@ -2034,7 +2055,7 @@ function optimize!(workspace::AugLagWorkspace)
                 λ_new_flat = reduce(vcat, λ; init=Float64[])
                 λ_prev_flat = λ_new_flat .- ineq_resid
                 push!(and_ineq_history, (λ_prev_flat, ineq_resid))
-                length(and_ineq_history) > 2 && popfirst!(and_ineq_history)
+                length(and_ineq_history) > anderson_depth && popfirst!(and_ineq_history)
                 λ_mixed = _anderson_mix(and_ineq_history, λ_new_flat)
                 off = 0
                 for i in eachindex(ineq_rel)

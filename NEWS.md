@@ -7,9 +7,11 @@
   (Barzilai–Borwein) update of the dual step, `ρ ← ‖Δc‖²/⟨Δc, Δy⟩` from
   the last two iterates, correlation-safeguarded and clamped to
   `[ρ/rho_decr, ρ·rho_incr] ∩ [rho_init/10, rho_max]`. Measured on the
-  TopOpt local-stress single-level solve: 6.2% faster (248.2 vs 264.6 s)
-  with better feasibility (3.8e-6 vs 5.7e-6) but a 1.3% heavier design
-  (obj 0.0950 vs 0.0938) — a speed-for-quality trade, off by default.
+  TopOpt local-stress single-level solve (current default config): 3.0%
+  slower (272.6 vs 264.6 s) and a 1.3% heavier design (obj 0.0950 vs
+  0.0938) — a straight loss, off by default. (An earlier 6.2%-faster
+  measurement was against a fixed-tolerance configuration and does not
+  carry over.)
 - **Broyden dual-secant correction (opt-in)**: `AugLagOptions(dual_secant =
   true)` replaces the plain equality-multiplier ascent with a quasi-Newton
   step `y − C·(ρw·c)`, where `C` is the good-Broyden inverse secant model
@@ -42,10 +44,21 @@
   mixing from the equality block to the inequality multiplier map of the
   classical quadratic penalty (the unprojected update is mixed, the mix
   re-projected onto λ ≥ 0). Measured on the TopOpt local-stress
-  single-level solve: 4.4% slower (316.3 vs 303.1 s) but lands on a 4.6%
-  lighter feasible design (obj 0.0895 vs 0.0938) at the same max solid
-  stress and a marginally larger final violation (6.2e-6 vs 5.7e-6) — a
-  quality-for-time trade, off by default.
+  single-level solve (current default config): a wall-clock wash
+  (262.6 vs 264.6 s) with a 4.6% lighter feasible design (obj 0.0895 vs
+  0.0938, reproduced exactly across configurations) and a marginally
+  larger final violation (6.2e-6 vs 5.7e-6) — no time win, off by
+  default; the opt-in "light-design recipe". With the new
+  `anderson_depth = 5` the design is a further 0.2% lighter and the
+  violation beats the default (obj 0.0893, viol 5.4e-6) at the same
+  wall-clock.
+- **`anderson_depth` and `first_sub_iters` options (new)**:
+  `AugLagOptions(anderson_depth = d)` sets the Anderson mixing depth
+  (default `2`, ≥ 1; `1` disables) for both multiplier maps;
+  `AugLagOptions(first_sub_iters = k)` extends the `first_sub_tol`
+  tightening to the first `k` subproblems (default `1`, ≥ 1). Measured
+  on the TopOpt single-level solve: `first_sub_iters = 2` is bit-for-bit
+  inert — the basin is selected by the first solve alone.
 - **Practical relative subproblem tolerance (opt-in)**:
   `AugLagOptions(sub_tol_schedule = :relative, sub_tol_rel = τ)` sets the
   inner tolerance proportional to the current constraint violation
