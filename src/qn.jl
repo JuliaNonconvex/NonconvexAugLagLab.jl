@@ -25,6 +25,88 @@ custom linear solves. See the module documentation for the extension API.
 abstract type AbstractHessianApprox end
 
 # ------------------------------------------------------------------
+# Exact curvature terms for composite Hessian models
+# ------------------------------------------------------------------
+"""
+    AbstractCurvatureTerm
+
+An exact Hessian term of the (augmented Lagrangian) objective with a
+matrix-vector product `apply_term!(Hv, term, v)`. Terms are position
+dependent and are rebuilt at each subproblem iterate through the
+composite's `build_terms` hook.
+"""
+abstract type AbstractCurvatureTerm end
+
+"""
+    GaussNewtonTerm(c, w, x[, act])
+
+The Gauss-Newton term `w · J(x)ᵀ(J(x) v)` of one (scaled) constraint
+group, computed matrix-free: `Jv` by a forward finite difference from
+the cached value `c(x)` (one constraint evaluation) and `Jᵀu` by one
+reverse pass. For inequality groups, only the rows violated at the
+rebound point `x` contribute (`act`, the frozen active set).
+"""
+struct GaussNewtonTerm{F,X}
+    c::F
+    w::Float64
+    x::X
+    c0::Vector{Float64}
+    act::Union{Nothing,BitVector}
+end
+function GaussNewtonTerm(c, w, x, act=nothing)
+    return GaussNewtonTerm(c, w, x, _vecval(c(x)), act)
+end
+
+function apply_term!(Hv, t::GaussNewtonTerm, v)
+    nv = max(norm(v), 1e-12)
+    ε = sqrt(eps(Float64)) * (1 + norm(t.x)) / nv
+    cp = _vecval(t.c(t.x .+ ε .* v))
+    Jv = (cp .- t.c0) ./ ε
+    t.act === nothing || (Jv[.!t.act] .= 0.0)
+    g = NonconvexCore.value_gradient(z -> dot(_vecval(t.c(z)), Jv), t.x)[2]
+    g === nothing && return Hv
+    Hv .+= t.w .* g
+    return Hv
+end
+
+"""
+    CompositeHessianApprox(qn, build_terms)
+
+A Hessian model summing a quasi-Newton approximation `qn` (of the
+remainder) and a tuple of exact curvature terms rebuilt at every
+subproblem iterate via `build_terms(x)` (the Gauss-Newton penalty terms
+of the AL objective, or the label-selected exact terms). `solve!` is the
+quasi-Newton inverse (the CG preconditioner role).
+"""
+struct CompositeHessianApprox{Q<:AbstractHessianApprox,B} <: AbstractHessianApprox
+    qn::Q
+    build_terms::B
+    terms::Base.RefValue{Any}
+end
+function CompositeHessianApprox(qn::AbstractHessianApprox, build_terms)
+    return CompositeHessianApprox(qn, build_terms, Ref{Any}(()))
+end
+
+init!(H::CompositeHessianApprox, n, x0) = (init!(H.qn, n, x0); H)
+reset!(H::CompositeHessianApprox) = (reset!(H.qn); H)
+update!(H::CompositeHessianApprox, s, y) = (update!(H.qn, s, y); H)
+solve!(d, H::CompositeHessianApprox, g) = solve!(d, H.qn, g)
+function apply!(Bv, H::CompositeHessianApprox, v)
+    apply!(Bv, H.qn, v)
+    for t in H.terms[]
+        apply_term!(Bv, t, v)
+    end
+    return Bv
+end
+_initialized(H::CompositeHessianApprox, n) = _initialized(H.qn, n)
+_initialized(H::CompositeHessianApprox, n::Int) = _initialized(H.qn, n)
+
+# Rebuild the exact terms at the current iterate (a no-op for models
+# without position-dependent terms).
+_rebind_terms!(H::CompositeHessianApprox, x) = (H.terms[]=H.build_terms(x); H)
+_rebind_terms!(::AbstractHessianApprox, x) = nothing
+
+# ------------------------------------------------------------------
 # Preconditioners / H0 operators
 # ------------------------------------------------------------------
 """
@@ -597,6 +679,9 @@ function optimize!(workspace::QuasiNewtonWorkspace)
     for iter in 1:optimizer.max_iter
         counter[] += 1
         d = similar(x)
+        # rebuild the position-dependent exact terms (no-op for plain
+        # quasi-Newton models)
+        _rebind_terms!(approx, x)
         if optimizer.globalization === :tron
             # TRON: projected-CG trust-region step with active-set tracking.
             d = _tron_subproblem(v -> _hessmatvec(approx, v), g, x, lb, ub, Δ, τ)

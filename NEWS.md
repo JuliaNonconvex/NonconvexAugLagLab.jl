@@ -95,6 +95,19 @@
   ~ρ·viol) — the solve refines to viol 1.8e-8 in 1819.8 s instead of the
   264.6 s feasibility stop; opt-in, use a looser `kkt_tol` (≳ 1e-4) or
   bound the run with `max_time`.
+- **Hybrid curvature (experimental, opt-in)**: `AugLagOptions(curvature =
+  :hybrid)` sums the exact Gauss-Newton penalty terms `ρw·JᵀJ` of the
+  relaxed constraint groups (matrix-free, active-set-restricted
+  inequalities, via the new `GaussNewtonTerm`/`CompositeHessianApprox`
+  interface) plus an L-BFGS model of the remainder — the first cut of
+  the hybrid first/second-order curvature plan. Measured: on the TopOpt
+  local-stress single-level solve the matvec cost dominates (no
+  completion within 20 min vs the 4.5 min L-BFGS baseline); on Rosetta
+  case5 the per-iteration convergence is much stronger than L-BFGS
+  (viol 3.2e-2 vs 0.60 at 200 outer iterations) but the solve is still
+  unconverged at 508 s vs 80 s for SR1 and 43.8 s for Newton — opt-in;
+  the known cost fix is an exact-Jacobian matvec (JuMP evaluator /
+  ForwardDiff) instead of the finite difference.
 - **Practical relative subproblem tolerance (opt-in)**:
   `AugLagOptions(sub_tol_schedule = :relative, sub_tol_rel = τ)` sets the
   inner tolerance proportional to the current constraint violation

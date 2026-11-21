@@ -4,6 +4,7 @@ export AugLagAlg, AugLagOptions, RelaxConstraintSelection, AugLagResult
 export QuasiNewtonAlg, AbstractHessianApprox
 export LBFGSApprox, DenseBFGSApprox, StructuredBFGSApprox, NewtonTRApprox
 export LimitedMemorySR1Approx
+export AbstractCurvatureTerm, GaussNewtonTerm, CompositeHessianApprox
 export IdentityPreconditioner, DiagonalPreconditioner
 export SQSDPAlg, SQSDPOptions, SQSDPResult
 

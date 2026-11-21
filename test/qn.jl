@@ -349,3 +349,37 @@ end
         @test r.iter < 50
     end
 end
+
+@testitem "QuasiNewtonAlg: hybrid curvature Gauss-Newton terms" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra
+    const NAL = NonconvexAugLagLab
+    # the GN matvec matches the explicit w*J'J product
+    c = x -> [x[1] + 2x[2], x[2] - x[1]]
+    x = [0.3, -0.7]
+    w = 3.0
+    t = NAL.GaussNewtonTerm(c, w, copy(x))
+    v = [0.2, -0.4]
+    Hv = zeros(2)
+    NAL.apply_term!(Hv, t, v)
+    J = [1.0 2.0; -1.0 1.0]
+    @test Hv ≈ w * J' * (J * v) atol = 1e-6
+    # the active-set mask restricts the rows exactly
+    c2 = x -> [x[1], x[2]]
+    t2 = NAL.GaussNewtonTerm(c2, 2.0, copy(x), BitVector([true, false]))
+    Hv2 = zeros(2)
+    NAL.apply_term!(Hv2, t2, v)
+    J2 = [1.0 0.0; 0.0 1.0]
+    D = [1.0 0.0; 0.0 0.0]
+    @test Hv2 ≈ 2.0 * J2' * D * (J2 * v) atol = 1e-6
+    # end-to-end with the hybrid curvature
+    m = Model(x -> sum(x .^ 2))
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+    r = optimize(
+        m,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options = AugLagOptions(; max_iter = 200, curvature = :hybrid),
+    )
+    @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
+end

@@ -210,11 +210,29 @@ end
   the curvature history is reused across outer iterations).
 - `curvature`: the curvature approximation of the built-in subproblem
   solver, `:lbfgs` (default), `:sr1` (limited-memory symmetric rank-one —
-  captures indefiniteness, intended for the trust-region subproblems) or
+  captures indefiniteness, intended for the trust-region subproblems),
   `:newton` (experimental, opt-in: exact-Hessian Newton trust-region
   solves — MathOptInterface evaluator Hessians for JuMP-converted models,
   AD otherwise, with the stale-Cholesky preconditioned Steihaug CG; the
-  box-barrier mode auto-pairs with it). Measured: `:sr1` is a massive
+  box-barrier mode auto-pairs with it) or `:hybrid` (experimental,
+  opt-in: the trust-region Hessian model sums the exact Gauss-Newton
+  penalty terms `ρw·JᵀJ` of the relaxed constraint groups — matrix-free
+  through one forward finite difference and one reverse pass each, with
+  the inequality rows restricted to the active set frozen at the
+  subproblem iterate — plus an L-BFGS model of the remainder
+  (`λ`-weighted terms; the composite's quasi-Newton part covers the
+  remainder, and the identity base operator is used since the penalty
+  scale is already exact in the terms). Experimental; measured on the
+  TopOpt local-stress single-level solve: the matvec cost dominates (a
+  forward finite difference + a reverse pass per CG iteration against
+  full-FEA stress constraints) — no completion within 20 min vs the
+  4.5 min L-BFGS baseline; on Rosetta case5 the per-iteration
+  convergence is much stronger than L-BFGS (viol 3.2e-2 vs 0.60 at
+  200 outer iterations, objective climbing toward the true optimum) but
+  the solve is still unconverged at 508 s vs 80 s for SR1 and 43.8 s for
+  Newton — opt-in; the known cost fix is an exact-Jacobian matvec
+  (JuMP evaluator / ForwardDiff) instead of the finite difference.
+  Measured: `:sr1` is a massive
   Rosetta AC-OPF case5 win (80 vs 219 s, viol 0.016 vs 0.60, f near the
   true optimum) but slower on the TopOpt local-stress problem (no
   completion within 31 min vs ~6 min for L-BFGS) — opt-in; `:newton` with
@@ -628,8 +646,8 @@ function AugLagOptions(;
     box_barrier_scale > 0 || throw(ArgumentError("box_barrier_scale must be positive"))
     (box_barrier === true || box_barrier === false || box_barrier === missing) ||
         throw(ArgumentError("box_barrier must be true, false or missing (automatic)"))
-    curvature in (:lbfgs, :sr1, :newton) ||
-        throw(ArgumentError("curvature must be :lbfgs, :sr1 or :newton"))
+    curvature in (:lbfgs, :sr1, :newton, :hybrid) ||
+        throw(ArgumentError("curvature must be :lbfgs, :sr1, :newton or :hybrid"))
     prox >= 0 || throw(ArgumentError("prox must be non-negative"))
     rho_init > 0 || throw(ArgumentError("rho_init must be positive"))
     rho_incr > 1 || throw(ArgumentError("rho_incr must be > 1"))
@@ -1028,6 +1046,22 @@ function _auglag_objective_scaled(
         return target
     end
     return _objective
+end
+
+# Exact Gauss-Newton penalty terms of the relaxed constraint groups at x
+# (for curvature = :hybrid): rho*w*J'J per group, matrix-free, with the
+# inequality rows restricted to the active set frozen at x.
+function _hybrid_terms(x, eq_fs, ineq_fs, w_eq, w_ineq, ρ)
+    terms = ()
+    for (k, c) in enumerate(eq_fs)
+        terms = (terms..., GaussNewtonTerm(c, ρ * w_eq[k], copy(x)))
+    end
+    for (k, c) in enumerate(ineq_fs)
+        gv = _vecval(c(x))
+        act = gv .> 0
+        terms = (terms..., GaussNewtonTerm(c, ρ * w_ineq[k], copy(x), act))
+    end
+    return terms
 end
 
 # Smooth quadratic penalty over the KEPT (non-relaxed) constraints, folded
@@ -1596,9 +1630,31 @@ function optimize!(workspace::AugLagWorkspace)
             throw(ArgumentError("h0 must be :penalty or :identity"))
         end
         qn_approx = if warm && workspace.state.approx !== nothing
-            workspace.state.approx
+            st_approx = workspace.state.approx
+            if st_approx isa CompositeHessianApprox
+                # keep the warm-started quasi-Newton history but rebuild
+                # the exact terms with this run's penalty state
+                CompositeHessianApprox(
+                    st_approx.qn, x -> _hybrid_terms(x, eq_fs, ineq_fs, w_eq, w_ineq, ρ)
+                )
+            else
+                st_approx
+            end
         elseif options.curvature === :sr1
             LimitedMemorySR1Approx(memory; H0=h0_op)
+        elseif options.curvature === :hybrid
+            penalty === :quadratic || throw(
+                ArgumentError("curvature = :hybrid requires penalty = :quadratic")
+            )
+            use_elastic && throw(
+                ArgumentError("curvature = :hybrid does not support the elastic mode"),
+            )
+            # the exact Gauss-Newton terms already carry the penalty scale,
+            # so the remainder model starts from the identity
+            base_qn = LBFGSApprox(memory; H0=IdentityPreconditioner())
+            CompositeHessianApprox(
+                base_qn, x -> _hybrid_terms(x, eq_fs, ineq_fs, w_eq, w_ineq, ρ)
+            )
         else
             LBFGSApprox(memory; H0=h0_op)
         end
