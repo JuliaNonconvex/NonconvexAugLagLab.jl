@@ -1,8 +1,199 @@
 # NEWS
 
+## Unreleased
+
+- **Reference TRON (opt-in)**: `globalization = :tron` now mirrors the
+  JSOSolvers Lin–Moré structure — a safeguarded projected-Cauchy
+  starting point (search parameter warm-started across iterations),
+  projected CG on the free set with a reduced-gradient exit (`cg_tol`,
+  default 0.1), a projected line search on the free face, and the
+  TRONTrustRegion radius rules — and works with every curvature model
+  (first-order quasi-Newton and exact-Hessian). Measured on the TopOpt
+  local-stress single-level solve: no completion within 13 min vs the
+  4.5 min `:trustregion` default (the per-step matvecs dominate on
+  FEA-heavy constraints), so the default stays `:trustregion`.
+- **Objective recovery (new default path)**: the accepted step's
+  objective is recovered from the AL value and the captured scaled
+  constraint values (`f = fscale·(L_ρ − penalty terms)`, Percival's
+  recovery) instead of re-evaluating `obj(x)` — one fewer objective
+  evaluation per outer iteration, and the violation norm reuses the
+  same capture (the hot path evaluates each relaxed constraint once).
+  Bit-for-bit trajectory-neutral on the TopOpt stress solve (266.9 vs
+  264.6 s, same design).
+- **Infeasibility detection (Percival's dual certificate)**:
+  `AugLagResult` gains a backward-compatible `status` field; once the
+  penalty is capped and the iterate is still infeasible, a vanishing
+  unit-weight penalty-part gradient certifies `status = :infeasible`
+  and stops the loop (classical quadratic mode).
+- **Perf nits**: the relaxed-constraint violation helpers take the
+  precomputed indices (no more `_subproblem` reconstruction per call),
+  and the JuMP Gauss-Newton term reuses its matvec buffer. A candidate
+  fix resetting η/ω on selective weight bumps was measured harmful on
+  the stress default (53% slower) and reverted.
+- **Spectral penalty update (opt-in)**: `AugLagOptions(spectral_rho = true)`
+  replaces the two-way penalty decrease on good steps with a spectral
+  (Barzilai–Borwein) update of the dual step, `ρ ← ‖Δc‖²/⟨Δc, Δy⟩` from
+  the last two iterates, correlation-safeguarded and clamped to
+  `[ρ/rho_decr, ρ·rho_incr] ∩ [rho_init/10, rho_max]`. Measured on the
+  TopOpt local-stress single-level solve (current default config): 3.0%
+  slower (272.6 vs 264.6 s) and a 1.3% heavier design (obj 0.0950 vs
+  0.0938) — a straight loss, off by default. (An earlier 6.2%-faster
+  measurement was against a fixed-tolerance configuration and does not
+  carry over.)
+- **Broyden dual-secant correction (opt-in)**: `AugLagOptions(dual_secant =
+  true)` replaces the plain equality-multiplier ascent with a quasi-Newton
+  step `y − C·(ρw·c)`, where `C` is the good-Broyden inverse secant model
+  of the multiplier map's residual (the Birgin–Martínez "improving ultimate
+  convergence" device), safeguarded back to the plain ascent when the model
+  step exceeds twice its norm. Inert on the TopOpt local-stress problem
+  (bit-for-bit identical: it has no relaxed equalities) — awaiting the
+  AC-OPF measurement, off by default.
+- **First-subproblem tightening (new default)**: `AugLagOptions(first_sub_tol
+  = 1e-6)` solves the first subproblem to `min(sub_tol, first_sub_tol)` —
+  the first inner solve selects the local basin the whole solve follows.
+  Measured on the TopOpt local-stress single-level p=3 solve: the default
+  `:eta` schedule plus this tightening reproduces the light-design
+  trajectory of a fixed-`1e-6` subproblem tolerance bit-for-bit at 12.7%
+  less wall-clock (264.6 vs 303.1 s, 11 outer iterations, obj 0.0938 vs
+  0.0976 for the untightened schedule). Set `first_sub_tol = nothing` for
+  the previous behavior.
+- **Projected-gradient stopping for the built-in quasi-Newton solver (new default)**:
+  `QuasiNewtonAlg(projected_stop = true)` terminates on the box-projected
+  gradient norm — the correct stationarity measure when the optimum sits on
+  a box bound, where the raw gradient does not vanish and the solver
+  previously burned its iteration budget — and reports that projected norm
+  as the KKT residual. Measured on the TopOpt local-stress single-level
+  p=3 solve (80×20, 1600 stress constraints): bit-for-bit identical
+  trajectory and solution at 7.2% less wall-clock (303.1 vs 326.7 s,
+  11 outer iterations). Set `projected_stop = false` for the previous
+  behavior.
+- **Anderson acceleration on the inequality multipliers (opt-in)**:
+  `AugLagOptions(anderson_ineq = true)` extends the depth-2 Anderson
+  mixing from the equality block to the inequality multiplier map of the
+  classical quadratic penalty (the unprojected update is mixed, the mix
+  re-projected onto λ ≥ 0). Measured on the TopOpt local-stress
+  single-level solve (current default config): a wall-clock wash
+  (262.6 vs 264.6 s) with a 4.6% lighter feasible design (obj 0.0895 vs
+  0.0938, reproduced exactly across configurations) and a marginally
+  larger final violation (6.2e-6 vs 5.7e-6) — no time win, off by
+  default; the opt-in "light-design recipe". With the new
+  `anderson_depth = 5` the design is a further 0.2% lighter and the
+  violation beats the default (obj 0.0893, viol 5.4e-6) at the same
+  wall-clock.
+- **`anderson_depth` and `first_sub_iters` options (new)**:
+  `AugLagOptions(anderson_depth = d)` sets the Anderson mixing depth
+  (default `2`, ≥ 1; `1` disables) for both multiplier maps;
+  `AugLagOptions(first_sub_iters = k)` extends the `first_sub_tol`
+  tightening to the first `k` subproblems (default `1`, ≥ 1). Measured
+  on the TopOpt single-level solve: `first_sub_iters = 2` is bit-for-bit
+  inert — the basin is selected by the first solve alone.
+- **Hard constraints with the built-in sub-solver (new capability)**:
+  `AugLagAlg()` now accepts partially-relaxed problems: kept (non-relaxed)
+  equality/inequality constraints are folded into the built-in
+  quasi-Newton subproblem as a smooth quadratic penalty with the new
+  `hard_rho` option (default `1e3`, the ALM-for-relaxed /
+  penalty-for-kept split) instead of erroring; kept semidefinite
+  constraints still require an external sub-solver. Measured on the
+  TopOpt local-stress single-level solve with the stress constraints
+  kept hard: one outer iteration (132.7 s) with the expected hard_rho
+  residual (max solid stress 5.7e-4 over the threshold, 2.2× heavier
+  design) — the relaxed ALM is strictly better there; the path targets
+  problems with a cheap-hard/expensive-soft constraint split.
+- **Analytical Jᵀv-based subproblem gradient (opt-in)**:
+  `AugLagOptions(analytical_gradient = true)` assembles the built-in
+  subproblem's gradient as `∇f + Σ Jᵀv` (one vector-Jacobian product per
+  constraint group, exposed via a ChainRules rrule; `ChainRulesCore` is
+  now a direct dependency). Measured on the TopOpt local-stress
+  single-level solve: bit-for-bit the same trajectory as the
+  composed-AD path at 17.8% more wall-clock (311.6 vs 264.6 s) — the
+  per-group reverse passes cost more than the single composed pass on
+  this one-group problem; off by default, an architecture/robustness
+  option for multi-group problems.
+- **`max_time` and `on_iteration` options (new)**:
+  `AugLagOptions(max_time = t)` stops the outer loop once the wall-clock
+  budget is exhausted (no new subproblem started past it, the last
+  completed iterate is reported); `AugLagOptions(on_iteration = f)`
+  calls `f(iter, x, f(x), vnorm)` after every accepted outer iterate and
+  stops the loop when `f` returns `true`.
+- **KKT-complete stopping (opt-in)**: `AugLagOptions(stop_kkt = true,
+  kkt_tol = t)` extends the convergence test from feasibility-only to
+  stationarity + complementarity. Measured on the TopOpt local-stress
+  single-level solve: at `kkt_tol = 1e-6` the stationarity test never
+  fires within 100 outer iterations (the multiplier-error scale is
+  ~ρ·viol) — the solve refines to viol 1.8e-8 in 1819.8 s instead of the
+  264.6 s feasibility stop; opt-in, use a looser `kkt_tol` (≳ 1e-4) or
+  bound the run with `max_time`.
+- **Hybrid curvature (experimental, opt-in)**: `AugLagOptions(curvature =
+  :hybrid)` sums the exact Gauss-Newton penalty terms `ρw·JᵀJ` of the
+  relaxed constraint groups (matrix-free, active-set-restricted
+  inequalities, via the new `GaussNewtonTerm`/`CompositeHessianApprox`
+  interface) plus an L-BFGS model of the remainder — the first cut of
+  the hybrid first/second-order curvature plan. Measured: on the TopOpt
+  local-stress single-level solve the matvec cost dominates (no
+  completion within 20 min vs the 4.5 min L-BFGS baseline); on Rosetta
+  case5 the per-iteration convergence is much stronger than L-BFGS
+  (viol 3.2e-2 vs 0.60 at 200 outer iterations) but the solve is still
+  unconverged at 508 s vs 80 s for SR1 and 43.8 s for Newton — opt-in;
+  the known cost fix is an exact-Jacobian matvec (JuMP evaluator /
+  ForwardDiff) instead of the finite difference. With the exact sparse
+  evaluator Jacobian for JuMP-converted blocks (two sparse matvecs per
+  CG iteration): matches L-BFGS's wall-clock (230.9 vs ~219 s) at 15×
+  better feasibility per 200 outer iterations (viol 3.9e-2 vs 0.60).
+- **Second-order labels for the hybrid curvature (opt-in)**:
+  `AugLagOptions(second_order = SecondOrderSelection(eq, ineq, labels))`
+  selects which relaxed constraint groups contribute their exact
+  multiplier-weighted curvature `μᵀ∇²c` (MOI Lagrangian-Hessian
+  triplets) on top of the Gauss-Newton term. Together with the
+  structured-secant composite update (the exact terms' curvature is
+  subtracted from the secant pairs, so the L-BFGS models only the
+  remainder — the fix that unblocked the outer loop), labeling all
+  groups on Rosetta case5 converges to machine-precision feasibility in
+  29 outer iterations / 34.3 s (viol 9.3e-14) vs 80 s for SR1 and
+  43.8 s for Newton, at a 1.4% higher objective (f = 17808 vs the 17553
+  optimum — a different feasible local solution). The remainder-only
+  L-BFGS inverse was also measured as a Steihaug CG preconditioner and
+  is deliberately not wired (it stalled the solve on case5).
+- **Inexact Steihaug CG (opt-in)**: `AugLagOptions(inexact_cg = true)`
+  passes the subproblem tolerance to the built-in trust-region solver as
+  a relative CG residual tolerance (Dembo–Eisenstat–Steihaug). Measured
+  on Rosetta case5 (hybrid + all labels): bit-for-bit the same
+  trajectory at 3.6% less wall-clock (251.9 vs 261.4 s) — a small win,
+  off by default pending the TopOpt characterization.
+- **Split-secant and FD-of-gradient curvature (experimental, opt-in)**:
+  `curvature = :split` maintains separate L-BFGS histories for the
+  penalty part and the remainder with the structured-secant correction
+  in gradient-difference form (no exact Hessians, any model);
+  `curvature = :fdgrad` takes inexact-Newton steps from one-sided
+  finite differences of the Zygote gradient with a `cg_maxiter` budget;
+  `sub_options.precond = true` enables the L-BFGS two-loop as the CG
+  preconditioner. All three lose on the TopOpt local-stress
+  single-level solve (no completion within 40 / 15 / 28 min
+  respectively vs the 4.5 min L-BFGS baseline — every per-step or
+  per-CG-iteration extra evaluation is a full FEA adjoint there); the
+  mechanics are unit-tested and the modes target problems with cheap
+  constraint evaluations.
+- **Practical relative subproblem tolerance (opt-in)**:
+  `AugLagOptions(sub_tol_schedule = :relative, sub_tol_rel = τ)` sets the
+  inner tolerance proportional to the current constraint violation
+  (`clamp(τ·v_prev, 1e-10, 1e-2)`, Eckstein–Silva). Measured on the TopOpt
+  local-stress single-level solve: bit-for-bit the same trajectory as the
+  `:eta` schedule at 3% more wall-clock (290.9 vs 282.2 s) — no win, so
+  `:eta` stays the default. The duplicate `_set_sub_tol`/`_sub_tol_value`
+  definitions inside `optimize!` were removed along the way (the inner
+  copies shadowed the module-level ones).
+- **Relaxed multiplier step (opt-in)**: `AugLagOptions(multiplier_relax =
+  true)` scales each dual increment by the achieved-accuracy ratio
+  `θ = clamp(sub_tol/‖res‖, 0.1, 1)` of the subproblem stationarity
+  residual (Eckstein-style adaptive relaxation), so loose inner solves
+  cannot poison the multipliers with a full step. Measured on the TopOpt
+  local-stress single-level solve: 2.1% slower (309.5 vs 303.1 s) but a
+  2.1% lighter feasible design (obj 0.0918 vs 0.0938) with marginally
+  better feasibility — a small quality-for-time trade, off by default.
+
 ## 0.4.1
 
 - Docs: package-name section titles and left-aligned logos (no code changes).
+
 ## 0.4.0
 
 - **Adaptive subproblem tolerance for every sub-solver** (default): the new `sub_tol_schedule = :eta` loosens the inner tolerance as the outer feasibility target tightens (`clamp(η², 1e-6, 1e-2)`), 28% faster than the old schedule on TopOpt stress with 4.8× tighter final feasibility. External sub-solvers receive the per-iteration tolerance through their options via the new package extensions (`_set_sub_tol`): Ipopt (`tol`), MMA (`Tolerance`) and NLopt (`ftol_abs`/`xtol_abs`).

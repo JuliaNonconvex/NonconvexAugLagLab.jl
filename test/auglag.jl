@@ -58,13 +58,45 @@ end
     @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
 end
 
-@testitem "AugLagAlg: the built-in solver requires full relaxation" begin
+@testitem "AugLagAlg: hard constraints via the built-in penalty split" begin
     using NonconvexAugLagLab, Test, LinearAlgebra
+    # keeping the inequality hard folds it into the built-in subproblem as
+    # a quadratic penalty (hard_rho); the problem still converges.
     m = Model(x -> sum(x .^ 2))
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
     add_eq_constraint!(m, x -> x[1] + x[2] - 1)
-    options = AugLagOptions(relaxed=RelaxConstraintSelection(eq=false))
-    @test_throws ArgumentError optimize(m, AugLagAlg(), [0.0, 0.0], options=options)
+    add_ineq_constraint!(m, x -> [x[1] - 0.9], [0.0])
+    r = optimize(
+        m,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options=AugLagOptions(;
+            max_iter=200, relaxed=RelaxConstraintSelection(eq=true, ineq=false)
+        ),
+    )
+    @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
+    @test r.minimum ≈ 0.5 atol = 1e-4
+    # hard_rho must be positive
+    @test_throws ArgumentError AugLagOptions(hard_rho=0.0)
+    # the penalty closure's inequality branch (with an active row)
+    φ = NonconvexAugLagLab._penalty_closure(
+        [], [x -> [x[1] - 0.5, x[2] + 1.0]], [], [1.0], 10.0
+    )
+    @test φ([1.0, 0.0]) ≈ 5.0 * 1.25
+    # keeping the EQUALITY hard exercises the kept-eq penalty branch
+    m2 = Model(x -> sum(x .^ 2))
+    addvar!(m2, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m2, x -> x[1] + x[2] - 1)
+    add_ineq_constraint!(m2, x -> [x[1] - 0.9], [0.0])
+    r2 = optimize(
+        m2,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options=AugLagOptions(;
+            max_iter=200, relaxed=RelaxConstraintSelection(eq=false, ineq=true)
+        ),
+    )
+    @test norm(r2.minimizer - [0.5, 0.5]) < 1e-3
 end
 
 @testitem "AugLagAlg: keep_all trajectory" begin
@@ -121,16 +153,20 @@ end
     using NonconvexAugLagLab, Test, LinearAlgebra
     # min sum(x.^2) s.t. x[1] + x[2] = 1 (labeled :relax) and x[1] <= 0.5
     # (not labeled). Relaxing only the labeled constraint must relax the
-    # equality and keep the inequality hard -> the built-in solver then
-    # refuses (it needs everything relaxed), which proves the selection
-    # worked.
+    # equality and keep the inequality hard -> the built-in solver folds
+    # the kept inequality into its penalty split (hard_rho), which proves
+    # the selection worked.
     m = Model(x -> sum(x .^ 2))
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
     add_eq_constraint!(m, x -> x[1] + x[2] - 1; flags=[:relax])
     add_ineq_constraint!(m, x -> x[1] - 0.5)
     sel = RelaxConstraintSelection(eq=false, ineq=false, sd=false, labels=[:relax])
     options = AugLagOptions(relaxed=sel)
-    @test_throws ArgumentError optimize(m, AugLagAlg(), [0.0, 0.0], options=options)
+    r = optimize(m, AugLagAlg(), [0.0, 0.0]; options=options)
+    # the kept inequality is enforced through the hard penalty: nearly
+    # feasible at (0.5, 0.5)
+    @test norm(r.minimizer - [0.5, 0.5]) < 1e-3
+    @test m.ineq_constraints.fs[1](r.minimizer)[1] < 1e-3
     # with both constraints labeled, everything is relaxed and the solve
     # succeeds: min sum(x.^2) s.t. x1+x2=1, x1<=0.5 -> (0.5, 0.5)
     m2 = Model(x -> sum(x .^ 2))
@@ -339,6 +375,19 @@ end
     r = optimize(m, AugLagAlg(), x0; options=AugLagOptions(max_iter=40, outer_schedule=:bm))
     @test norm(r.minimizer - [0.5, 0.5]) < 5e-2
     @test_throws ArgumentError AugLagOptions(outer_schedule=:foo)
+end
+
+@testitem "AugLagAlg: watchdog accept path updates the recursive mean" begin
+    using NonconvexAugLagLab, Test
+    # a well-behaved solve takes only merit-decreasing steps: the watchdog
+    # reference is updated from the first accepted step onward
+    m = Model(x -> (x[1] - 1.0)^2 + (x[2] - 2.0)^2)
+    addvar!(m, [0.0, 0.0], [5.0, 5.0])
+    add_ineq_constraint!(m, x -> [x[1] - 1.5, x[2] - 2.5], [0.0, 0.0])
+    r = optimize(
+        m, AugLagAlg(), [0.0, 0.0]; options=AugLagOptions(; max_iter=100, watchdog=true)
+    )
+    @test norm(r.minimizer - [1.0, 2.0]) < 1e-4
 end
 
 @testitem "AugLagAlg: watchdog safety net rejects merit-increasing subproblem steps" begin
@@ -897,4 +946,307 @@ end
     # weak duals near a bound grow mu back up (to the floor at least)
     μ_grow = NonconvexAugLagLab._box_barrier_μ(1e-6, [2δ, 0.5], l, u, δ, 1.0)
     @test μ_grow > 1e-6
+end
+
+@testitem "AugLagAlg: Anderson mixing on inequality multipliers" begin
+    using NonconvexAugLagLab, Test
+    # min ‖x − [1,1]‖² s.t. x₁ ≤ 0.5, x₂ ≤ 0.5, x₁ + x₂ ≤ 1.5: the
+    # unconstrained optimum is infeasible, two constraints are active at
+    # [0.5, 0.5] and one is inactive — the mix runs on active+inactive rows.
+    m = Model(x -> sum((x .- [1.0, 1.0]) .^ 2))
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_ineq_constraint!(
+        m, x -> [x[1] - 0.5, x[2] - 0.5, x[1] + x[2] - 1.5], [0.0, 0.0, 0.0]
+    )
+    r = optimize(
+        m,
+        AugLagAlg(),
+        [1.0, 1.0];
+        options=AugLagOptions(; max_iter=200, anderson_ineq=true),
+    )
+    @test norm(r.minimizer - [0.5, 0.5]) < 1e-3
+    @test r.minimum ≈ 0.5 atol = 1e-4
+    # depth option: deeper mixing converges, invalid depths are rejected
+    r5 = optimize(
+        m,
+        AugLagAlg(),
+        [1.0, 1.0];
+        options=AugLagOptions(; max_iter=200, anderson_ineq=true, anderson_depth=5),
+    )
+    @test norm(r5.minimizer - [0.5, 0.5]) < 1e-3
+    @test_throws ArgumentError AugLagOptions(anderson_depth=0)
+end
+
+@testitem "AugLagAlg: relaxed multiplier step with loose subproblem solves" begin
+    using NonconvexAugLagLab, Test
+    # loose inner solves (tol = 1e-2) converge with the Eckstein-style
+    # relaxed multiplier step, on eq and ineq multipliers alike.
+    m = Model(x -> (x[1] - 1.0)^2 + (x[2] - 2.0)^2)
+    addvar!(m, [0.0, 0.0], [5.0, 5.0])
+    add_ineq_constraint!(m, x -> [x[1] - 1.5, x[2] - 2.5], [0.0, 0.0])
+    r = optimize(
+        m,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options=AugLagOptions(;
+            max_iter=200,
+            multiplier_relax=true,
+            sub_options=(; max_iter=50, tol=1e-2, globalization=:trustregion),
+        ),
+    )
+    @test norm(r.minimizer - [1.0, 2.0]) < 1e-4
+    @test r.minimum < 1e-6
+end
+
+@testitem "AugLagAlg: spectral penalty update" begin
+    using NonconvexAugLagLab, Test
+    # the spectral (Barzilai-Borwein) penalty update must keep convergence
+    # on a mixed eq+ineq problem (the safeguard only fires on a credible
+    # positive correlation, so the plain runs are the regression baseline).
+    m = Model(x -> sum(x .^ 2))
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+    add_ineq_constraint!(m, x -> [x[1] - 0.9], [0.0])
+    r = optimize(
+        m, AugLagAlg(), [0.0, 0.0]; options=AugLagOptions(; max_iter=200, spectral_rho=true)
+    )
+    @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
+    @test r.minimum ≈ 0.5 atol = 1e-4
+end
+
+@testitem "AugLagAlg: Broyden dual-secant correction" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra
+    const NAL = NonconvexAugLagLab
+    # the inverse secant model starts at -I (first step = plain ascent)
+    b = Ref{Any}(nothing)
+    NAL._dual_secant_init!(b, 2)
+    @test b[] == -Matrix{Float64}(I, 2, 2)
+    # one good-Broyden inverse update satisfies the secant condition C⁺Δc = Δy
+    C = copy(b[])
+    Δy = [0.3, -0.1]
+    Δc = [0.1, 0.05]
+    NAL._dual_secant_update!(C, Δy, Δc)
+    @test C * Δc ≈ Δy atol = 1e-12
+    # degenerate denominators leave C unchanged
+    C2 = copy(b[])
+    NAL._dual_secant_update!(C2, zeros(2), Δc)
+    @test C2 == b[]
+    # end-to-end: an equality-constrained solve converges with the correction
+    m = Model(x -> sum(x .^ 2))
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+    r = optimize(
+        m, AugLagAlg(), [0.0, 0.0]; options=AugLagOptions(; max_iter=200, dual_secant=true)
+    )
+    @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
+    @test r.minimum ≈ 0.5 atol = 1e-4
+end
+
+@testitem "AugLagAlg: max_time budget" begin
+    using NonconvexAugLagLab, Test
+    m = Model(x -> sum(x .^ 2))
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+    # an exhausted budget permits at most one completed subproblem (whether
+    # the first elapsed check fires before or after iteration 1 is a
+    # clock-tick race, but the second check always fires)
+    r = optimize(
+        m, AugLagAlg(), [0.0, 0.0]; options=AugLagOptions(; max_time=1e-9, keep_all=true)
+    )
+    @test length(r.trajectory) <= 1
+    # validation
+    @test_throws ArgumentError AugLagOptions(max_time=0.0)
+    # a generous budget converges normally
+    r2 = optimize(
+        m, AugLagAlg(), [0.0, 0.0]; options=AugLagOptions(; max_time=Inf, max_iter=200)
+    )
+    @test norm(r2.minimizer - [0.5, 0.5]) < 1e-4
+end
+
+@testitem "AugLagAlg: on_iteration callback with early termination" begin
+    using NonconvexAugLagLab, Test
+    m = Model(x -> sum(x .^ 2))
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+    seen = Tuple{Int,Float64}[]
+    r = optimize(
+        m,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options=AugLagOptions(;
+            max_iter=200, on_iteration=(iter, x, fx, v) -> begin
+                push!(seen, (iter, fx))
+                return iter >= 3
+            end
+        ),
+    )
+    @test length(seen) == 3
+    @test seen[1][1] == 1
+    @test seen[3][1] == 3
+end
+
+@testitem "AugLagAlg: analytical AL gradient matches AD" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra, NonconvexCore
+    const NAL = NonconvexAugLagLab
+    f = x -> (x[1] - 1)^2 + x[2]^2
+    c = x -> [x[1] + x[2] - 1.0]
+    g = x -> [x[1] - 0.5, x[2] - 0.5]
+    a = NAL.AnalyticalALObjective(
+        f, [c], [g], [[0.3]], [[0.2, 0.1]], [1.0], [1.0], 10.0, x -> 0.0
+    )
+    ref = z -> begin
+        v = f(z)
+        cv = c(z)
+        v += dot([0.3], cv) + 5.0 * dot(cv, cv)
+        gv = max.(g(z), 0.0)
+        v + dot([0.2, 0.1], gv) + 5.0 * dot(gv, gv)
+    end
+    for x in ([0.4, 0.3], [0.6, 0.6], [0.1, -0.2])
+        va, ga = NonconvexCore.value_gradient(a, x)
+        vr, gr = NonconvexCore.value_gradient(ref, x)
+        @test va ≈ vr atol = 1e-12
+        @test ga ≈ gr atol = 1e-8
+    end
+    # end-to-end with the option on
+    m = Model(x -> sum(x .^ 2))
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+    add_ineq_constraint!(m, x -> [x[1] - 0.9], [0.0])
+    r = optimize(
+        m,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options=AugLagOptions(; max_iter=200, analytical_gradient=true),
+    )
+    @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
+end
+
+@testitem "AugLagAlg: KKT-complete stopping" begin
+    using NonconvexAugLagLab, Test
+    m = Model(x -> sum(x .^ 2))
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+    add_ineq_constraint!(m, x -> [x[1] - 0.9], [0.0])
+    r = optimize(
+        m,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options=AugLagOptions(; max_iter=200, stop_kkt=true, kkt_tol=1e-4),
+    )
+    @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
+    @test_throws ArgumentError AugLagOptions(kkt_tol=0.0)
+end
+
+@testitem "AugLagAlg: objective recovery and infeasibility detection" begin
+    using NonconvexAugLagLab, Test
+    const NAL = NonconvexAugLagLab
+    # recovery identity: f = L - penalty terms (the satisfied inequality
+    # row contributes nothing)
+    eqvals = [[0.3]]
+    ineqvals = [[-0.2], [0.4]]
+    y = [[1.0]]
+    λ = [[0.0], [2.0]]
+    mt = 5.0
+    f = NAL._recover_objective(mt, eqvals, ineqvals, y, λ, [2.0], [1.0, 1.0], 10.0, 1.0)
+    ref =
+        mt - (dot(y[1], eqvals[1]) + 20 / 2 * dot(eqvals[1], eqvals[1])) -
+        (dot(λ[2], [0.4]) + 10 / 2 * 0.4^2)
+    @test f ≈ ref
+    # end-to-end: an infeasible problem is detected via the dual certificate
+    m = Model(x -> sum(x .^ 2))
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] - 0.0)
+    add_eq_constraint!(m, x -> x[1] - 1.0)
+    r = optimize(m, AugLagAlg(), [0.5, 0.0]; options=AugLagOptions(; max_iter=200))
+    @test r.status == :infeasible
+    # the backward-compatible 4-arg result constructor keeps working
+    @test AugLagResult([0.0], 0.0, nothing, nothing).status == :unknown
+end
+
+@testitem "AugLagAlg: second-order label selection paths" begin
+    using NonconvexAugLagLab, Test
+    const NAL = NonconvexAugLagLab
+    # a single Symbol label and a collection of labels both parse
+    s1 = NAL.SecondOrderSelection(labels=:second_order)
+    @test s1.labels == Set([:second_order])
+    s2 = NAL.SecondOrderSelection(labels=[:a, "b"])
+    @test s2.labels == Set([:a, :b])
+    # per-kind boolean and index-vector selections
+    @test NAL._so_selected(true, 3, 5)
+    @test !NAL._so_selected(false, 3, 5)
+    @test NAL._so_selected([1, 3], 3, 5)
+    @test !NAL._so_selected([1, 3], 2, 5)
+    # label matching against constraint flags
+    m = Model(x -> sum(x .^ 2))
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1; flags=[:second_order])
+    add_ineq_constraint!(m, x -> x[1] - 0.5)
+    vm, _, _ = NonconvexCore.tovecmodel(m, [0.0, 0.0])
+    eq_rel, ineq_rel, _, _ = NAL._subproblem(vm, NAL.RelaxConstraintSelection(), nothing)
+    so_eq, so_ineq = NAL._second_order_flags(
+        NAL.SecondOrderSelection(eq=false, ineq=false, labels=[:second_order]),
+        vm,
+        eq_rel,
+        ineq_rel,
+    )
+    @test so_eq == [true]
+    @test so_ineq == [false]
+    # the vector form selects the second inequality group only
+    so_eq2, so_ineq2 = NAL._second_order_flags(
+        NAL.SecondOrderSelection(eq=[1], ineq=[2]), vm, eq_rel, ineq_rel
+    )
+    @test so_eq2 == [true]
+    @test so_ineq2 == [false]
+    # the defensive fallback rejects anything else
+    @test !NAL._so_selected(:bogus, 1, 3)
+end
+
+@testitem "AugLagAlg: split and fdgrad curvature modes end-to-end" begin
+    using NonconvexAugLagLab, Test
+    for curv in (:split, :fdgrad)
+        m = Model(x -> sum(x .^ 2))
+        addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+        add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+        add_ineq_constraint!(m, x -> [x[1] - 0.9], [0.0])
+        r = optimize(
+            m,
+            AugLagAlg(),
+            [0.0, 0.0];
+            options=AugLagOptions(; max_iter=200, curvature=curv),
+        )
+        @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
+    end
+    # the split/fdgrad modes reject non-quadratic penalties at solve time
+    m2 = Model(x -> sum(x .^ 2))
+    addvar!(m2, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m2, x -> x[1] + x[2] - 1)
+    @test_throws ArgumentError optimize(
+        m2,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options=AugLagOptions(; max_iter=5, curvature=:split, penalty=:pbm),
+    )
+    @test_throws ArgumentError optimize(
+        m2,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options=AugLagOptions(; max_iter=5, curvature=:fdgrad, penalty=:mixed),
+    )
+end
+
+@testitem "AugLagAlg: warm continuation of the hybrid and split curvature" begin
+    using NonconvexAugLagLab, Test
+    for curv in (:hybrid, :split)
+        m = Model(x -> sum(x .^ 2))
+        addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+        add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+        opts = AugLagOptions(; max_iter=50, curvature=curv, warm_continue=true)
+        vm, x0f, _ = NonconvexCore.tovecmodel(m, [0.0, 0.0])
+        ws = Workspace(vm, AugLagAlg(), x0f; options=opts)
+        r1 = NonconvexCore.optimize!(ws)
+        # the second solve reuses the SAME workspace (the warm rebuild path)
+        r2 = NonconvexCore.optimize!(ws)
+        @test norm(r1.minimizer - [0.5, 0.5]) < 1e-4
+        @test norm(r2.minimizer - [0.5, 0.5]) < 1e-4
+    end
 end
