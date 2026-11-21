@@ -70,6 +70,36 @@ function apply_term!(Hv, t::GaussNewtonTerm, v)
 end
 
 """
+    JumpGaussNewtonTerm(je, rows, w, x[, act])
+
+The Gauss-Newton term `w · J(x)ᵀ(J(x) v)` of a JuMP-converted constraint
+block: the exact sparse Jacobian of the MathOptInterface evaluator is
+materialized once per rebound point and each matvec is two sparse
+products — no finite differences and no reverse passes, so the
+per-CG-iteration cost is negligible (the Jacobian evaluation dominates,
+once per subproblem iterate).
+"""
+struct JumpGaussNewtonTerm{J,X}
+    je::J
+    rows::UnitRange{Int}
+    w::Float64
+    x::X
+    act::Union{Nothing,BitVector}
+    J::SparseMatrixCSC{Float64,Int}
+end
+function JumpGaussNewtonTerm(je, rows, w, x, act=nothing)
+    J = NonconvexCore.jump_jacobian(je, x)[rows, :]
+    return JumpGaussNewtonTerm(je, rows, w, x, act, J)
+end
+
+function apply_term!(Hv, t::JumpGaussNewtonTerm, v)
+    Jv = t.J * v
+    t.act === nothing || (Jv[.!t.act] .= 0.0)
+    mul!(Hv, t.J', Jv, t.w, 1.0)
+    return Hv
+end
+
+"""
     CompositeHessianApprox(qn, build_terms)
 
 A Hessian model summing a quasi-Newton approximation `qn` (of the

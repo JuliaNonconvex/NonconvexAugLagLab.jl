@@ -107,7 +107,12 @@
   (viol 3.2e-2 vs 0.60 at 200 outer iterations) but the solve is still
   unconverged at 508 s vs 80 s for SR1 and 43.8 s for Newton — opt-in;
   the known cost fix is an exact-Jacobian matvec (JuMP evaluator /
-  ForwardDiff) instead of the finite difference.
+  ForwardDiff) instead of the finite difference. With the exact sparse
+  evaluator Jacobian for JuMP-converted blocks (two sparse matvecs per
+  CG iteration): matches L-BFGS's wall-clock (230.9 vs ~219 s) at 15×
+  better feasibility per 200 outer iterations (viol 3.9e-2 vs 0.60) —
+  still more outer iterations than SR1/Newton; the next lever is the
+  label-gated exact `λᵀ∇²c` equality terms.
 - **Practical relative subproblem tolerance (opt-in)**:
   `AugLagOptions(sub_tol_schedule = :relative, sub_tol_rel = τ)` sets the
   inner tolerance proportional to the current constraint violation

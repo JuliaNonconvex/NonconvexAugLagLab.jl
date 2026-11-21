@@ -226,12 +226,13 @@ end
   TopOpt local-stress single-level solve: the matvec cost dominates (a
   forward finite difference + a reverse pass per CG iteration against
   full-FEA stress constraints) — no completion within 20 min vs the
-  4.5 min L-BFGS baseline; on Rosetta case5 the per-iteration
-  convergence is much stronger than L-BFGS (viol 3.2e-2 vs 0.60 at
-  200 outer iterations, objective climbing toward the true optimum) but
-  the solve is still unconverged at 508 s vs 80 s for SR1 and 43.8 s for
-  Newton — opt-in; the known cost fix is an exact-Jacobian matvec
-  (JuMP evaluator / ForwardDiff) instead of the finite difference.
+  4.5 min L-BFGS baseline; on Rosetta case5 the JuMP-converted blocks
+  use the exact sparse evaluator Jacobian (two sparse matvecs per CG
+  iteration), matching L-BFGS's wall-clock (230.9 vs ~219 s) at 15×
+  better feasibility per 200 outer iterations (viol 3.9e-2 vs 0.60),
+  but the outer loop still needs more iterations than SR1 (80 s) or
+  Newton (43.8 s) — opt-in; the next lever is the label-gated exact
+  `λᵀ∇²c` terms for the equality blocks.
   Measured: `:sr1` is a massive
   Rosetta AC-OPF case5 win (80 vs 219 s, viol 0.016 vs 0.60, f near the
   true optimum) but slower on the TopOpt local-stress problem (no
@@ -1050,16 +1051,41 @@ end
 
 # Exact Gauss-Newton penalty terms of the relaxed constraint groups at x
 # (for curvature = :hybrid): rho*w*J'J per group, matrix-free, with the
-# inequality rows restricted to the active set frozen at x.
-function _hybrid_terms(x, eq_fs, ineq_fs, w_eq, w_ineq, ρ)
+# inequality rows restricted to the active set frozen at x. JuMP-converted
+# blocks use the exact sparse evaluator Jacobian (two sparse matvecs per
+# CG iteration, one Jacobian evaluation per rebound); the rest use the
+# finite-difference matvec. The evaluator's row order is inequalities
+# first, then equalities; the scaling folds into the jump weights
+# (c = s*c~ so rho*w*J~'J~ = (rho*w/s^2) J'J).
+function _hybrid_terms(
+    x, model, eq_rel, ineq_rel, eq_fs, ineq_fs, w_eq, w_ineq, ρ, je, scales
+)
+    neq = length(eq_rel)
     terms = ()
-    for (k, c) in enumerate(eq_fs)
-        terms = (terms..., GaussNewtonTerm(c, ρ * w_eq[k], copy(x)))
-    end
-    for (k, c) in enumerate(ineq_fs)
-        gv = _vecval(c(x))
+    off = 0
+    for (k, i) in enumerate(ineq_rel)
+        gv = _vecval(ineq_fs[k](x))
         act = gv .> 0
-        terms = (terms..., GaussNewtonTerm(c, ρ * w_ineq[k], copy(x), act))
+        if je !== nothing && _is_jump_block(model.ineq_constraints.fs[i], je)
+            rawg = _vecval(model.ineq_constraints.fs[i](x))
+            rows = (off + 1):(off + length(rawg))
+            w = ρ * w_ineq[k] / scales[neq + k]^2
+            terms = (terms..., JumpGaussNewtonTerm(je, rows, w, copy(x), act))
+        else
+            terms = (terms..., GaussNewtonTerm(ineq_fs[k], ρ * w_ineq[k], copy(x), act))
+        end
+        off += length(gv)
+    end
+    for (k, i) in enumerate(eq_rel)
+        if je !== nothing && _is_jump_block(model.eq_constraints.fs[i], je)
+            rawc = _vecval(model.eq_constraints.fs[i](x))
+            rows = (off + 1):(off + length(rawc))
+            w = ρ * w_eq[k] / scales[k]^2
+            terms = (terms..., JumpGaussNewtonTerm(je, rows, w, copy(x)))
+        else
+            terms = (terms..., GaussNewtonTerm(eq_fs[k], ρ * w_eq[k], copy(x)))
+        end
+        off += length(_vecval(eq_fs[k](x)))
     end
     return terms
 end
@@ -1629,13 +1655,30 @@ function optimize!(workspace::AugLagWorkspace)
         else
             throw(ArgumentError("h0 must be :penalty or :identity"))
         end
+        # the JuMP evaluator behind a JuMP-converted objective, for the
+        # exact-Jacobian hybrid terms
+        je_hybrid =
+            options.curvature === :hybrid ? _jump_evaluator(model.objective) : nothing
         qn_approx = if warm && workspace.state.approx !== nothing
             st_approx = workspace.state.approx
             if st_approx isa CompositeHessianApprox
                 # keep the warm-started quasi-Newton history but rebuild
                 # the exact terms with this run's penalty state
                 CompositeHessianApprox(
-                    st_approx.qn, x -> _hybrid_terms(x, eq_fs, ineq_fs, w_eq, w_ineq, ρ)
+                    st_approx.qn,
+                    x -> _hybrid_terms(
+                        x,
+                        model,
+                        eq_rel,
+                        ineq_rel,
+                        eq_fs,
+                        ineq_fs,
+                        w_eq,
+                        w_ineq,
+                        ρ,
+                        je_hybrid,
+                        scales,
+                    ),
                 )
             else
                 st_approx
@@ -1653,7 +1696,20 @@ function optimize!(workspace::AugLagWorkspace)
             # so the remainder model starts from the identity
             base_qn = LBFGSApprox(memory; H0=IdentityPreconditioner())
             CompositeHessianApprox(
-                base_qn, x -> _hybrid_terms(x, eq_fs, ineq_fs, w_eq, w_ineq, ρ)
+                base_qn,
+                x -> _hybrid_terms(
+                    x,
+                    model,
+                    eq_rel,
+                    ineq_rel,
+                    eq_fs,
+                    ineq_fs,
+                    w_eq,
+                    w_ineq,
+                    ρ,
+                    je_hybrid,
+                    scales,
+                ),
             )
         else
             LBFGSApprox(memory; H0=h0_op)

@@ -383,3 +383,19 @@ end
     )
     @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
 end
+
+@testitem "QuasiNewtonAlg: hybrid curvature JuMP exact-Jacobian terms" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra, JuMP, NonconvexCore
+    # a JuMP-converted model converges under the hybrid curvature with the
+    # exact sparse Jacobian matvecs
+    jm = JuMP.Model()
+    JuMP.@variable(jm, -5 <= x[1:2] <= 5)
+    JuMP.@objective(jm, Min, sum(x .^ 2))
+    JuMP.@constraint(jm, x[1] + x[2] == 1)
+    JuMP.@constraint(jm, x[1] <= 0.9)
+    dm = NonconvexCore.DictModel(jm)
+    x0 = NonconvexCore.getinit(dm)
+    r = optimize(dm, AugLagAlg(), x0; options = AugLagOptions(; max_iter = 200, curvature = :hybrid))
+    xv = r.minimizer[:x]
+    @test norm(xv - [0.5, 0.5]) < 1e-4
+end
