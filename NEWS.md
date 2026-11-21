@@ -30,10 +30,6 @@
   and the JuMP Gauss-Newton term reuses its matvec buffer. A candidate
   fix resetting η/ω on selective weight bumps was measured harmful on
   the stress default (53% slower) and reverted.
-- **Adaptive subproblem tolerance extension for NonconvexUno**: the new
-  weak-dep extension sets Uno's `primal_tolerance`/`dual_tolerance`
-  from the subproblem tolerance schedule.
-
 - **Spectral penalty update (opt-in)**: `AugLagOptions(spectral_rho = true)`
   replaces the two-way penalty decrease on good steps with a spectral
   (Barzilai–Borwein) update of the dual step, `ρ ← ‖Δc‖²/⟨Δc, Δy⟩` from
@@ -193,6 +189,10 @@
   local-stress single-level solve: 2.1% slower (309.5 vs 303.1 s) but a
   2.1% lighter feasible design (obj 0.0918 vs 0.0938) with marginally
   better feasibility — a small quality-for-time trade, off by default.
+
+## 0.4.1
+
+- Docs: package-name section titles and left-aligned logos (no code changes).
 
 ## 0.4.0
 

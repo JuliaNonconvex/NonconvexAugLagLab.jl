@@ -1,4 +1,4 @@
-# Augmented Lagrangian in pure Julia
+# NonconvexAugLagLab
 
 ![JuliaNonconvex logo](https://raw.githubusercontent.com/JuliaNonconvex/NonconvexAugLagLab.jl/master/docs/src/assets/logo.png)
 
