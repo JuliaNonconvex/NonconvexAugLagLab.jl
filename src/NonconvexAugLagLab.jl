@@ -6,6 +6,8 @@ export QuasiNewtonAlg, AbstractHessianApprox
 export LBFGSApprox, DenseBFGSApprox, StructuredBFGSApprox, NewtonTRApprox
 export LimitedMemorySR1Approx
 export AbstractCurvatureTerm, GaussNewtonTerm, CompositeHessianApprox
+export JumpGaussNewtonTerm, JumpLagrangianTerm, SplitSecantApprox
+export FDGradHessianApprox
 export IdentityPreconditioner, DiagonalPreconditioner
 export SQSDPAlg, SQSDPOptions, SQSDPResult
 

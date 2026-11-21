@@ -131,6 +131,19 @@
   on Rosetta case5 (hybrid + all labels): bit-for-bit the same
   trajectory at 3.6% less wall-clock (251.9 vs 261.4 s) — a small win,
   off by default pending the TopOpt characterization.
+- **Split-secant and FD-of-gradient curvature (experimental, opt-in)**:
+  `curvature = :split` maintains separate L-BFGS histories for the
+  penalty part and the remainder with the structured-secant correction
+  in gradient-difference form (no exact Hessians, any model);
+  `curvature = :fdgrad` takes inexact-Newton steps from one-sided
+  finite differences of the Zygote gradient with a `cg_maxiter` budget;
+  `sub_options.precond = true` enables the L-BFGS two-loop as the CG
+  preconditioner. All three lose on the TopOpt local-stress
+  single-level solve (no completion within 40 / 15 / 28 min
+  respectively vs the 4.5 min L-BFGS baseline — every per-step or
+  per-CG-iteration extra evaluation is a full FEA adjoint there); the
+  mechanics are unit-tested and the modes target problems with cheap
+  constraint evaluations.
 - **Practical relative subproblem tolerance (opt-in)**:
   `AugLagOptions(sub_tol_schedule = :relative, sub_tol_rel = τ)` sets the
   inner tolerance proportional to the current constraint violation

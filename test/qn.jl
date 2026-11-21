@@ -476,3 +476,25 @@ end
     NAL.LinearAlgebra.ldiv!(z, qn2, r)
     @test z == r  # identity base operator, empty history
 end
+
+@testitem "QuasiNewtonAlg: split-secant structured update" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra
+    const NAL = NonconvexAugLagLab
+    # phi = 2*x1^2 with grad phi = [4x1, 0]
+    φgrad = x -> [4x[1], 0.0]
+    rem = NAL.LBFGSApprox(5)
+    pen = NAL.LBFGSApprox(5)
+    H = NAL.SplitSecantApprox(rem, pen, φgrad)
+    NAL.init!(H, 2, zeros(2))
+    x = [1.0, 1.0]
+    xnew = [1.5, 1.2]
+    s = xnew .- x
+    y = [3.0, 1.0]
+    NAL.update!(H, s, y, x, xnew)
+    Δ = φgrad(xnew) .- φgrad(x)
+    @test H.qn_pen.s[1] == s
+    @test H.qn_pen.y[1] ≈ Δ
+    @test H.qn_rem.y[1] ≈ y .- Δ
+    # the penalty model's inverse is the CG preconditioner
+    @test NAL._steihaug_precond(H) === pen
+end

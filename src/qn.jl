@@ -172,10 +172,114 @@ end
 _initialized(H::CompositeHessianApprox, n) = _initialized(H.qn, n)
 _initialized(H::CompositeHessianApprox, n::Int) = _initialized(H.qn, n)
 
+"""
+    SplitSecantApprox(qn_rem, qn_pen, grad_penalty)
+
+The split-secant model for problems without exact Hessians: the AL
+objective splits into the penalty part `φ = ρ/2‖c‖² + ρ/2‖g⁺‖²` and the
+remainder `ψ = f + yᵀc + λᵀg⁺`, each modeled by its own quasi-Newton
+history. The penalty model receives the secant pair
+`(s, ∇φ(x⁺) − ∇φ(x))` — the exact directional second derivative of the
+dominant penalty curvature from gradient differences alone (two reverse
+passes of the scalar penalty function per accepted step, no
+Hessian-vector products) — and the remainder model receives the
+structured-secant corrected pair `(s, y − Δ∇φ)` (Dennis-Gay-Welsch in
+gradient-difference form). The CG model is the sum of the two two-loop
+recursions, and the penalty model's inverse is the Steihaug
+preconditioner (the secant inverse of the dominant term — the correct
+scaling, as opposed to the remainder inverse measured harmful on
+case5).
+"""
+struct SplitSecantApprox{Q1<:AbstractHessianApprox,Q2<:AbstractHessianApprox,F} <:
+       AbstractHessianApprox
+    qn_rem::Q1
+    qn_pen::Q2
+    grad_penalty::F
+end
+
+function init!(H::SplitSecantApprox, n, x0)
+    init!(H.qn_rem, n, x0)
+    init!(H.qn_pen, n, x0)
+    return H
+end
+function reset!(H::SplitSecantApprox)
+    reset!(H.qn_rem)
+    reset!(H.qn_pen)
+    return H
+end
+solve!(d, H::SplitSecantApprox, g) = solve!(d, H.qn_pen, g)
+function apply!(Bv, H::SplitSecantApprox, v)
+    apply!(Bv, H.qn_rem, v)
+    Bv2 = similar(v)
+    apply!(Bv2, H.qn_pen, v)
+    Bv .+= Bv2
+    return Bv
+end
+function _initialized(H::SplitSecantApprox, n)
+    _initialized(H.qn_rem, n) && _initialized(H.qn_pen, n)
+end
+function _initialized(H::SplitSecantApprox, n::Int)
+    _initialized(H.qn_rem, n) && _initialized(H.qn_pen, n)
+end
+_steihaug_precond(H::SplitSecantApprox) = H.qn_pen
+
+# The position-aware secant update: receives the step endpoints so the
+# penalty gradient difference can be evaluated exactly. The default
+# falls back to the classical pair.
+update!(H::AbstractHessianApprox, s, y, x, xnew) = update!(H, s, y)
+function update!(H::SplitSecantApprox, s, y, x, xnew)
+    gφ₊ = H.grad_penalty(xnew)
+    gφ₋ = H.grad_penalty(x)
+    Δ = gφ₊ .- gφ₋
+    update!(H.qn_rem, s, y .- Δ)
+    update!(H.qn_pen, s, Δ)
+    return H
+end
+
 # Rebuild the exact terms at the current iterate (a no-op for models
-# without position-dependent terms).
+# without position-dependent terms). The three-argument form also
+# receives the current gradient, so the finite-difference Hessian models
+# can reuse it (one extra gradient evaluation per product).
 _rebind_terms!(H::CompositeHessianApprox, x) = (H.terms[]=H.build_terms(x); H)
-_rebind_terms!(::AbstractHessianApprox, x) = nothing
+_rebind_terms!(H::AbstractHessianApprox, x) = nothing
+_rebind_terms!(H::AbstractHessianApprox, x, g) = _rebind_terms!(H, x)
+_rebind_terms!(H::CompositeHessianApprox, x, g) = _rebind_terms!(H, x)
+
+"""
+    FDGradHessianApprox(gradfun)
+
+Inexact-Newton curvature from a one-sided finite difference of the
+(Zygote-computed) gradient: `Hv = (g(x + εv) − g(x)) / ε` — the
+directional derivative of the gradient, reusing the driver's current
+gradient so each Hessian-vector product costs a single extra gradient
+evaluation (Zygote cannot be nested, and ForwardDiff cannot cross its
+tape). Intended with a small CG budget (`cg_maxiter`).
+"""
+mutable struct FDGradHessianApprox <: AbstractHessianApprox
+    gradfun::Function
+    x::Vector{Float64}
+    g0::Vector{Float64}
+    FDGradHessianApprox(gradfun::Function) = new(gradfun, Float64[], Float64[])
+end
+
+init!(H::FDGradHessianApprox, n, x0) = (H.x=copy(x0); H.g0=similar(x0); H)
+reset!(H::FDGradHessianApprox) = H
+update!(H::FDGradHessianApprox, s, y, x, xnew) = H
+function _rebind_terms!(H::FDGradHessianApprox, x, g)
+    H.x .= x
+    H.g0 .= g
+    return H
+end
+_is_newton(::FDGradHessianApprox) = true
+
+function apply!(Hv, H::FDGradHessianApprox, v)
+    nv = max(norm(v), 1e-12)
+    ε = sqrt(eps(Float64)) * (1 + norm(H.x)) / nv
+    gp = H.gradfun(H.x .+ ε .* v)
+    Hv .= (gp .- H.g0) ./ ε
+    return Hv
+end
+solve!(d, H::FDGradHessianApprox, g) = copyto!(d, g)
 
 # ------------------------------------------------------------------
 # Preconditioners / H0 operators
@@ -553,13 +657,12 @@ _is_newton(::NewtonTRApprox) = true
 _is_newton(::Any) = false
 
 # The Steihaug preconditioner of an approximation, when it carries one.
-# NOTE: the composite deliberately does NOT expose its quasi-Newton
-# inverse as the CG preconditioner - measured on Rosetta case5, the
-# remainder-only L-BFGS inverse is a badly-scaled preconditioner for the
-# exact-term-dominated system (it stalled the solve entirely before the
-# structured-secant fix and still degraded it ~700x afterwards); the
-# unpreconditioned CG is faster in practice there.
+# The composite deliberately does NOT expose its quasi-Newton inverse as
+# the CG preconditioner (measured harmful on case5). The plain L-BFGS can
+# serve as its own preconditioner (the two-loop inverse) - opt-in via
+# QuasiNewtonAlg(precond = true), since it changes the steps.
 _steihaug_precond(a) = hasproperty(a, :precond) ? a.precond : nothing
+_steihaug_precond(H::LBFGSApprox) = H
 
 # The two-loop recursion as a left-division: lets any Hessian
 # approximation serve as the Steihaug CG preconditioner.
@@ -598,6 +701,8 @@ struct QuasiNewtonAlg{A<:AbstractHessianApprox} <: AbstractOptimizer
     tron_cauchy::Bool
     projected_stop::Bool
     cg_tol::Union{Nothing,Real}
+    cg_maxiter::Union{Nothing,Int}
+    precond::Bool
 end
 # The quasi-Newton driver solves smooth box-constrained (possibly unbounded)
 # problems; it handles no other constraint kinds.
@@ -631,12 +736,16 @@ function QuasiNewtonAlg(
     tron_cauchy::Bool=false,
     projected_stop::Bool=true,
     cg_tol=nothing,
+    cg_maxiter=nothing,
+    precond::Bool=false,
 )
     globalization in (:backtracking, :wolfe, :trustregion, :tron) || throw(
         ArgumentError("globalization must be :backtracking, :wolfe, :trustregion or :tron"),
     )
     (cg_tol === nothing || cg_tol > 0) ||
         throw(ArgumentError("cg_tol must be positive or nothing"))
+    (cg_maxiter === nothing || cg_maxiter >= 1) ||
+        throw(ArgumentError("cg_maxiter must be >= 1 or nothing"))
     return QuasiNewtonAlg(
         approx,
         globalization,
@@ -651,6 +760,8 @@ function QuasiNewtonAlg(
         tron_cauchy,
         projected_stop,
         cg_tol,
+        cg_maxiter,
+        precond,
     )
 end
 
@@ -766,8 +877,9 @@ function optimize!(workspace::QuasiNewtonWorkspace)
         counter[] += 1
         d = similar(x)
         # rebuild the position-dependent exact terms (no-op for plain
-        # quasi-Newton models)
-        _rebind_terms!(approx, x)
+        # quasi-Newton models); the current gradient accompanies it for the
+        # finite-difference Hessian models
+        _rebind_terms!(approx, x, g)
         if optimizer.globalization === :tron
             # TRON: projected-CG trust-region step with active-set tracking.
             d = _tron_subproblem(v -> _hessmatvec(approx, v), g, x, lb, ub, Δ, τ)
@@ -787,7 +899,7 @@ function optimize!(workspace::QuasiNewtonWorkspace)
                 (ared / pred > 0.1 || (optimizer.nonmonotone && fnew < fref - 1e-2 * pred))
                 s = d
                 y = copy(gradfun(xnew)) .- g
-                update!(approx, s, y)
+                update!(approx, s, y, x, xnew)
                 x .= xnew
                 fx = fnew
                 g .= gradfun(x)
@@ -807,12 +919,18 @@ function optimize!(workspace::QuasiNewtonWorkspace)
         end
         if optimizer.globalization === :trustregion
             # Steihaug-Toint CG with the current Hessian model
-            Hmat = _is_newton(approx) ? approx.hessfun(x) : nothing
-            if _is_newton(approx)
+            if approx isa NewtonTRApprox || approx isa JumpNewtonTRApprox
+                Hmat = approx.hessfun(x)
                 approx.H .= Hmat
             end
             d, negcurv = _steihaug(
-                approx, g, Δ, τ, _steihaug_precond(approx), optimizer.cg_tol
+                approx,
+                g,
+                Δ,
+                τ,
+                optimizer.precond ? _steihaug_precond(approx) : nothing,
+                optimizer.cg_tol,
+                optimizer.cg_maxiter,
             )
             d = _project(x, d, lb, ub)
             norm(d) < 1e-12 && break
@@ -832,7 +950,7 @@ function optimize!(workspace::QuasiNewtonWorkspace)
                 (ared / pred > 0.1 || (optimizer.nonmonotone && fnew < fref - 1e-2 * pred))
                 s = d
                 y = copy(gradfun(xnew)) .- g
-                update!(approx, s, y)
+                update!(approx, s, y, x, xnew)
                 x .= xnew
                 fx = fnew
                 g .= gradfun(x)
@@ -849,7 +967,13 @@ function optimize!(workspace::QuasiNewtonWorkspace)
                 # with the gradient evaluated at the rejected trial point.
                 gsoc = gradfun(xnew)
                 dsoc, _ = _steihaug(
-                    approx, gsoc, Δ, τ, _steihaug_precond(approx), optimizer.cg_tol
+                    approx,
+                    gsoc,
+                    Δ,
+                    τ,
+                    optimizer.precond ? _steihaug_precond(approx) : nothing,
+                    optimizer.cg_tol,
+                    optimizer.cg_maxiter,
                 )
                 dsoc = _project(x, dsoc, lb, ub)
                 xnsoc = x .+ dsoc
@@ -859,7 +983,7 @@ function optimize!(workspace::QuasiNewtonWorkspace)
                 if pred_soc > 0 && ared_soc / pred_soc > 0.1
                     s = dsoc
                     y = copy(gradfun(xnsoc)) .- g
-                    update!(approx, s, y)
+                    update!(approx, s, y, x, xnsoc)
                     x .= xnsoc
                     fx = fnsoc
                     g .= gradfun(x)
@@ -901,7 +1025,7 @@ function optimize!(workspace::QuasiNewtonWorkspace)
             apply!(Bs, approx, s)
             y = _damped_secant(y, s, Bs)
         end
-        update!(approx, s, y)
+        update!(approx, s, y, x, xnew)
         x .= xnew
         fx = fxnew
         g .= gradfun(x)
@@ -1068,8 +1192,9 @@ end
 
 # Steihaug–Toint CG for the trust-region subproblem
 # min ⟨g,d⟩ + ½ dᵀ(B + τI)d, ‖d‖ ≤ Δ (Levenberg dual regularization)
-function _steihaug(approx, g, Δ, τ=0.0, M=nothing, cg_tol=nothing)
+function _steihaug(approx, g, Δ, τ=0.0, M=nothing, cg_tol=nothing, cg_maxiter=nothing)
     n = length(g)
+    maxit = cg_maxiter === nothing ? n : min(n, cg_maxiter)
     d = zeros(n)
     r = copy(g)
     # preconditioned CG: z = M⁻¹r; unpreconditioned z = r
@@ -1085,7 +1210,7 @@ function _steihaug(approx, g, Δ, τ=0.0, M=nothing, cg_tol=nothing)
     rnorm2 = dot(r, r)
     rnorm2 < 1e-14 && return d, false
     rnorm2_0 = rnorm2
-    for _ in 1:n
+    for _ in 1:maxit
         Bp = _hessmatvec(approx, p) .+ τ .* p
         pBp = dot(p, Bp)
         if pBp <= 0

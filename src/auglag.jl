@@ -295,8 +295,35 @@ end
   solution). The remainder-only L-BFGS inverse was also measured as a
   Steihaug CG preconditioner and is deliberately not wired (it stalled
   the solve on case5). Opt-in.
-  Measured: `:sr1` is a massive
-- `second_order`: (opt-in, with `curvature = :hybrid`) a
+- `curvature = :split` (experimental, opt-in): the split-secant model
+  for problems without exact Hessians — the penalty part
+  `φ = ρ/2‖c‖² + ρ/2‖g⁺‖²` and the remainder `ψ = f + yᵀc + λᵀg⁺` get
+  separate L-BFGS histories: the penalty pair `(s, ∇φ(x⁺) − ∇φ(x))` is
+  the exact directional second derivative of the dominant penalty
+  curvature from gradient differences alone (two reverse passes of the
+  scalar penalty function per accepted step, no Hessian-vector
+  products), the remainder receives the structured-secant corrected
+  pair `(s, y − Δ∇φ)` (Dennis–Gay–Welsch in gradient-difference form),
+  the CG model is the sum of the two two-loop recursions and the
+  penalty model's inverse is the Steihaug preconditioner. Quadratic
+  penalty mode, no elastic mode, any model (no JuMP requirement).
+  Measured on the TopOpt local-stress single-level solve: no completion
+  within 40 min vs the 4.5 min L-BFGS baseline — the two penalty-part
+  reverse passes per accepted step (full FEA adjoints) dominate; the
+  design targets problems with cheap constraint evaluations.
+- `curvature = :fdgrad` (experimental, opt-in): inexact-Newton curvature
+  from one-sided finite differences of the Zygote-computed AL gradient
+  (`Hv = (g(x+εv) − g(x))/ε`, reusing the driver's current gradient so
+  each Hessian-vector product costs one extra gradient evaluation;
+  Zygote cannot be nested and ForwardDiff cannot cross its tape); pair
+  with `cg_maxiter` (via `sub_options`) for a small product budget.
+  Measured on the TopOpt local-stress single-level solve: no completion
+  within 15 min at `cg_maxiter = 5` vs the 4.5 min L-BFGS baseline —
+  the per-CG-iteration gradient evaluations dominate on FEA-heavy
+  constraints; a single CG iteration with the L-BFGS preconditioner
+  (`cg_maxiter = 1`, `precond = true`, plain `:lbfgs`) also loses (no
+  completion within 28 min: steepest-descent-quality steps).
+  Measured: `:sr1` is a massive- `second_order`: (opt-in, with `curvature = :hybrid`) a
   [`SecondOrderSelection`](@ref) selecting which relaxed constraint
   groups contribute their exact multiplier-weighted curvature `μᵀ∇²c`
   (MathOptInterface Lagrangian-Hessian triplets, one sparse assembly
@@ -318,6 +345,14 @@ end
   case5 (hybrid + all labels): bit-for-bit the same trajectory at 3.6%
   less wall-clock (251.9 vs 261.4 s) — a small win, off by default
   pending the TopOpt characterization.
+- `sub_options.cg_maxiter`, `sub_options.precond` (for the built-in
+  quasi-Newton solver): cap the Steihaug CG iterations and enable the
+  L-BFGS two-loop as the CG preconditioner (off by default — the
+  preconditioner changes the steps). Measured on the TopOpt stress
+  solve: `cg_maxiter = 1` + `precond = true` takes
+  steepest-descent-quality steps (no completion within 28 min vs the
+  4.5 min baseline); the split model's penalty-inverse preconditioner
+  also activates through `precond = true`.
   Rosetta AC-OPF case5 win (80 vs 219 s, viol 0.016 vs 0.60, f near the
   true optimum) but slower on the TopOpt local-stress problem (no
   completion within 31 min vs ~6 min for L-BFGS) — opt-in; `:newton` with
@@ -737,8 +772,11 @@ function AugLagOptions(;
     box_barrier_scale > 0 || throw(ArgumentError("box_barrier_scale must be positive"))
     (box_barrier === true || box_barrier === false || box_barrier === missing) ||
         throw(ArgumentError("box_barrier must be true, false or missing (automatic)"))
-    curvature in (:lbfgs, :sr1, :newton, :hybrid) ||
-        throw(ArgumentError("curvature must be :lbfgs, :sr1, :newton or :hybrid"))
+    curvature in (:lbfgs, :sr1, :newton, :hybrid, :split, :fdgrad) || throw(
+        ArgumentError(
+            "curvature must be :lbfgs, :sr1, :newton, :hybrid, :split or :fdgrad"
+        ),
+    )
     prox >= 0 || throw(ArgumentError("prox must be non-negative"))
     rho_init > 0 || throw(ArgumentError("rho_init must be positive"))
     rho_incr > 1 || throw(ArgumentError("rho_incr must be > 1"))
@@ -1215,6 +1253,29 @@ function _hybrid_terms(
     end
     μ === nothing || (terms = (terms..., JumpLagrangianTerm(je, μ, copy(x))))
     return terms
+end
+
+# The penalty part phi = rho/2 (||c||^2 + ||g^+||^2) of the scaled AL
+# objective and its gradient (one reverse pass), for the split-secant
+# curvature model: the penalty secant pair uses the exact gradient
+# difference, and the remainder receives the corrected pair.
+function _penalty_closure(eq_fs, ineq_fs, w_eq, w_ineq, ρ)
+    return x -> begin
+        v = 0.0
+        for (k, c) in enumerate(eq_fs)
+            cv = _vecval(c(x))
+            v += (ρ * w_eq[k] / 2) * dot(cv, cv)
+        end
+        for (k, c) in enumerate(ineq_fs)
+            gp = max.(_vecval(c(x)), 0.0)
+            v += (ρ * w_ineq[k] / 2) * dot(gp, gp)
+        end
+        return v
+    end
+end
+function _penalty_gradient(eq_fs, ineq_fs, w_eq, w_ineq, ρ)
+    φ = _penalty_closure(eq_fs, ineq_fs, w_eq, w_ineq, ρ)
+    return x -> NonconvexCore.value_gradient(φ, x)[2]
 end
 
 # Smooth quadratic penalty over the KEPT (non-relaxed) constraints, folded
@@ -1776,6 +1837,11 @@ function optimize!(workspace::AugLagWorkspace)
         qn_nonmonotone = get(qn_opts, :nonmonotone, false)
         qn_soc = get(qn_opts, :soc, false)
         qn_projected_stop = get(qn_opts, :projected_stop, true)
+        qn_cg_maxiter = get(qn_opts, :cg_maxiter, nothing)
+        qn_precond = get(qn_opts, :precond, false)
+        # the AL objective ref for the finite-difference-gradient curvature
+        # (updated each outer iteration once the subproblem is built)
+        al_obj_ref = Ref{Any}(nothing)
         h0_op = if h0 === :penalty
             DiagonalPreconditioner(fill(1 / (1 + ρ), n + (use_elastic ? m_eq : 0)))
         elseif h0 === :identity
@@ -1814,6 +1880,12 @@ function optimize!(workspace::AugLagWorkspace)
                         λ,
                     ),
                 )
+            elseif st_approx isa SplitSecantApprox
+                SplitSecantApprox(
+                    st_approx.qn_rem,
+                    st_approx.qn_pen,
+                    _penalty_gradient(eq_fs, ineq_fs, w_eq, w_ineq, ρ),
+                )
             else
                 st_approx
             end
@@ -1849,6 +1921,32 @@ function optimize!(workspace::AugLagWorkspace)
                     λ,
                 ),
             )
+        elseif options.curvature === :split
+            penalty === :quadratic ||
+                throw(ArgumentError("curvature = :split requires penalty = :quadratic"))
+            use_elastic && throw(
+                ArgumentError("curvature = :split does not support the elastic mode"),
+            )
+            # split-secant: the penalty part phi and the remainder psi get
+            # separate L-BFGS histories (structured secant from gradient
+            # differences alone - no exact Hessians), and the penalty
+            # model's inverse is the CG preconditioner
+            base_rem = LBFGSApprox(memory; H0=IdentityPreconditioner())
+            base_pen = LBFGSApprox(memory; H0=DiagonalPreconditioner(fill(max(ρ, 1.0), n)))
+            SplitSecantApprox(
+                base_rem, base_pen, _penalty_gradient(eq_fs, ineq_fs, w_eq, w_ineq, ρ)
+            )
+        elseif options.curvature === :fdgrad
+            penalty === :quadratic || throw(
+                ArgumentError("curvature = :fdgrad requires penalty = :quadratic")
+            )
+            use_elastic && throw(
+                ArgumentError("curvature = :fdgrad does not support the elastic mode"),
+            )
+            # inexact Newton from one-sided finite differences of the
+            # Zygote-computed AL gradient (one extra gradient evaluation
+            # per Hessian-vector product); pair with a small cg_maxiter
+            FDGradHessianApprox(z -> NonconvexCore.value_gradient(al_obj_ref[], z)[2])
         else
             LBFGSApprox(memory; H0=h0_op)
         end
@@ -2144,6 +2242,9 @@ function optimize!(workspace::AugLagWorkspace)
         else
             al_obj
         end
+        # the finite-difference-gradient curvature reads the current AL
+        # objective through this ref
+        al_obj_ref[] = al_sub
         submodel = make_submodel(al_sub)
         checksubproblem!(
             submodel,
@@ -2173,6 +2274,8 @@ function optimize!(workspace::AugLagWorkspace)
                     soc=qn_soc,
                     projected_stop=qn_projected_stop,
                     cg_tol=inexact_cg ? sub_tol : nothing,
+                    cg_maxiter=qn_cg_maxiter,
+                    precond=qn_precond,
                 ),
                 x_sub,
             )
@@ -2192,6 +2295,8 @@ function optimize!(workspace::AugLagWorkspace)
                         soc=qn_soc,
                         projected_stop=qn_projected_stop,
                         cg_tol=inexact_cg ? 10 * sub_tol : nothing,
+                        cg_maxiter=qn_cg_maxiter,
+                        precond=qn_precond,
                     ),
                     x_sub,
                 )
@@ -2271,6 +2376,8 @@ function optimize!(workspace::AugLagWorkspace)
                         soc=qn_soc,
                         projected_stop=qn_projected_stop,
                         cg_tol=inexact_cg ? sub_tol : nothing,
+                        cg_maxiter=qn_cg_maxiter,
+                        precond=qn_precond,
                     ),
                     x_two,
                 )
