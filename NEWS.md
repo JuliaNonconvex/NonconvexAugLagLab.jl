@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Spectral penalty update (opt-in)**: `AugLagOptions(spectral_rho = true)`
+  replaces the two-way penalty decrease on good steps with a spectral
+  (Barzilai–Borwein) update of the dual step, `ρ ← ‖Δc‖²/⟨Δc, Δy⟩` from
+  the last two iterates, correlation-safeguarded and clamped to
+  `[ρ/rho_decr, ρ·rho_incr] ∩ [rho_init/10, rho_max]`. Measured on the
+  TopOpt local-stress single-level solve: 6.2% faster (248.2 vs 264.6 s)
+  with better feasibility (3.8e-6 vs 5.7e-6) but a 1.3% heavier design
+  (obj 0.0950 vs 0.0938) — a speed-for-quality trade, off by default.
 - **First-subproblem tightening (new default)**: `AugLagOptions(first_sub_tol
   = 1e-6)` solves the first subproblem to `min(sub_tol, first_sub_tol)` —
   the first inner solve selects the local basin the whole solve follows.

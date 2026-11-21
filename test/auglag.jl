@@ -937,3 +937,22 @@ end
     @test norm(r.minimizer - [1.0, 2.0]) < 1e-4
     @test r.minimum < 1e-6
 end
+
+@testitem "AugLagAlg: spectral penalty update" begin
+    using NonconvexAugLagLab, Test
+    # the spectral (Barzilai-Borwein) penalty update must keep convergence
+    # on a mixed eq+ineq problem (the safeguard only fires on a credible
+    # positive correlation, so the plain runs are the regression baseline).
+    m = Model(x -> sum(x .^ 2))
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+    add_ineq_constraint!(m, x -> [x[1] - 0.9], [0.0])
+    r = optimize(
+        m,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options = AugLagOptions(; max_iter = 200, spectral_rho = true),
+    )
+    @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
+    @test r.minimum ≈ 0.5 atol = 1e-4
+end

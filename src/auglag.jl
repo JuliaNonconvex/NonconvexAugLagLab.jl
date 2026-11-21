@@ -288,6 +288,18 @@ end
   local-stress single-level solve: 2.1% slower (309.5 vs 303.1 s) but a
   2.1% lighter feasible design (obj 0.0918 vs 0.0938) with marginally
   better feasibility — a small quality-for-time trade, off by default.
+- `spectral_rho`: (opt-in) replace the two-way penalty decrease on good
+  steps with a spectral (Barzilai–Borwein) update of the dual step:
+  `ρ ← ‖Δc‖²/⟨Δc, Δy⟩` from the last two iterates of the dual map
+  (Xu–Figueiredo–Goldstein style), applied only on a credible positive
+  correlation, limited to `[ρ/rho_decr, ρ·rho_incr]` and
+  `[rho_init/10, rho_max]`. Equality and inequality multipliers
+  participate (semidefinite matrices do not); the elastic mode is not
+  supported (falls back to the two-way rule there). Escalation on bad
+  steps is unchanged. Measured on the TopOpt local-stress single-level
+  solve: 6.2% faster (248.2 vs 264.6 s) with better feasibility (3.8e-6
+  vs 5.7e-6) but a 1.3% heavier design (obj 0.0950 vs 0.0938) — a
+  speed-for-quality trade, off by default.
 - `filter`, `stall_retry`, `selective`, `safeguard`, `two_way`, `levenberg`:
   toggles for the corresponding defaults (all `true`). Re-measured on 0.2.5:
   removing the selective weights costs ~79% TopOpt wall-clock, removing the
@@ -431,6 +443,7 @@ mutable struct AugLagOptions{S,R,W}
     watchdog_tol::Real
     anderson_ineq::Bool
     multiplier_relax::Bool
+    spectral_rho::Bool
     stall_retry::Bool
     selective::Bool
     safeguard::Bool
@@ -484,6 +497,7 @@ function AugLagOptions(;
     watchdog_tol::Real=0.0,
     anderson_ineq::Bool=false,
     multiplier_relax::Bool=false,
+    spectral_rho::Bool=false,
     stall_retry::Bool=true,
     selective::Bool=true,
     safeguard::Bool=true,
@@ -568,6 +582,7 @@ function AugLagOptions(;
         watchdog_tol,
         anderson_ineq,
         multiplier_relax,
+        spectral_rho,
         stall_retry,
         selective,
         safeguard,
@@ -1162,6 +1177,7 @@ function optimize!(workspace::AugLagWorkspace)
     @unpack filter, stall_retry, selective, safeguard, two_way = options
     anderson_ineq = options.anderson_ineq
     multiplier_relax = options.multiplier_relax
+    spectral_rho = options.spectral_rho
     watchdog = options.watchdog
     watchdog_tau = Float64(options.watchdog_tau)
     watchdog_tol = Float64(options.watchdog_tol)
@@ -1293,6 +1309,11 @@ function optimize!(workspace::AugLagWorkspace)
     vnorm = Inf
     and_history = Tuple{Vector{Float64},Vector{Float64}}[]
     and_ineq_history = Tuple{Vector{Float64},Vector{Float64}}[]
+    # spectral-penalty history: the flat constraint values and multipliers
+    # of the previous good step (the Barzilai-Borwein estimate uses the
+    # last two iterates of the dual map).
+    cflat_prev = nothing
+    yflat_prev = nothing
     # Ipopt-style restoration accounting: window of recent violation values
     # (for the stall trigger) and the number of restorations already
     # performed this solve.
@@ -1940,6 +1961,45 @@ function optimize!(workspace::AugLagWorkspace)
                     off += mk
                 end
             end
+            if spectral_rho && !use_elastic && (!isempty(eq_rel) || !isempty(ineq_rel))
+                # Spectral (Barzilai-Borwein) penalty update on the dual map
+                # (Xu-Figueiredo-Goldstein style, ADMM-flavored): the dual
+                # step 1/rho is estimated from the last two iterates as
+                # rho ~ ||dc||^2 / <dc, dy> with dc the change in the
+                # constraint values and dy the change in the multipliers.
+                # Safeguards: only a credible positive correlation updates
+                # rho, the change is limited to [rho/rho_decr, rho*rho_incr]
+                # and the result to [rho_init/10, rho_max]. Replaces the
+                # two-way decrease on good steps (it subsumes it). The
+                # semidefinite multipliers (matrices) are not part of the
+                # flat vectors; the elastic mode is not supported.
+                cflat = Float64[]
+                for k in eachindex(eq_rel)
+                    append!(cflat, _vecval(eq_fs[k](x)))
+                end
+                for i in eachindex(ineq_rel)
+                    append!(cflat, _vecval(ineq_fs[i](x)))
+                end
+                yflat = reduce(vcat, vcat(y, λ); init=Float64[])
+                if cflat_prev !== nothing && yflat_prev !== nothing
+                    Δc = cflat .- cflat_prev
+                    Δy = yflat .- yflat_prev
+                    num = dot(Δc, Δc)
+                    den = dot(Δc, Δy)
+                    if num > 0 && den > 0
+                        ρ_spec = clamp(
+                            num / den,
+                            ρ / Float64(options.rho_decr),
+                            ρ * Float64(options.rho_incr),
+                        )
+                        ρ = clamp(
+                            ρ_spec, Float64(options.rho_init) / 10, Float64(options.rho_max)
+                        )
+                    end
+                end
+                cflat_prev = cflat
+                yflat_prev = yflat
+            end
             _sd_multiplier_update!(model, sd_rel, ρ, x, Y, penalty)
             if outer_schedule === :bm
                 # Birgin-Martinez complexity scaling: η, ω tighten with 1/ρ.
@@ -1951,8 +2011,9 @@ function optimize!(workspace::AugLagWorkspace)
             end
             # Two-way update (Curtis, Jiang & Robinson): once feasibility is
             # nearly attained, back the penalty down so the subproblems stay
-            # well conditioned.
-            ρ = _two_way_step(ρ, options, two_way, vnorm, η)
+            # well conditioned. The spectral update (when enabled) subsumes
+            # this on good steps.
+            spectral_rho || (ρ = _two_way_step(ρ, options, two_way, vnorm, η))
         else
             # Selective penalty update: escalate only the most-violated
             # constraint groups instead of the global penalty.
