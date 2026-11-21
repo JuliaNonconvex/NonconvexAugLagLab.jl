@@ -1496,6 +1496,13 @@ function _raw_violation(model, eq_rel, ineq_rel, x)
     return v
 end
 
+# Compatibility wrapper for the selection-based call (the hot paths pass
+# the precomputed indices).
+function _raw_violation(model, relaxed, x)
+    eq_rel, ineq_rel, _, _ = _subproblem(model, relaxed, nothing)
+    return _raw_violation(model, eq_rel, ineq_rel, x)
+end
+
 function _failed_iterate_fallback(trajectory, x_init)
     return isempty(trajectory) ? copy(x_init) : copy(trajectory[end][1])
 end
