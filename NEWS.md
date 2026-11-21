@@ -1,6 +1,11 @@
 # NEWS
 
-## Unreleased
+## 0.5.0
+
+- **Breaking**: the `tron_cauchy` option is removed. The reference TRON
+  (`globalization = :tron`, see below) always computes its projected-Cauchy
+  starting point; the old `tron_cauchy = true` toggle was inert in the
+  rewritten solver, and the simple-TRON stack it belonged to is gone.
 
 - **Reference TRON (opt-in)**: `globalization = :tron` now mirrors the
   JSOSolvers Lin–Moré structure — a safeguarded projected-Cauchy
