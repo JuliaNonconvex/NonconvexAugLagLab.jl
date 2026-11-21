@@ -1029,3 +1029,26 @@ end
     )
     @test norm(r2.minimizer - [0.5, 0.5]) < 1e-4
 end
+
+@testitem "AugLagAlg: on_iteration callback with early termination" begin
+    using NonconvexAugLagLab, Test
+    m = Model(x -> sum(x .^ 2))
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+    seen = Tuple{Int,Float64}[]
+    r = optimize(
+        m,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options = AugLagOptions(;
+            max_iter = 200,
+            on_iteration = (iter, x, fx, v) -> begin
+                push!(seen, (iter, fx))
+                return iter >= 3
+            end,
+        ),
+    )
+    @test length(seen) == 3
+    @test seen[1][1] == 1
+    @test seen[3][1] == 3
+end

@@ -377,6 +377,10 @@ end
 - `max_time`: a wall-clock budget in seconds (default `Inf`): no new
   subproblem is started once the budget is exhausted, and the solve
   returns the last completed outer iterate.
+- `on_iteration`: (opt-in) a per-iteration callback
+  `on_iteration(iter, x, f(x), vnorm)` called after every accepted outer
+  iterate (with a copy of the iterate); returning `true` stops the loop
+  and reports the just-recorded iterate.
 - `outer_schedule`: `:bm` (the default) — the Birgin–Martínez complexity
   scaling where both the feasibility target `η` and the subproblem accuracy
   target `ω` tighten with the full `1/ρ` factor on good steps (and reset
@@ -499,6 +503,7 @@ mutable struct AugLagOptions{S,R,W}
     first_sub_tol::Union{Nothing,Real}
     first_sub_iters::Int
     max_time::Real
+    on_iteration::Union{Nothing,Function}
     outer_schedule::Symbol
 
     two_level::Bool
@@ -558,6 +563,7 @@ function AugLagOptions(;
     first_sub_tol=1e-6,
     first_sub_iters::Int=1,
     max_time::Real=Inf,
+    on_iteration=nothing,
     outer_schedule::Symbol=:bm,
 
     two_level::Bool=false,
@@ -652,6 +658,7 @@ function AugLagOptions(;
         first_sub_tol,
         first_sub_iters,
         max_time,
+        on_iteration,
         outer_schedule,
         two_level,
         two_level_iters,
@@ -1295,6 +1302,7 @@ function optimize!(workspace::AugLagWorkspace)
         options.first_sub_tol === nothing ? nothing : Float64(options.first_sub_tol)
     first_sub_iters = options.first_sub_iters
     max_time = Float64(options.max_time)
+    on_iteration = options.on_iteration
     outer_schedule = options.outer_schedule
     @unpack two_level, two_level_iters, two_level_tau = options
     @unpack box_barrier_scale = options
@@ -1972,6 +1980,12 @@ function optimize!(workspace::AugLagWorkspace)
         end
         fx = f_new
         push!(trajectory, (copy(x), fx, vnorm))
+        # Optional per-iteration callback: receives (iter, x, f(x), vnorm)
+        # with a copy of the iterate; returning true stops the loop (the
+        # reported result is the iterate just recorded).
+        if on_iteration !== nothing
+            on_iteration(iter, copy(x), fx, vnorm) && break
+        end
 
         ρ_before = ρ
         if vnorm <= η || vnorm <= ω * vprev
