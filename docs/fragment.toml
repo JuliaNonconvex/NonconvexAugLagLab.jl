@@ -1,4 +1,4 @@
-name = "AugLagLab"
+name = "NonconvexAugLagLab"
 modules = ["NonconvexAugLagLab"]
 doctest_setup = "using NonconvexAugLagLab"
 
