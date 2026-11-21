@@ -219,9 +219,8 @@ end
     struct _AlwaysFailAlg <: NonconvexCore.AbstractOptimizer
         calls::Base.RefValue{Int}
     end
-    NonconvexCore.solver_capabilities(::_AlwaysFailAlg) = ConstraintCapabilities(;
-        box=true, continuous=true, infinite_bounds=true
-    )
+    NonconvexCore.solver_capabilities(::_AlwaysFailAlg) =
+        ConstraintCapabilities(; box=true, continuous=true, infinite_bounds=true)
     struct _AlwaysFailWorkspace <: NonconvexCore.Workspace
         model::NonconvexCore.VecModel
         alg::_AlwaysFailAlg
@@ -353,9 +352,8 @@ end
         minimizer::X
         minimum::Float64
     end
-    NonconvexCore.solver_capabilities(::AlwaysWorseAlg) = ConstraintCapabilities(;
-        box=true, continuous=true, infinite_bounds=true
-    )
+    NonconvexCore.solver_capabilities(::AlwaysWorseAlg) =
+        ConstraintCapabilities(; box=true, continuous=true, infinite_bounds=true)
     struct AlwaysWorseWorkspace{M,X} <: Workspace
         model::M
         x0::X
@@ -471,9 +469,8 @@ end
         minimizer::X
         minimum::Float64
     end
-    NonconvexCore.solver_capabilities(::NaNAlg) = ConstraintCapabilities(;
-        box=true, continuous=true, infinite_bounds=true
-    )
+    NonconvexCore.solver_capabilities(::NaNAlg) =
+        ConstraintCapabilities(; box=true, continuous=true, infinite_bounds=true)
     struct NW{M,X} <: Workspace
         model::M
         x0::X
@@ -706,9 +703,8 @@ end
     # violation never improves, so the stall trigger fires and the
     # built-in restoration must solve the feasibility-only problem.
     struct StuckAlg <: NonconvexCore.AbstractOptimizer end
-    NonconvexCore.solver_capabilities(::StuckAlg) = ConstraintCapabilities(;
-        box=true, continuous=true, infinite_bounds=true
-    )
+    NonconvexCore.solver_capabilities(::StuckAlg) =
+        ConstraintCapabilities(; box=true, continuous=true, infinite_bounds=true)
     struct StuckResult{X} <: NonconvexCore.AbstractResult
         minimizer::X
         minimum::Float64
@@ -850,9 +846,8 @@ end
     # The restoration's raw merit and its FD column scaling take an ineq
     # branch; a stall on an eq+ineq model exercises it.
     struct StuckAlg2 <: NonconvexCore.AbstractOptimizer end
-    NonconvexCore.solver_capabilities(::StuckAlg2) = ConstraintCapabilities(;
-        box=true, continuous=true, infinite_bounds=true
-    )
+    NonconvexCore.solver_capabilities(::StuckAlg2) =
+        ConstraintCapabilities(; box=true, continuous=true, infinite_bounds=true)
     struct StuckResult2{X} <: NonconvexCore.AbstractResult
         minimizer::X
         minimum::Float64
