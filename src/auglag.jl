@@ -374,6 +374,9 @@ end
   `first_sub_tol` tightening (default `1`, must be ≥ 1). Measured on the
   TopOpt single-level solve: `2` is bit-for-bit inert (262.0 vs 264.6 s,
   identical trajectory) — the basin is selected by the first solve alone.
+- `max_time`: a wall-clock budget in seconds (default `Inf`): no new
+  subproblem is started once the budget is exhausted, and the solve
+  returns the last completed outer iterate.
 - `outer_schedule`: `:bm` (the default) — the Birgin–Martínez complexity
   scaling where both the feasibility target `η` and the subproblem accuracy
   target `ω` tighten with the full `1/ρ` factor on good steps (and reset
@@ -495,6 +498,7 @@ mutable struct AugLagOptions{S,R,W}
     sub_tol_rel::Real
     first_sub_tol::Union{Nothing,Real}
     first_sub_iters::Int
+    max_time::Real
     outer_schedule::Symbol
 
     two_level::Bool
@@ -553,6 +557,7 @@ function AugLagOptions(;
     sub_tol_rel::Real=0.1,
     first_sub_tol=1e-6,
     first_sub_iters::Int=1,
+    max_time::Real=Inf,
     outer_schedule::Symbol=:bm,
 
     two_level::Bool=false,
@@ -580,6 +585,7 @@ function AugLagOptions(;
     (first_sub_tol === nothing || first_sub_tol > 0) ||
         throw(ArgumentError("first_sub_tol must be positive or nothing"))
     first_sub_iters >= 1 || throw(ArgumentError("first_sub_iters must be >= 1"))
+    max_time > 0 || throw(ArgumentError("max_time must be positive"))
     two_level_iters >= 1 || throw(ArgumentError("two_level_iters must be >= 1"))
     two_level_tau > 0 || throw(ArgumentError("two_level_tau must be positive"))
     box_barrier_scale > 0 || throw(ArgumentError("box_barrier_scale must be positive"))
@@ -645,6 +651,7 @@ function AugLagOptions(;
         sub_tol_rel,
         first_sub_tol,
         first_sub_iters,
+        max_time,
         outer_schedule,
         two_level,
         two_level_iters,
@@ -1287,6 +1294,7 @@ function optimize!(workspace::AugLagWorkspace)
     first_sub_tol =
         options.first_sub_tol === nothing ? nothing : Float64(options.first_sub_tol)
     first_sub_iters = options.first_sub_iters
+    max_time = Float64(options.max_time)
     outer_schedule = options.outer_schedule
     @unpack two_level, two_level_iters, two_level_tau = options
     @unpack box_barrier_scale = options
@@ -1573,7 +1581,11 @@ function optimize!(workspace::AugLagWorkspace)
         end
         μref[] = Float64(box_barrier_scale)
     end
+    t0 = time()
     for iter in 1:max_iter
+        # Wall-clock budget: no new subproblem is started once the budget
+        # is exhausted (the elapsed check is per outer iteration).
+        time() - t0 > max_time && break
         # Subproblem tolerance: fixed, adaptive (tied to the outer
         # feasibility target η), relative to the current violation, or an
         # explicit sub_options.tol override (previously silently ignored for

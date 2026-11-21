@@ -1009,3 +1009,23 @@ end
     @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
     @test r.minimum ≈ 0.5 atol = 1e-4
 end
+
+@testitem "AugLagAlg: max_time budget" begin
+    using NonconvexAugLagLab, Test
+    m = Model(x -> sum(x .^ 2))
+    addvar!(m, [-5.0, -5.0], [5.0, 5.0])
+    add_eq_constraint!(m, x -> x[1] + x[2] - 1)
+    # an exhausted budget stops before the first subproblem: the result is x0
+    r = optimize(m, AugLagAlg(), [0.0, 0.0]; options = AugLagOptions(; max_time = 1e-9))
+    @test r.minimizer == [0.0, 0.0]
+    # validation
+    @test_throws ArgumentError AugLagOptions(max_time = 0.0)
+    # a generous budget converges normally
+    r2 = optimize(
+        m,
+        AugLagAlg(),
+        [0.0, 0.0];
+        options = AugLagOptions(; max_time = Inf, max_iter = 200),
+    )
+    @test norm(r2.minimizer - [0.5, 0.5]) < 1e-4
+end
