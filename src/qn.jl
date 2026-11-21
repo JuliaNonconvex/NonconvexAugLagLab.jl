@@ -100,6 +100,35 @@ function apply_term!(Hv, t::JumpGaussNewtonTerm, v)
 end
 
 """
+    JumpLagrangianTerm(je, μ, x)
+
+The exact multiplier-weighted constraint-curvature term `Σ μᵢ ∇²cᵢ` of a
+JuMP-converted model: the MathOptInterface evaluator's Lagrangian
+Hessian is assembled once per rebound point from its sparse triplets
+(σ = 0, so only the constraint part contributes) and each matvec is one
+sparse product. `μ` is the full evaluator-length multiplier vector in
+its row order (inequalities first, then equalities), zero outside the
+selected block.
+"""
+struct JumpLagrangianTerm{J,X}
+    je::J
+    H::SparseMatrixCSC{Float64,Int}
+    x::X
+end
+function JumpLagrangianTerm(je, μ, x)
+    sv = zeros(length(je.hess_rows))
+    NonconvexCore.jump_hessian_lagrangian!(je, sv, x, 0.0, μ)
+    n = length(x)
+    H = sparse(je.hess_rows, je.hess_cols, sv, n, n)
+    return JumpLagrangianTerm(je, H, x)
+end
+
+function apply_term!(Hv, t::JumpLagrangianTerm, v)
+    mul!(Hv, t.H, v, 1.0, 1.0)
+    return Hv
+end
+
+"""
     CompositeHessianApprox(qn, build_terms)
 
 A Hessian model summing a quasi-Newton approximation `qn` (of the

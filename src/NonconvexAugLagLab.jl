@@ -1,6 +1,7 @@
 module NonconvexAugLagLab
 
 export AugLagAlg, AugLagOptions, RelaxConstraintSelection, AugLagResult
+export SecondOrderSelection
 export QuasiNewtonAlg, AbstractHessianApprox
 export LBFGSApprox, DenseBFGSApprox, StructuredBFGSApprox, NewtonTRApprox
 export LimitedMemorySR1Approx

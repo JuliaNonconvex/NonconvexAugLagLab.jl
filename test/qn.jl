@@ -399,3 +399,23 @@ end
     xv = r.minimizer[:x]
     @test norm(xv - [0.5, 0.5]) < 1e-4
 end
+
+@testitem "QuasiNewtonAlg: hybrid JumpLagrangianTerm exact mu-weighted curvature" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra, JuMP, NonconvexCore
+    # on the quadratic constraint x1^2 + x2^2 <= 10 the mu-weighted
+    # curvature is mu * 2I; the term's matvec must match mu*2*v
+    jm = JuMP.Model()
+    JuMP.@variable(jm, -5 <= x[1:2] <= 5)
+    JuMP.@objective(jm, Min, 0.0)
+    JuMP.@constraint(jm, x[1]^2 + x[2]^2 <= 10)
+    dm = NonconvexCore.DictModel(jm)
+    je = NonconvexAugLagLab._jump_evaluator(dm.objective)
+    @test je !== nothing
+    x = [1.0, 2.0]
+    μ = [1.5]
+    t = NonconvexAugLagLab.JumpLagrangianTerm(je, μ, x)
+    v = [0.3, -0.2]
+    Hv = zeros(2)
+    NonconvexAugLagLab.apply_term!(Hv, t, v)
+    @test Hv ≈ 1.5 * 2.0 .* v atol = 1e-8
+end

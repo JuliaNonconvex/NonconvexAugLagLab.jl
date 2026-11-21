@@ -84,6 +84,64 @@ function _flags(c)
     return hasfield(typeof(c), :flags) ? c.flags : Set{Symbol}()
 end
 
+"""
+    SecondOrderSelection(; eq = true, ineq = true, labels = nothing)
+
+Selects which relaxed constraint groups contribute their exact
+multiplier-weighted curvature `μᵀ∇²c` to the hybrid Hessian model
+(`curvature = :hybrid`). Each kind entry is `true` (all groups of that
+kind), `false` (none) or a vector of group indices (those only);
+`labels` selects every constraint whose `flags` contain one of the given
+labels. Untagged groups keep only the Gauss-Newton penalty term and
+their multiplier curvature is absorbed by the quasi-Newton remainder.
+Only JuMP-converted blocks support the exact term (MathOptInterface
+Lagrangian-Hessian triplets).
+"""
+struct SecondOrderSelection
+    eq::Union{Bool,AbstractVector{Int}}
+    ineq::Union{Bool,AbstractVector{Int}}
+    labels::Union{Nothing,Set{Symbol}}
+end
+function SecondOrderSelection(; eq=true, ineq=true, labels=nothing)
+    lbls = if labels === nothing
+        nothing
+    elseif labels isa Union{AbstractVector,Tuple,AbstractSet}
+        Set(Symbol.(labels))
+    else
+        Set([Symbol(labels)])
+    end
+    return SecondOrderSelection(eq, ineq, lbls)
+end
+
+function _so_selected(sel::Bool, k, n)
+    return sel
+end
+function _so_selected(sel::AbstractVector{Int}, k, n)
+    return k in sel
+end
+_so_selected(sel, k, n) = false
+function _so_labeled(c, labels)
+    return labels !== nothing && !isempty(intersect(_flags(c), labels))
+end
+
+# Per-group second-order flags of the relaxed constraint groups.
+function _second_order_flags(sel, model, eq_rel, ineq_rel)
+    so_eq = falses(length(eq_rel))
+    so_ineq = falses(length(ineq_rel))
+    sel === nothing && return so_eq, so_ineq
+    for (k, i) in enumerate(eq_rel)
+        so_eq[k] =
+            _so_selected(sel.eq, k, length(eq_rel)) ||
+            _so_labeled(model.eq_constraints.fs[i], sel.labels)
+    end
+    for (k, i) in enumerate(ineq_rel)
+        so_ineq[k] =
+            _so_selected(sel.ineq, k, length(ineq_rel)) ||
+            _so_labeled(model.ineq_constraints.fs[i], sel.labels)
+    end
+    return so_eq, so_ineq
+end
+
 # Relaxation indices of a constraint list: the kind-based selection plus
 # every constraint carrying one of the selected labels. NB: the count is
 # `length(fs.fs)` — `length(::VectorOfFunctions)` is its dimension
@@ -234,6 +292,19 @@ end
   Newton (43.8 s) — opt-in; the next lever is the label-gated exact
   `λᵀ∇²c` terms for the equality blocks.
   Measured: `:sr1` is a massive
+- `second_order`: (opt-in, with `curvature = :hybrid`) a
+  [`SecondOrderSelection`](@ref) selecting which relaxed constraint
+  groups contribute their exact multiplier-weighted curvature `μᵀ∇²c`
+  (MathOptInterface Lagrangian-Hessian triplets, one sparse assembly
+  per subproblem iterate) on top of the Gauss-Newton term; untagged
+  groups keep the Gauss-Newton term only, with their multiplier
+  curvature absorbed by the L-BFGS remainder. JuMP-converted blocks
+  only. `nothing` (default) disables the exact terms. Measured on
+  Rosetta case5: labeling all groups cuts the violation ~120× per the
+  same 200-iteration budget (3.9e-2 → 3.2e-4) at +14% wall-clock
+  (263.7 vs 230.9 s), with a slight objective overshoot (17783 vs the
+  17553 optimum) — the exact multiplier curvature fixes the outer-loop
+  convergence the plain hybrid lacked.
   Rosetta AC-OPF case5 win (80 vs 219 s, viol 0.016 vs 0.60, f near the
   true optimum) but slower on the TopOpt local-stress problem (no
   completion within 31 min vs ~6 min for L-BFGS) — opt-in; `:newton` with
@@ -550,6 +621,7 @@ mutable struct AugLagOptions{S,R,W}
     analytical_gradient::Bool
     stop_kkt::Bool
     kkt_tol::Real
+    second_order::Union{Nothing,SecondOrderSelection}
     outer_schedule::Symbol
 
     two_level::Bool
@@ -613,6 +685,7 @@ function AugLagOptions(;
     analytical_gradient::Bool=false,
     stop_kkt::Bool=false,
     kkt_tol::Real=1e-6,
+    second_order=nothing,
     outer_schedule::Symbol=:bm,
 
     two_level::Bool=false,
@@ -642,6 +715,8 @@ function AugLagOptions(;
     first_sub_iters >= 1 || throw(ArgumentError("first_sub_iters must be >= 1"))
     max_time > 0 || throw(ArgumentError("max_time must be positive"))
     kkt_tol > 0 || throw(ArgumentError("kkt_tol must be positive"))
+    (second_order === nothing || second_order isa SecondOrderSelection) ||
+        throw(ArgumentError("second_order must be a SecondOrderSelection or nothing"))
     two_level_iters >= 1 || throw(ArgumentError("two_level_iters must be >= 1"))
     two_level_tau > 0 || throw(ArgumentError("two_level_tau must be positive"))
     box_barrier_scale > 0 || throw(ArgumentError("box_barrier_scale must be positive"))
@@ -712,6 +787,7 @@ function AugLagOptions(;
         analytical_gradient,
         stop_kkt,
         kkt_tol,
+        second_order,
         outer_schedule,
         two_level,
         two_level_iters,
@@ -1058,10 +1134,31 @@ end
 # first, then equalities; the scaling folds into the jump weights
 # (c = s*c~ so rho*w*J~'J~ = (rho*w/s^2) J'J).
 function _hybrid_terms(
-    x, model, eq_rel, ineq_rel, eq_fs, ineq_fs, w_eq, w_ineq, ρ, je, scales
+    x,
+    model,
+    eq_rel,
+    ineq_rel,
+    eq_fs,
+    ineq_fs,
+    w_eq,
+    w_ineq,
+    ρ,
+    je,
+    scales,
+    so_eq,
+    so_ineq,
+    y,
+    λ,
 )
     neq = length(eq_rel)
     terms = ()
+    # evaluator-length multiplier vector (row order: inequalities first,
+    # then equalities) for the label-gated exact curvature terms
+    μ = if je !== nothing && (any(so_ineq) || any(so_eq))
+        zeros(je.nineq + je.neq)
+    else
+        nothing
+    end
     off = 0
     for (k, i) in enumerate(ineq_rel)
         gv = _vecval(ineq_fs[k](x))
@@ -1071,6 +1168,12 @@ function _hybrid_terms(
             rows = (off + 1):(off + length(rawg))
             w = ρ * w_ineq[k] / scales[neq + k]^2
             terms = (terms..., JumpGaussNewtonTerm(je, rows, w, copy(x), act))
+            if so_ineq[k]
+                s = scales[neq + k]
+                for (j, r) in enumerate(rows)
+                    act[j] && (μ[r] = (λ[k][j] + ρ * w_ineq[k] * gv[j]) / s)
+                end
+            end
         else
             terms = (terms..., GaussNewtonTerm(ineq_fs[k], ρ * w_ineq[k], copy(x), act))
         end
@@ -1082,11 +1185,19 @@ function _hybrid_terms(
             rows = (off + 1):(off + length(rawc))
             w = ρ * w_eq[k] / scales[k]^2
             terms = (terms..., JumpGaussNewtonTerm(je, rows, w, copy(x)))
+            if so_eq[k]
+                s = scales[k]
+                cv = _vecval(eq_fs[k](x))
+                for (j, r) in enumerate(rows)
+                    μ[r] = (y[k][j] + ρ * w_eq[k] * cv[j]) / s
+                end
+            end
         else
             terms = (terms..., GaussNewtonTerm(eq_fs[k], ρ * w_eq[k], copy(x)))
         end
         off += length(_vecval(eq_fs[k](x)))
     end
+    μ === nothing || (terms = (terms..., JumpLagrangianTerm(je, μ, copy(x))))
     return terms
 end
 
@@ -1659,6 +1770,8 @@ function optimize!(workspace::AugLagWorkspace)
         # exact-Jacobian hybrid terms
         je_hybrid =
             options.curvature === :hybrid ? _jump_evaluator(model.objective) : nothing
+        # per-group second-order flags for the hybrid terms (label-gated)
+        so_eq, so_ineq = _second_order_flags(options.second_order, model, eq_rel, ineq_rel)
         qn_approx = if warm && workspace.state.approx !== nothing
             st_approx = workspace.state.approx
             if st_approx isa CompositeHessianApprox
@@ -1678,6 +1791,10 @@ function optimize!(workspace::AugLagWorkspace)
                         ρ,
                         je_hybrid,
                         scales,
+                        so_eq,
+                        so_ineq,
+                        y,
+                        λ,
                     ),
                 )
             else
@@ -1709,6 +1826,10 @@ function optimize!(workspace::AugLagWorkspace)
                     ρ,
                     je_hybrid,
                     scales,
+                    so_eq,
+                    so_ineq,
+                    y,
+                    λ,
                 ),
             )
         else
