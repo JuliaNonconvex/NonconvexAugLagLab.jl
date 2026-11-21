@@ -134,16 +134,20 @@ end
     using NonconvexAugLagLab, Test, LinearAlgebra
     # min sum(x.^2) s.t. x[1] + x[2] = 1 (labeled :relax) and x[1] <= 0.5
     # (not labeled). Relaxing only the labeled constraint must relax the
-    # equality and keep the inequality hard -> the built-in solver then
-    # refuses (it needs everything relaxed), which proves the selection
-    # worked.
+    # equality and keep the inequality hard -> the built-in solver folds
+    # the kept inequality into its penalty split (hard_rho), which proves
+    # the selection worked.
     m = Model(x -> sum(x .^ 2))
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
     add_eq_constraint!(m, x -> x[1] + x[2] - 1; flags=[:relax])
     add_ineq_constraint!(m, x -> x[1] - 0.5)
     sel = RelaxConstraintSelection(eq=false, ineq=false, sd=false, labels=[:relax])
     options = AugLagOptions(relaxed=sel)
-    @test_throws ArgumentError optimize(m, AugLagAlg(), [0.0, 0.0], options=options)
+    r = optimize(m, AugLagAlg(), [0.0, 0.0]; options=options)
+    # the kept inequality is enforced through the hard penalty: nearly
+    # feasible at (0.5, 0.5)
+    @test norm(r.minimizer - [0.5, 0.5]) < 1e-3
+    @test m.ineq_constraints.fs[1](r.minimizer)[1] < 1e-3
     # with both constraints labeled, everything is relaxed and the solve
     # succeeds: min sum(x.^2) s.t. x1+x2=1, x1<=0.5 -> (0.5, 0.5)
     m2 = Model(x -> sum(x .^ 2))

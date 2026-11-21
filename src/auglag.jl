@@ -1784,6 +1784,9 @@ function optimize!(workspace::AugLagWorkspace)
     vprev = Inf
     vnorm = Inf
     and_history = Tuple{Vector{Float64},Vector{Float64}}[]
+    # the AL objective ref for the finite-difference-gradient curvature
+    # (updated each outer iteration once the subproblem is built)
+    al_obj_ref = Ref{Any}(nothing)
     and_ineq_history = Tuple{Vector{Float64},Vector{Float64}}[]
     # spectral-penalty history: the flat constraint values and multipliers
     # of the previous good step (the Barzilai-Borwein estimate uses the
@@ -1824,24 +1827,24 @@ function optimize!(workspace::AugLagWorkspace)
     qn_nonmonotone = false
     qn_soc = false
     qn_approx = nothing
+    # The built-in quasi-Newton subproblem options (parsed unconditionally
+    # so the loop sites are well-typed for JET; used only when
+    # sub_alg === nothing).
+    qn_opts = if sub_options === nothing
+        (; max_iter=800, tol=1e-8, globalization=:trustregion)
+    else
+        sub_options
+    end
+    qn_base_maxiter = get(qn_opts, :max_iter, 800)
+    qn_tol_override = get(qn_opts, :tol, nothing)
+    qn_globalization = get(qn_opts, :globalization, :trustregion)
+    qn_reset = get(qn_opts, :reset, false)
+    qn_nonmonotone = get(qn_opts, :nonmonotone, false)
+    qn_soc = get(qn_opts, :soc, false)
+    qn_projected_stop = get(qn_opts, :projected_stop, true)
+    qn_cg_maxiter = get(qn_opts, :cg_maxiter, nothing)
+    qn_precond = get(qn_opts, :precond, false)
     if sub_alg === nothing
-        qn_opts = if sub_options === nothing
-            (; max_iter=800, tol=1e-8, globalization=:trustregion)
-        else
-            sub_options
-        end
-        qn_base_maxiter = get(qn_opts, :max_iter, 800)
-        qn_tol_override = get(qn_opts, :tol, nothing)
-        qn_globalization = get(qn_opts, :globalization, :trustregion)
-        qn_reset = get(qn_opts, :reset, false)
-        qn_nonmonotone = get(qn_opts, :nonmonotone, false)
-        qn_soc = get(qn_opts, :soc, false)
-        qn_projected_stop = get(qn_opts, :projected_stop, true)
-        qn_cg_maxiter = get(qn_opts, :cg_maxiter, nothing)
-        qn_precond = get(qn_opts, :precond, false)
-        # the AL objective ref for the finite-difference-gradient curvature
-        # (updated each outer iteration once the subproblem is built)
-        al_obj_ref = Ref{Any}(nothing)
         h0_op = if h0 === :penalty
             DiagonalPreconditioner(fill(1 / (1 + ρ), n + (use_elastic ? m_eq : 0)))
         elseif h0 === :identity
