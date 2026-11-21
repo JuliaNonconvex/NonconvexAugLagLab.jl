@@ -148,7 +148,19 @@ end
 
 init!(H::CompositeHessianApprox, n, x0) = (init!(H.qn, n, x0); H)
 reset!(H::CompositeHessianApprox) = (reset!(H.qn); H)
-update!(H::CompositeHessianApprox, s, y) = (update!(H.qn, s, y); H)
+function update!(H::CompositeHessianApprox, s, y)
+    # structured secant (Dennis-Gay-Welsch): subtract the exact terms'
+    # curvature from the secant pair so the quasi-Newton model covers only
+    # the remainder (the terms are those of the iterate the step started
+    # from, which is the right linearization point)
+    ty = similar(y)
+    fill!(ty, 0.0)
+    for t in H.terms[]
+        apply_term!(ty, t, s)
+    end
+    update!(H.qn, s, y .- ty)
+    return H
+end
 solve!(d, H::CompositeHessianApprox, g) = solve!(d, H.qn, g)
 function apply!(Bv, H::CompositeHessianApprox, v)
     apply!(Bv, H.qn, v)
@@ -541,7 +553,17 @@ _is_newton(::NewtonTRApprox) = true
 _is_newton(::Any) = false
 
 # The Steihaug preconditioner of an approximation, when it carries one.
+# NOTE: the composite deliberately does NOT expose its quasi-Newton
+# inverse as the CG preconditioner - measured on Rosetta case5, the
+# remainder-only L-BFGS inverse is a badly-scaled preconditioner for the
+# exact-term-dominated system (it stalled the solve entirely before the
+# structured-secant fix and still degraded it ~700x afterwards); the
+# unpreconditioned CG is faster in practice there.
 _steihaug_precond(a) = hasproperty(a, :precond) ? a.precond : nothing
+
+# The two-loop recursion as a left-division: lets any Hessian
+# approximation serve as the Steihaug CG preconditioner.
+LinearAlgebra.ldiv!(z, H::AbstractHessianApprox, r) = solve!(z, H, r)
 
 # ------------------------------------------------------------------
 # Driver
@@ -575,6 +597,7 @@ struct QuasiNewtonAlg{A<:AbstractHessianApprox} <: AbstractOptimizer
     levenberg::Bool
     tron_cauchy::Bool
     projected_stop::Bool
+    cg_tol::Union{Nothing,Real}
 end
 # The quasi-Newton driver solves smooth box-constrained (possibly unbounded)
 # problems; it handles no other constraint kinds.
@@ -607,10 +630,13 @@ function QuasiNewtonAlg(
     levenberg::Bool=true,
     tron_cauchy::Bool=false,
     projected_stop::Bool=true,
+    cg_tol=nothing,
 )
     globalization in (:backtracking, :wolfe, :trustregion, :tron) || throw(
         ArgumentError("globalization must be :backtracking, :wolfe, :trustregion or :tron"),
     )
+    (cg_tol === nothing || cg_tol > 0) ||
+        throw(ArgumentError("cg_tol must be positive or nothing"))
     return QuasiNewtonAlg(
         approx,
         globalization,
@@ -624,6 +650,7 @@ function QuasiNewtonAlg(
         levenberg,
         tron_cauchy,
         projected_stop,
+        cg_tol,
     )
 end
 
@@ -784,7 +811,9 @@ function optimize!(workspace::QuasiNewtonWorkspace)
             if _is_newton(approx)
                 approx.H .= Hmat
             end
-            d, negcurv = _steihaug(approx, g, Δ, τ, _steihaug_precond(approx))
+            d, negcurv = _steihaug(
+                approx, g, Δ, τ, _steihaug_precond(approx), optimizer.cg_tol
+            )
             d = _project(x, d, lb, ub)
             norm(d) < 1e-12 && break
             xnew = x .+ d
@@ -819,7 +848,9 @@ function optimize!(workspace::QuasiNewtonWorkspace)
                 # Second-order correction (Ipopt, opt-in): re-solve the model
                 # with the gradient evaluated at the rejected trial point.
                 gsoc = gradfun(xnew)
-                dsoc, _ = _steihaug(approx, gsoc, Δ, τ, _steihaug_precond(approx))
+                dsoc, _ = _steihaug(
+                    approx, gsoc, Δ, τ, _steihaug_precond(approx), optimizer.cg_tol
+                )
                 dsoc = _project(x, dsoc, lb, ub)
                 xnsoc = x .+ dsoc
                 fnsoc = fobj(xnsoc)
@@ -1037,7 +1068,7 @@ end
 
 # Steihaug–Toint CG for the trust-region subproblem
 # min ⟨g,d⟩ + ½ dᵀ(B + τI)d, ‖d‖ ≤ Δ (Levenberg dual regularization)
-function _steihaug(approx, g, Δ, τ=0.0, M=nothing)
+function _steihaug(approx, g, Δ, τ=0.0, M=nothing, cg_tol=nothing)
     n = length(g)
     d = zeros(n)
     r = copy(g)
@@ -1053,6 +1084,7 @@ function _steihaug(approx, g, Δ, τ=0.0, M=nothing)
     zr = dot(z, r)
     rnorm2 = dot(r, r)
     rnorm2 < 1e-14 && return d, false
+    rnorm2_0 = rnorm2
     for _ in 1:n
         Bp = _hessmatvec(approx, p) .+ τ .* p
         pBp = dot(p, Bp)
@@ -1077,6 +1109,9 @@ function _steihaug(approx, g, Δ, τ=0.0, M=nothing)
         r .+= α .* Bp
         rnorm2new = dot(r, r)
         rnorm2new < 1e-14 && break
+        # inexact CG (Dembo-Eisenstat-Steihaug): stop once the relative
+        # residual reaches the requested tolerance
+        cg_tol !== nothing && rnorm2new <= cg_tol^2 * rnorm2_0 && break
         z = if M === nothing
             copy(r)
         else

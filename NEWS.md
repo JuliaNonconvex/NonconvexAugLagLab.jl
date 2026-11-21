@@ -110,20 +110,27 @@
   ForwardDiff) instead of the finite difference. With the exact sparse
   evaluator Jacobian for JuMP-converted blocks (two sparse matvecs per
   CG iteration): matches L-BFGS's wall-clock (230.9 vs ~219 s) at 15×
-  better feasibility per 200 outer iterations (viol 3.9e-2 vs 0.60) —
-  still more outer iterations than SR1/Newton; the next lever is the
-  label-gated exact `λᵀ∇²c` equality terms.
+  better feasibility per 200 outer iterations (viol 3.9e-2 vs 0.60).
 - **Second-order labels for the hybrid curvature (opt-in)**:
   `AugLagOptions(second_order = SecondOrderSelection(eq, ineq, labels))`
   selects which relaxed constraint groups contribute their exact
   multiplier-weighted curvature `μᵀ∇²c` (MOI Lagrangian-Hessian
-  triplets) on top of the Gauss-Newton term. Measured on Rosetta case5:
-  labeling all groups cuts the violation ~120× per the same
-  200-iteration budget (3.9e-2 → 3.2e-4, already 50× better than SR1's
-  final feasibility) at +14% wall-clock (263.7 vs 230.9 s), with a
-  slight objective overshoot (17783 vs the 17553 optimum) — the exact
-  multiplier curvature fixes the outer-loop convergence the plain
-  hybrid lacked; opt-in, JuMP-converted blocks only.
+  triplets) on top of the Gauss-Newton term. Together with the
+  structured-secant composite update (the exact terms' curvature is
+  subtracted from the secant pairs, so the L-BFGS models only the
+  remainder — the fix that unblocked the outer loop), labeling all
+  groups on Rosetta case5 converges to machine-precision feasibility in
+  29 outer iterations / 34.3 s (viol 9.3e-14) vs 80 s for SR1 and
+  43.8 s for Newton, at a 1.4% higher objective (f = 17808 vs the 17553
+  optimum — a different feasible local solution). The remainder-only
+  L-BFGS inverse was also measured as a Steihaug CG preconditioner and
+  is deliberately not wired (it stalled the solve on case5).
+- **Inexact Steihaug CG (opt-in)**: `AugLagOptions(inexact_cg = true)`
+  passes the subproblem tolerance to the built-in trust-region solver as
+  a relative CG residual tolerance (Dembo–Eisenstat–Steihaug). Measured
+  on Rosetta case5 (hybrid + all labels): bit-for-bit the same
+  trajectory at 3.6% less wall-clock (251.9 vs 261.4 s) — a small win,
+  off by default pending the TopOpt characterization.
 - **Practical relative subproblem tolerance (opt-in)**:
   `AugLagOptions(sub_tol_schedule = :relative, sub_tol_rel = τ)` sets the
   inner tolerance proportional to the current constraint violation

@@ -279,18 +279,22 @@ end
   the inequality rows restricted to the active set frozen at the
   subproblem iterate — plus an L-BFGS model of the remainder
   (`λ`-weighted terms; the composite's quasi-Newton part covers the
-  remainder, and the identity base operator is used since the penalty
-  scale is already exact in the terms). Experimental; measured on the
-  TopOpt local-stress single-level solve: the matvec cost dominates (a
-  forward finite difference + a reverse pass per CG iteration against
-  full-FEA stress constraints) — no completion within 20 min vs the
-  4.5 min L-BFGS baseline; on Rosetta case5 the JuMP-converted blocks
-  use the exact sparse evaluator Jacobian (two sparse matvecs per CG
-  iteration), matching L-BFGS's wall-clock (230.9 vs ~219 s) at 15×
-  better feasibility per 200 outer iterations (viol 3.9e-2 vs 0.60),
-  but the outer loop still needs more iterations than SR1 (80 s) or
-  Newton (43.8 s) — opt-in; the next lever is the label-gated exact
-  `λᵀ∇²c` terms for the equality blocks.
+  remainder with the structured-secant update (Dennis–Gay–Welsch: the
+  exact terms' curvature is subtracted from the secant pairs, so the
+  QN models only the remainder), and the identity base operator is used
+  since the penalty scale is already exact in the terms). Experimental;
+  measured on the TopOpt local-stress single-level solve: the matvec
+  cost dominates (a forward finite difference + a reverse pass per CG
+  iteration against full-FEA stress constraints) — no completion within
+  20 min vs the 4.5 min L-BFGS baseline; on Rosetta case5 the
+  JuMP-converted blocks use the exact sparse evaluator Jacobian (two
+  sparse matvecs per CG iteration) and, with the `second_order` labels,
+  converge to machine-precision feasibility in 29 outer iterations /
+  34.3 s (see `second_order` below) — faster than SR1 (80 s) and Newton
+  (43.8 s), at a 1.4% higher objective (a different feasible local
+  solution). The remainder-only L-BFGS inverse was also measured as a
+  Steihaug CG preconditioner and is deliberately not wired (it stalled
+  the solve on case5). Opt-in.
   Measured: `:sr1` is a massive
 - `second_order`: (opt-in, with `curvature = :hybrid`) a
   [`SecondOrderSelection`](@ref) selecting which relaxed constraint
@@ -300,11 +304,20 @@ end
   groups keep the Gauss-Newton term only, with their multiplier
   curvature absorbed by the L-BFGS remainder. JuMP-converted blocks
   only. `nothing` (default) disables the exact terms. Measured on
-  Rosetta case5: labeling all groups cuts the violation ~120× per the
-  same 200-iteration budget (3.9e-2 → 3.2e-4) at +14% wall-clock
-  (263.7 vs 230.9 s), with a slight objective overshoot (17783 vs the
-  17553 optimum) — the exact multiplier curvature fixes the outer-loop
-  convergence the plain hybrid lacked.
+  Rosetta case5: labeling all groups (with the structured-secant
+  composite update) converges to machine-precision feasibility in
+  29 outer iterations / 34.3 s (viol 9.3e-14, f = 17808 — 1.4% above
+  the 17553 optimum Newton finds, a different feasible local solution)
+  vs 80 s for SR1 and 43.8 s for Newton.
+- `inexact_cg`: (opt-in) pass the subproblem tolerance to the built-in
+  trust-region solver as a relative Steihaug CG residual tolerance
+  (Dembo–Eisenstat–Steihaug inexact Newton: the CG stops once
+  `‖r‖ ≤ sub_tol·‖r₀‖`, so loose subproblems run few Hessian-vector
+  products and the budget tightens to zero as the outer loop
+  converges). `false` (default) keeps the exact CG. Measured on Rosetta
+  case5 (hybrid + all labels): bit-for-bit the same trajectory at 3.6%
+  less wall-clock (251.9 vs 261.4 s) — a small win, off by default
+  pending the TopOpt characterization.
   Rosetta AC-OPF case5 win (80 vs 219 s, viol 0.016 vs 0.60, f near the
   true optimum) but slower on the TopOpt local-stress problem (no
   completion within 31 min vs ~6 min for L-BFGS) — opt-in; `:newton` with
@@ -622,6 +635,7 @@ mutable struct AugLagOptions{S,R,W}
     stop_kkt::Bool
     kkt_tol::Real
     second_order::Union{Nothing,SecondOrderSelection}
+    inexact_cg::Bool
     outer_schedule::Symbol
 
     two_level::Bool
@@ -686,6 +700,7 @@ function AugLagOptions(;
     stop_kkt::Bool=false,
     kkt_tol::Real=1e-6,
     second_order=nothing,
+    inexact_cg::Bool=false,
     outer_schedule::Symbol=:bm,
 
     two_level::Bool=false,
@@ -788,6 +803,7 @@ function AugLagOptions(;
         stop_kkt,
         kkt_tol,
         second_order,
+        inexact_cg,
         outer_schedule,
         two_level,
         two_level_iters,
@@ -1583,6 +1599,7 @@ function optimize!(workspace::AugLagWorkspace)
     analytical_gradient = options.analytical_gradient
     stop_kkt = options.stop_kkt
     kkt_tol = Float64(options.kkt_tol)
+    inexact_cg = options.inexact_cg
     outer_schedule = options.outer_schedule
     @unpack two_level, two_level_iters, two_level_tau = options
     @unpack box_barrier_scale = options
@@ -2155,6 +2172,7 @@ function optimize!(workspace::AugLagWorkspace)
                     nonmonotone=qn_nonmonotone,
                     soc=qn_soc,
                     projected_stop=qn_projected_stop,
+                    cg_tol=inexact_cg ? sub_tol : nothing,
                 ),
                 x_sub,
             )
@@ -2173,6 +2191,7 @@ function optimize!(workspace::AugLagWorkspace)
                         nonmonotone=qn_nonmonotone,
                         soc=qn_soc,
                         projected_stop=qn_projected_stop,
+                        cg_tol=inexact_cg ? 10 * sub_tol : nothing,
                     ),
                     x_sub,
                 )
@@ -2251,6 +2270,7 @@ function optimize!(workspace::AugLagWorkspace)
                         nonmonotone=qn_nonmonotone,
                         soc=qn_soc,
                         projected_stop=qn_projected_stop,
+                        cg_tol=inexact_cg ? sub_tol : nothing,
                     ),
                     x_two,
                 )

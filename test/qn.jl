@@ -419,3 +419,60 @@ end
     NonconvexAugLagLab.apply_term!(Hv, t, v)
     @test Hv ≈ 1.5 * 2.0 .* v atol = 1e-8
 end
+
+@testitem "QuasiNewtonAlg: inexact Steihaug CG tolerance" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra
+    const NAL = NonconvexAugLagLab
+    # a loose relative CG tolerance still returns a valid (descent) step
+    H = NAL.LBFGSApprox(5)
+    NAL.init!(H, 2, zeros(2))
+    g = [1.0, 0.5]
+    d1, _ = NAL._steihaug(H, g, 10.0, 0.0, nothing, 1e-2)
+    d2, _ = NAL._steihaug(H, g, 10.0, 0.0, nothing, nothing)
+    @test norm(d1) > 0
+    @test norm(d2) > 0
+    # both are descent directions for a positive-definite model
+    @test dot(g, d1) < 0
+    @test dot(g, d2) < 0
+    # validation
+    @test_throws ArgumentError NAL.QuasiNewtonAlg(; cg_tol = 0.0)
+end
+
+@testitem "QuasiNewtonAlg: hybrid structured secant and CG preconditioning" begin
+    using NonconvexAugLagLab, Test, LinearAlgebra
+    const NAL = NonconvexAugLagLab
+    qn = NAL.LBFGSApprox(5)
+    comp = NAL.CompositeHessianApprox(qn, x -> ())
+    # the composite deliberately exposes no CG preconditioner (measured
+    # harmful on case5: the remainder-only inverse badly scales the
+    # exact-term-dominated system)
+    @test NAL._steihaug_precond(comp) === nothing
+    # the structured-secant update subtracts the exact terms' curvature
+    # from the secant pair: with a single unit Gauss-Newton term, the QN
+    # receives y - w*J'J*s
+    gn = NAL.GaussNewtonTerm(x -> [x[1]], 2.0, [1.0])
+    comp2 = NAL.CompositeHessianApprox(NAL.LBFGSApprox(2), x -> (gn,))
+    NAL.init!(comp2, 1, [1.0])
+    comp2.terms[] = (gn,)
+    s = [0.5]
+    y = [1.7]
+    y_qn = copy(y)
+    ty = zeros(1)
+    NAL.apply_term!(ty, gn, s)
+    y_qn .-= ty
+    # the QN model's history receives the corrected pair: reproduce via a
+    # fresh L-BFGS and compare the stored secants
+    qn_ref = NAL.LBFGSApprox(2)
+    NAL.init!(qn_ref, 1, [1.0])
+    NAL.update!(qn_ref, s, y_qn)
+    NAL.update!(comp2, s, y)
+    @test comp2.qn.s[1] == qn_ref.s[1]
+    @test comp2.qn.y[1] ≈ qn_ref.y[1]
+    # the two-loop recursion serves as ldiv!
+    qn2 = NAL.LBFGSApprox(5)
+    NAL.init!(qn2, 2, zeros(2))
+    r = [1.0, -0.5]
+    z = zeros(2)
+    NAL.LinearAlgebra.ldiv!(z, qn2, r)
+    @test z == r  # identity base operator, empty history
+end
