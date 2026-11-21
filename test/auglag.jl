@@ -70,14 +70,14 @@ end
         m,
         AugLagAlg(),
         [0.0, 0.0];
-        options = AugLagOptions(;
-            max_iter = 200, relaxed = RelaxConstraintSelection(eq = true, ineq = false)
+        options=AugLagOptions(;
+            max_iter=200, relaxed=RelaxConstraintSelection(eq=true, ineq=false)
         ),
     )
     @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
     @test r.minimum ≈ 0.5 atol = 1e-4
     # hard_rho must be positive
-    @test_throws ArgumentError AugLagOptions(hard_rho = 0.0)
+    @test_throws ArgumentError AugLagOptions(hard_rho=0.0)
 end
 
 @testitem "AugLagAlg: keep_all trajectory" begin
@@ -923,12 +923,14 @@ end
     # [0.5, 0.5] and one is inactive — the mix runs on active+inactive rows.
     m = Model(x -> sum((x .- [1.0, 1.0]) .^ 2))
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
-    add_ineq_constraint!(m, x -> [x[1] - 0.5, x[2] - 0.5, x[1] + x[2] - 1.5], [0.0, 0.0, 0.0])
+    add_ineq_constraint!(
+        m, x -> [x[1] - 0.5, x[2] - 0.5, x[1] + x[2] - 1.5], [0.0, 0.0, 0.0]
+    )
     r = optimize(
         m,
         AugLagAlg(),
         [1.0, 1.0];
-        options = AugLagOptions(; max_iter = 200, anderson_ineq = true),
+        options=AugLagOptions(; max_iter=200, anderson_ineq=true),
     )
     @test norm(r.minimizer - [0.5, 0.5]) < 1e-3
     @test r.minimum ≈ 0.5 atol = 1e-4
@@ -937,10 +939,10 @@ end
         m,
         AugLagAlg(),
         [1.0, 1.0];
-        options = AugLagOptions(; max_iter = 200, anderson_ineq = true, anderson_depth = 5),
+        options=AugLagOptions(; max_iter=200, anderson_ineq=true, anderson_depth=5),
     )
     @test norm(r5.minimizer - [0.5, 0.5]) < 1e-3
-    @test_throws ArgumentError AugLagOptions(anderson_depth = 0)
+    @test_throws ArgumentError AugLagOptions(anderson_depth=0)
 end
 
 @testitem "AugLagAlg: relaxed multiplier step with loose subproblem solves" begin
@@ -954,10 +956,10 @@ end
         m,
         AugLagAlg(),
         [0.0, 0.0];
-        options = AugLagOptions(;
-            max_iter = 200,
-            multiplier_relax = true,
-            sub_options = (; max_iter = 50, tol = 1e-2, globalization = :trustregion),
+        options=AugLagOptions(;
+            max_iter=200,
+            multiplier_relax=true,
+            sub_options=(; max_iter=50, tol=1e-2, globalization=:trustregion),
         ),
     )
     @test norm(r.minimizer - [1.0, 2.0]) < 1e-4
@@ -974,10 +976,7 @@ end
     add_eq_constraint!(m, x -> x[1] + x[2] - 1)
     add_ineq_constraint!(m, x -> [x[1] - 0.9], [0.0])
     r = optimize(
-        m,
-        AugLagAlg(),
-        [0.0, 0.0];
-        options = AugLagOptions(; max_iter = 200, spectral_rho = true),
+        m, AugLagAlg(), [0.0, 0.0]; options=AugLagOptions(; max_iter=200, spectral_rho=true)
     )
     @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
     @test r.minimum ≈ 0.5 atol = 1e-4
@@ -1005,10 +1004,7 @@ end
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
     add_eq_constraint!(m, x -> x[1] + x[2] - 1)
     r = optimize(
-        m,
-        AugLagAlg(),
-        [0.0, 0.0];
-        options = AugLagOptions(; max_iter = 200, dual_secant = true),
+        m, AugLagAlg(), [0.0, 0.0]; options=AugLagOptions(; max_iter=200, dual_secant=true)
     )
     @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
     @test r.minimum ≈ 0.5 atol = 1e-4
@@ -1023,20 +1019,14 @@ end
     # the first elapsed check fires before or after iteration 1 is a
     # clock-tick race, but the second check always fires)
     r = optimize(
-        m,
-        AugLagAlg(),
-        [0.0, 0.0];
-        options = AugLagOptions(; max_time = 1e-9, keep_all = true),
+        m, AugLagAlg(), [0.0, 0.0]; options=AugLagOptions(; max_time=1e-9, keep_all=true)
     )
     @test length(r.trajectory) <= 1
     # validation
-    @test_throws ArgumentError AugLagOptions(max_time = 0.0)
+    @test_throws ArgumentError AugLagOptions(max_time=0.0)
     # a generous budget converges normally
     r2 = optimize(
-        m,
-        AugLagAlg(),
-        [0.0, 0.0];
-        options = AugLagOptions(; max_time = Inf, max_iter = 200),
+        m, AugLagAlg(), [0.0, 0.0]; options=AugLagOptions(; max_time=Inf, max_iter=200)
     )
     @test norm(r2.minimizer - [0.5, 0.5]) < 1e-4
 end
@@ -1051,12 +1041,11 @@ end
         m,
         AugLagAlg(),
         [0.0, 0.0];
-        options = AugLagOptions(;
-            max_iter = 200,
-            on_iteration = (iter, x, fx, v) -> begin
+        options=AugLagOptions(;
+            max_iter=200, on_iteration=(iter, x, fx, v) -> begin
                 push!(seen, (iter, fx))
                 return iter >= 3
-            end,
+            end
         ),
     )
     @test length(seen) == 3
@@ -1070,7 +1059,9 @@ end
     f = x -> (x[1] - 1)^2 + x[2]^2
     c = x -> [x[1] + x[2] - 1.0]
     g = x -> [x[1] - 0.5, x[2] - 0.5]
-    a = NAL.AnalyticalALObjective(f, [c], [g], [[0.3]], [[0.2, 0.1]], [1.0], [1.0], 10.0, x -> 0.0)
+    a = NAL.AnalyticalALObjective(
+        f, [c], [g], [[0.3]], [[0.2, 0.1]], [1.0], [1.0], 10.0, x -> 0.0
+    )
     ref = z -> begin
         v = f(z)
         cv = c(z)
@@ -1093,7 +1084,7 @@ end
         m,
         AugLagAlg(),
         [0.0, 0.0];
-        options = AugLagOptions(; max_iter = 200, analytical_gradient = true),
+        options=AugLagOptions(; max_iter=200, analytical_gradient=true),
     )
     @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
 end
@@ -1108,10 +1099,10 @@ end
         m,
         AugLagAlg(),
         [0.0, 0.0];
-        options = AugLagOptions(; max_iter = 200, stop_kkt = true, kkt_tol = 1e-4),
+        options=AugLagOptions(; max_iter=200, stop_kkt=true, kkt_tol=1e-4),
     )
     @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
-    @test_throws ArgumentError AugLagOptions(kkt_tol = 0.0)
+    @test_throws ArgumentError AugLagOptions(kkt_tol=0.0)
 end
 
 @testitem "AugLagAlg: objective recovery and infeasibility detection" begin
@@ -1125,7 +1116,8 @@ end
     λ = [[0.0], [2.0]]
     mt = 5.0
     f = NAL._recover_objective(mt, eqvals, ineqvals, y, λ, [2.0], [1.0, 1.0], 10.0, 1.0)
-    ref = mt - (dot(y[1], eqvals[1]) + 20 / 2 * dot(eqvals[1], eqvals[1])) -
+    ref =
+        mt - (dot(y[1], eqvals[1]) + 20 / 2 * dot(eqvals[1], eqvals[1])) -
         (dot(λ[2], [0.4]) + 10 / 2 * 0.4^2)
     @test f ≈ ref
     # end-to-end: an infeasible problem is detected via the dual certificate
@@ -1133,7 +1125,7 @@ end
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
     add_eq_constraint!(m, x -> x[1] - 0.0)
     add_eq_constraint!(m, x -> x[1] - 1.0)
-    r = optimize(m, AugLagAlg(), [0.5, 0.0]; options = AugLagOptions(; max_iter = 200))
+    r = optimize(m, AugLagAlg(), [0.5, 0.0]; options=AugLagOptions(; max_iter=200))
     @test r.status == :infeasible
     # the backward-compatible 4-arg result constructor keeps working
     @test AugLagResult([0.0], 0.0, nothing, nothing).status == :unknown

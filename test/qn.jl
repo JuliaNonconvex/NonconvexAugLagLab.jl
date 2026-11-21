@@ -335,10 +335,7 @@ end
         r = optimize(
             m,
             QuasiNewtonAlg(;
-                max_iter=50,
-                tol=1e-8,
-                globalization=globalization,
-                projected_stop=true,
+                max_iter=50, tol=1e-8, globalization=globalization, projected_stop=true
             ),
             [0.5, 0.5],
         )
@@ -376,10 +373,7 @@ end
     addvar!(m, [-5.0, -5.0], [5.0, 5.0])
     add_eq_constraint!(m, x -> x[1] + x[2] - 1)
     r = optimize(
-        m,
-        AugLagAlg(),
-        [0.0, 0.0];
-        options = AugLagOptions(; max_iter = 200, curvature = :hybrid),
+        m, AugLagAlg(), [0.0, 0.0]; options=AugLagOptions(; max_iter=200, curvature=:hybrid)
     )
     @test norm(r.minimizer - [0.5, 0.5]) < 1e-4
 end
@@ -395,7 +389,9 @@ end
     JuMP.@constraint(jm, x[1] <= 0.9)
     dm = NonconvexCore.DictModel(jm)
     x0 = NonconvexCore.getinit(dm)
-    r = optimize(dm, AugLagAlg(), x0; options = AugLagOptions(; max_iter = 200, curvature = :hybrid))
+    r = optimize(
+        dm, AugLagAlg(), x0; options=AugLagOptions(; max_iter=200, curvature=:hybrid)
+    )
     xv = r.minimizer[:x]
     @test norm(xv - [0.5, 0.5]) < 1e-4
 end
@@ -435,7 +431,7 @@ end
     @test dot(g, d1) < 0
     @test dot(g, d2) < 0
     # validation
-    @test_throws ArgumentError NAL.QuasiNewtonAlg(; cg_tol = 0.0)
+    @test_throws ArgumentError NAL.QuasiNewtonAlg(; cg_tol=0.0)
 end
 
 @testitem "QuasiNewtonAlg: hybrid structured secant and CG preconditioning" begin

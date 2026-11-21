@@ -217,10 +217,10 @@ function apply!(Bv, H::SplitSecantApprox, v)
     return Bv
 end
 function _initialized(H::SplitSecantApprox, n)
-    _initialized(H.qn_rem, n) && _initialized(H.qn_pen, n)
+    return _initialized(H.qn_rem, n) && _initialized(H.qn_pen, n)
 end
 function _initialized(H::SplitSecantApprox, n::Int)
-    _initialized(H.qn_rem, n) && _initialized(H.qn_pen, n)
+    return _initialized(H.qn_rem, n) && _initialized(H.qn_pen, n)
 end
 _steihaug_precond(H::SplitSecantApprox) = H.qn_pen
 
@@ -1402,8 +1402,9 @@ function _tron_pcg(x, g, Hv, Δ, cgtol, s, lb, ub; max_cgiter=nothing)
             else
                 sqrt(eps(Float64))
             end
-            free[i] =
-                !((lb[i] == xw[i] == ub[i]) || (xw[i] <= lb[i] + δ) || (xw[i] >= ub[i] - δ))
+            free[i] = !(
+                (lb[i] == xw[i] == ub[i]) || (xw[i] <= lb[i] + δ) || (xw[i] >= ub[i] - δ)
+            )
         end
         any(free) || (exit_optimal=true; break)
         gfree = (Hs .+ g)[free]

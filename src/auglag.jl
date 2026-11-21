@@ -876,7 +876,7 @@ struct AugLagResult{TM1,TM2,R,TR} <: AbstractResult
     status::Symbol
 end
 function AugLagResult(minimizer, minimum, results, trajectory)
-    AugLagResult(minimizer, minimum, results, trajectory, :unknown)
+    return AugLagResult(minimizer, minimum, results, trajectory, :unknown)
 end
 
 mutable struct AugLagWorkspace{
