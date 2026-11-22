@@ -18,8 +18,10 @@ module NonconvexAugLagLabSDPExt
 using NonconvexAugLagLab
 using NonconvexCore: VecModel
 import NonconvexAugLagLab: _sd_violation, _sd_terms, _sd_multiplier_update!, _sd_init
+import NonconvexAugLagLab: _set_psd_violation, _set_psd_init, _set_psd_term, _set_psd_update!
+import NonconvexAugLagLab: _set_is_psd, _component_dim
 using NonconvexSemidefinite: NonconvexSemidefinite
-using NonconvexSemidefinite: project_psd, psd_infeasibility
+using NonconvexSemidefinite: project_psd, psd_infeasibility, PSDCone
 using NonconvexSemidefinite: NonconvexSemidefinite, ChainRulesCore
 # Block-aware helpers when a NonconvexSemidefinite with BlockSDConstraint is
 # loaded; fall back to the single-matrix contract for the registered 0.3.x.
@@ -30,6 +32,10 @@ else
     _sd_dims(c::NonconvexCore.SDConstraint) = [c.dim]
 end
 using LinearAlgebra
+
+# The PSDCone components of function-in-set constraints are semidefinite.
+NonconvexAugLagLab._set_is_psd(::PSDCone) = true
+NonconvexAugLagLab._component_dim(s::PSDCone) = s.dim
 
 # Zygote cannot trace through LAPACK (`logdet` -> foreigncall); the analytic
 # rrule d/dP logdet(Symmetric(P)) = inv(P)' feeds the quasi-Newton gradient.
@@ -97,6 +103,31 @@ function NonconvexAugLagLab._sd_multiplier_update!(
         end
     end
     return Y
+end
+
+# ------------------------------------------------------------------
+# PSD components of function-in-set constraints: the same projected ALM,
+# applied to the single matrix each PSDCone component evaluates to (the
+# chordal transform flattens products into one PSDCone per clique).
+# ------------------------------------------------------------------
+
+function NonconvexAugLagLab._set_psd_violation(vi::AbstractMatrix)
+    return [psd_infeasibility(vi)]
+end
+
+function NonconvexAugLagLab._set_psd_init(c::FunctionInSet, ρ)
+    comps = NonconvexCore.components(c.set)
+    return [zeros(d, d) for s in comps if s isa PSDCone for d in (s.dim,)]
+end
+
+function NonconvexAugLagLab._set_psd_term(Y::AbstractMatrix, ρ, vi::AbstractMatrix, penalty)
+    use_logdet = penalty in (:logdet, :mixed_logdet)
+    return use_logdet ? _logdet_term(Y, ρ, vi) : _projected_term(Y, ρ, vi)
+end
+
+function NonconvexAugLagLab._set_psd_update!(Y::AbstractMatrix, ρ, vi::AbstractMatrix, penalty)
+    Y .= project_psd(Y - ρ * vi)
+    return nothing
 end
 
 end
