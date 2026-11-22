@@ -55,16 +55,32 @@ end
 # unrelated to their values.
 function _set_scales(model::VecModel, i::Int, x0, scale_mode::Symbol)
     c = model.set_constraints.fs[i]
+    comps = NonconvexCore.components(c.set)
     if scale_mode === :value
+        # Value-based (the default). Order components are scaled by their
+        # reference magnitude. Equality components (EqualTo/Zeros) instead
+        # use the gradient-magnitude probe: their values track functions
+        # whose derivatives can exceed their value magnitudes by orders of
+        # magnitude (e.g. a coupling residual of a matrix assembled through
+        # a linear solve), and a value scale would under-normalize the
+        # penalty's x-gradient and let it yank the iterate away.
+        δ = 1e-6 .* (1 .+ abs.(x0))
+        δnorm = norm(δ)
+        v1 = NonconvexCore.set_value(c, x0 .+ δ)
         v0 = NonconvexCore.set_value(c, x0)
         return [
             begin
-                sc = maximum(abs, v)
-                (isfinite(sc) && sc >= 1.0) ? sc : 1.0
-            end for v in v0
+                if s isa Union{EqualTo,Zeros}
+                    d = norm(a .- b) / δnorm
+                    (isfinite(d) && d >= 1.0) ? d : 1.0
+                else
+                    sc = maximum(abs, a)
+                    (isfinite(sc) && sc >= 1.0) ? sc : 1.0
+                end
+            end for (a, b, s) in zip(v0, v1, comps)
         ]
     end
-    # Gradient-magnitude probes (opt-in, mirrors the classical groups).
+    # Gradient-magnitude probes for every component (opt-in mode).
     δ = 1e-6 .* (1 .+ abs.(x0))
     δnorm = norm(δ)
     v1 = NonconvexCore.set_value(c, x0 .+ δ)

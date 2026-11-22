@@ -1914,10 +1914,16 @@ function optimize!(workspace::AugLagWorkspace)
     # Multiplier buffers of the relaxed function-in-set constraints
     # (y_eq, λ_ineq, Y_psd per constraint).
     Msets = [_set_init_multipliers(model, i, ρ) for i in sets_rel]
-    # The set-constraint component scales (gradient-magnitude probes, like
-    # the classical group scales): the set penalties, violations and
-    # multipliers live in these scaled units.
-    set_scales = [_set_scales(model, i, x, options.scale_mode) for i in sets_rel]
+    # The set-constraint component scales: with scaling on, gradient/value
+    # probes per the scale_mode; with scaling off, unit scales — the
+    # formulation is then expected to provide well-scaled residuals.
+    set_scales = if options.scaling
+        [_set_scales(model, i, x, options.scale_mode) for i in sets_rel]
+    else
+        [
+            fill(1.0, length(NonconvexCore.components(model.set_constraints.fs[i].set))) for i in sets_rel
+        ]
+    end
     trajectory = Tuple{typeof(x),Real,Real}[]
     fx = obj(x)
     vprev = Inf
