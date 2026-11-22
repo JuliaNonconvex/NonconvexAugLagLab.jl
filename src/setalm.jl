@@ -47,20 +47,35 @@ function _set_components(c::FunctionInSet, x)
     return v, comps
 end
 
+# One scale per component of a set constraint: the gradient-magnitude probe
+# used for the classical groups, ‖vᵢ(x₀ + δ) - vᵢ(x₀)‖ / ‖δ‖, floored at 1.
+# The penalty terms, violations and multipliers of the set machinery all
+# live in these scaled units, so large-scale components (e.g. stiffness
+# matrices) do not dominate the augmented Lagrangian.
+function _set_scales(model::VecModel, i::Int, x0)
+    c = model.set_constraints.fs[i]
+    v0 = NonconvexCore.set_value(c, x0)
+    δ = 1e-6 .* (1 .+ abs.(x0))
+    δnorm = norm(δ)
+    v1 = NonconvexCore.set_value(c, x0 .+ δ)
+    return [max(1.0, norm(a .- b) / δnorm) for (a, b) in zip(v0, v1)]
+end
+
 # ------------------------------------------------------------------
 # Violation (bundle evaluated once; value-only, so mutation is fine)
 # ------------------------------------------------------------------
 
-function _set_violation(model::VecModel, i::Int, x)
+function _set_violation(model::VecModel, i::Int, x, scales=nothing)
     c = model.set_constraints.fs[i]
     v, comps = _set_components(c, x)
     out = Float64[]
-    for (vi, s) in zip(v, comps)
+    for (k, (vi, s)) in enumerate(zip(v, comps))
         s isa Reals && continue
+        sc = scales === nothing ? 1.0 : scales[k]
         if _set_is_psd(s)
-            append!(out, _set_psd_violation(vi))
+            append!(out, _set_psd_violation(vi, sc))
         else
-            append!(out, _component_violation(vi, s))
+            append!(out, _component_violation(vi, s) ./ sc)
         end
     end
     return out
@@ -84,23 +99,24 @@ end
 # (bundle evaluated once)
 # ------------------------------------------------------------------
 
-function _set_terms(model::VecModel, i::Int, ρ, x, mults, penalty::Symbol)
+function _set_terms(model::VecModel, i::Int, ρ, x, mults, penalty::Symbol, scales)
     c = model.set_constraints.fs[i]
     y, λ, Y = mults
     v, comps = _set_components(c, x)
-    s = _set_psd_terms(Y, ρ, v, comps, penalty)
+    s = _set_psd_terms(Y, ρ, v, comps, scales, penalty)
     k_eq = 1
     k_ineq = 1
-    for (vi, set) in zip(v, comps)
+    for (k, (vi, set)) in enumerate(zip(v, comps))
         (set isa Reals || _set_is_psd(set)) && continue
+        sc = scales[k]
         if set isa _SET_EQ
-            g = _component_violation(vi, set)
+            g = _component_violation(vi, set) ./ sc
             m = _component_dim(set)
             yy = @view y[k_eq:(k_eq + m - 1)]
             s += dot(yy, g) + (ρ / 2) * dot(g, g)
             k_eq += m
         else
-            g = _component_violation(vi, set)
+            g = _component_violation(vi, set) ./ sc
             m = _component_dim(set)
             λλ = @view λ[k_ineq:(k_ineq + m - 1)]
             if penalty in (:pbm, :mixed, :mixed_logdet)
@@ -122,12 +138,14 @@ end
 
 # The combined penalty term of all relaxed set constraints (a closure, like
 # `_sd_terms`).
-function _set_terms_closure(model::VecModel, sets_rel, ρ, x, Msets, penalty::Symbol)
+function _set_terms_closure(
+    model::VecModel, sets_rel, ρ, x, Msets, penalty::Symbol, set_scales
+)
     isempty(sets_rel) && return _ -> 0.0
     return z -> begin
         s = 0.0
         for (k, i) in enumerate(sets_rel)
-            s += _set_terms(model, i, ρ, z, Msets[k], penalty)
+            s += _set_terms(model, i, ρ, z, Msets[k], penalty, set_scales[k])
         end
         return s
     end
@@ -173,7 +191,7 @@ end
 # PSD-component hooks (overridden by NonconvexAugLagLabSDPExt)
 # ------------------------------------------------------------------
 
-function _set_psd_violation(vi)
+function _set_psd_violation(vi, sc)
     return throw(
         ArgumentError(
             "Semidefinite components of set constraints are selected for " *
@@ -233,26 +251,26 @@ end
 # single batched call (the multiplier terms are linear in both arguments).
 # ------------------------------------------------------------------
 
-function _set_multiplier_terms(model::VecModel, i::Int, x, mults)
+function _set_multiplier_terms(model::VecModel, i::Int, x, mults, scales)
     c = model.set_constraints.fs[i]
     y, λ, Y = mults
     v, comps = _set_components(c, x)
-    s = _set_psd_multiplier_terms(Y, v, comps)
+    s = _set_psd_multiplier_terms(Y, v, comps, scales)
     k_eq = 1
     k_ineq = 1
-    for (vi, set) in zip(v, comps)
+    for (k, (vi, set)) in enumerate(zip(v, comps))
         if set isa Reals
             continue
         elseif _set_is_psd(set)
             continue
         elseif set isa _SET_EQ
-            g = _component_violation(vi, set)
+            g = _component_violation(vi, set) ./ scales[k]
             m = _component_dim(set)
             yy = @view y[k_eq:(k_eq + m - 1)]
             s += dot(yy, g)
             k_eq += m
         else
-            g = _component_violation(vi, set)
+            g = _component_violation(vi, set) ./ scales[k]
             m = _component_dim(set)
             λλ = @view λ[k_ineq:(k_ineq + m - 1)]
             s += dot(λλ, max.(g, 0.0))
@@ -262,15 +280,15 @@ function _set_multiplier_terms(model::VecModel, i::Int, x, mults)
     return s
 end
 
-function _set_complementarity(model::VecModel, i::Int, x, mults)
+function _set_complementarity(model::VecModel, i::Int, x, mults, scales)
     c = model.set_constraints.fs[i]
     _, λ, _ = mults
     v, comps = _set_components(c, x)
     comp = 0.0
     k_ineq = 1
-    for (vi, set) in zip(v, comps)
+    for (k, (vi, set)) in enumerate(zip(v, comps))
         (set isa Reals || _set_is_psd(set) || set isa _SET_EQ) && continue
-        g = _component_violation(vi, set)
+        g = _component_violation(vi, set) ./ scales[k]
         m = _component_dim(set)
         λλ = @view λ[k_ineq:(k_ineq + m - 1)]
         comp = max(comp, maximum(abs.(λλ .* max.(g, 0.0))))

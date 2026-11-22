@@ -1423,7 +1423,7 @@ end
 # Violation measure of the relaxed constraints on the scaled functions.
 # The relaxed indices are passed in (they are computed once per solve;
 # recomputing the subproblem decomposition per call is a hot-path cost).
-function _scaled_violation(eq_fs, ineq_fs, sd_rel, sets_rel, model, x)
+function _scaled_violation(eq_fs, ineq_fs, sd_rel, sets_rel, model, x, set_scales)
     v = Float64[]
     for c in eq_fs
         append!(v, abs.(_vecval(c(x))))
@@ -1434,8 +1434,8 @@ function _scaled_violation(eq_fs, ineq_fs, sd_rel, sets_rel, model, x)
     for i in sd_rel
         append!(v, _sd_violation(model, i, x))
     end
-    for i in sets_rel
-        append!(v, _set_violation(model, i, x))
+    for (k, i) in enumerate(sets_rel)
+        append!(v, _set_violation(model, i, x, set_scales[k]))
     end
     return v
 end
@@ -1889,6 +1889,10 @@ function optimize!(workspace::AugLagWorkspace)
     # Multiplier buffers of the relaxed function-in-set constraints
     # (y_eq, λ_ineq, Y_psd per constraint).
     Msets = [_set_init_multipliers(model, i, ρ) for i in sets_rel]
+    # The set-constraint component scales (gradient-magnitude probes, like
+    # the classical group scales): the set penalties, violations and
+    # multipliers live in these scaled units.
+    set_scales = [_set_scales(model, i, x) for i in sets_rel]
     trajectory = Tuple{typeof(x),Real,Real}[]
     fx = obj(x)
     vprev = Inf
@@ -2221,7 +2225,10 @@ function optimize!(workspace::AugLagWorkspace)
             if vraw_r < _raw_violation(model, eq_rel, ineq_rel, sets_rel, x)
                 x = copy(xr)
                 vnorm = norm(
-                    _scaled_violation(eq_fs, ineq_fs, sd_rel, sets_rel, model, x), Inf
+                    _scaled_violation(
+                        eq_fs, ineq_fs, sd_rel, sets_rel, model, x, set_scales
+                    ),
+                    Inf,
                 )
                 fx = obj(x)
                 if lsq_multipliers && !isempty(eq_rel)
@@ -2237,7 +2244,7 @@ function optimize!(workspace::AugLagWorkspace)
             empty!(vhist)
         end
         sd_terms = _sd_terms(model, sd_rel, ρ, x, Y, penalty)
-        set_terms = _set_terms_closure(model, sets_rel, ρ, x, Msets, penalty)
+        set_terms = _set_terms_closure(model, sets_rel, ρ, x, Msets, penalty, set_scales)
         if !isempty(sets_rel)
             sd_terms0 = sd_terms
             sd_terms = z -> sd_terms0(z) + set_terms(z)
@@ -2490,7 +2497,9 @@ function optimize!(workspace::AugLagWorkspace)
                 _set_update!(model, sets_rel, ρ, x_two, Msets, penalty)
                 sd_t2 = _sd_terms(model, sd_rel, ρ, x_two, Y, penalty)
                 if !isempty(sets_rel)
-                    set_t2 = _set_terms_closure(model, sets_rel, ρ, x_two, Msets, penalty)
+                    set_t2 = _set_terms_closure(
+                        model, sets_rel, ρ, x_two, Msets, penalty, set_scales
+                    )
                     sd_t2_0 = sd_t2
                     sd_t2 = z -> sd_t2_0(z) + set_t2(z)
                 end
@@ -2589,7 +2598,12 @@ function optimize!(workspace::AugLagWorkspace)
             push!(filter_f, al_obj(x_sub))
             push!(
                 filter_v,
-                norm(_scaled_violation(eq_fs, ineq_fs, sd_rel, sets_rel, model, x), Inf),
+                norm(
+                    _scaled_violation(
+                        eq_fs, ineq_fs, sd_rel, sets_rel, model, x, set_scales
+                    ),
+                    Inf,
+                ),
             )
         end
         if watchdog && !accepted
@@ -2603,7 +2617,7 @@ function optimize!(workspace::AugLagWorkspace)
         vnorm = if accepted && can_recover
             φt_acc
         else
-            norm(_scaled_violation(eq_fs, ineq_fs, sd_rel, sets_rel, model, x), Inf)
+            norm(_scaled_violation(eq_fs, ineq_fs, sd_rel, sets_rel, model, x, set_scales), Inf)
         end
         f_new = if accepted && can_recover
             _recover_objective(mt_acc, eqvals_acc, ineqvals_acc, y, λ, w_eq, w_ineq, ρ, fscale)
@@ -2624,7 +2638,10 @@ function optimize!(workspace::AugLagWorkspace)
                     eq_fs, ineq_fs, model, relaxed, submodel0, copy(xgood), restore_prox
                 )
                 vnorm = norm(
-                    _scaled_violation(eq_fs, ineq_fs, sd_rel, sets_rel, model, x), Inf
+                    _scaled_violation(
+                        eq_fs, ineq_fs, sd_rel, sets_rel, model, x, set_scales
+                    ),
+                    Inf,
                 )
                 f_new = obj(x)
             else
@@ -2920,7 +2937,7 @@ function optimize!(workspace::AugLagWorkspace)
             # Σₖ⟨Yₖ, Pₖ⟩ (the PSD part batched into one rule'd call).
             for (k, i) in enumerate(sets_rel)
                 gJ = NonconvexCore.value_gradient(
-                    z -> _set_multiplier_terms(model, i, z, Msets[k]), x
+                    z -> _set_multiplier_terms(model, i, z, Msets[k], set_scales[k]), x
                 )[2]
                 gJ === nothing || (g .+= gJ)
             end
@@ -2930,7 +2947,7 @@ function optimize!(workspace::AugLagWorkspace)
                 comp = max(comp, maximum(abs.(λ[k] .* _vecval(ineq_fs[k](x)))))
             end
             for (k, i) in enumerate(sets_rel)
-                comp = max(comp, _set_complementarity(model, i, x, Msets[k]))
+                comp = max(comp, _set_complementarity(model, i, x, Msets[k], set_scales[k]))
             end
             stat_ok = pg <= kkt_tol
             comp_ok = comp <= kkt_tol

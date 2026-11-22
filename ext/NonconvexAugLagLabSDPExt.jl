@@ -112,8 +112,8 @@ end
 # chordal transform flattens products into one PSDCone per clique).
 # ------------------------------------------------------------------
 
-function NonconvexAugLagLab._set_psd_violation(vi::AbstractMatrix)
-    return [psd_infeasibility(vi)]
+function NonconvexAugLagLab._set_psd_violation(vi::AbstractMatrix, sc)
+    return [psd_infeasibility(vi) / sc]
 end
 
 function NonconvexAugLagLab._set_psd_init(c::FunctionInSet, ρ)
@@ -147,14 +147,15 @@ The projected branch has ∂φ/∂P = -Π₊(Y - ρP) and ∂φ/∂Y = (Π₊(Y 
 the logdet branch (P ≻ 0) has ∂φ/∂P = Y - P⁻¹/ρ and ∂φ/∂Y = P.
 """
 function NonconvexAugLagLab._set_psd_terms(
-    Y::AbstractVector, ρ, v::Tuple, comps::Tuple, penalty::Symbol
+    Y::AbstractVector, ρ, v::Tuple, comps::Tuple, scales, penalty::Symbol
 )
     use_logdet = penalty in (:logdet, :mixed_logdet)
     s = 0.0
     k = 1
-    for (vi, set) in zip(v, comps)
+    for (idx, (vi, set)) in enumerate(zip(v, comps))
         set isa PSDCone || continue
-        s += use_logdet ? _logdet_term(Y[k], ρ, vi) : _projected_term(Y[k], ρ, vi)
+        P = vi ./ scales[idx]
+        s += use_logdet ? _logdet_term(Y[k], ρ, P) : _projected_term(Y[k], ρ, P)
         k += 1
     end
     return s
@@ -166,6 +167,7 @@ function ChainRulesCore.rrule(
     ρ,
     v::Tuple,
     comps::Tuple,
+    scales,
     penalty::Symbol,
 )
     use_logdet = penalty in (:logdet, :mixed_logdet)
@@ -175,14 +177,15 @@ function ChainRulesCore.rrule(
     Zs = Matrix{Float64}[]
     logdet_flags = Bool[]
     k = 1
-    for (vi, set) in zip(v, comps)
+    for (idx, (vi, set)) in enumerate(zip(v, comps))
         set isa PSDCone || continue
-        if use_logdet && isposdef(Symmetric(vi))
+        P = vi ./ scales[idx]
+        if use_logdet && isposdef(Symmetric(P))
             push!(logdet_flags, true)
-            push!(Zs, inv(Matrix(Symmetric(vi))))
-            s += -(1 / ρ) * _sd_logdet(vi) + dot(Y[k], vi)
+            push!(Zs, inv(Matrix(Symmetric(P))))
+            s += -(1 / ρ) * _sd_logdet(P) + dot(Y[k], P)
         else
-            Zk = project_psd(Y[k] - ρ * vi)
+            Zk = project_psd(Y[k] - ρ * P)
             push!(logdet_flags, false)
             push!(Zs, Zk)
             s += (sum(abs2, Zk) - sum(abs2, Y[k])) / (2ρ)
@@ -199,6 +202,7 @@ function ChainRulesCore.rrule(
                 ntuple(_ -> ChainRulesCore.NoTangent(), length(v)),
                 ChainRulesCore.NoTangent(),
                 ChainRulesCore.NoTangent(),
+                ChainRulesCore.NoTangent(),
             )
         end
         Δv = Vector{Any}(undef, length(v))
@@ -207,19 +211,21 @@ function ChainRulesCore.rrule(
         k = 1
         for (idx, (vi, set)) in enumerate(zip(v, comps))
             if set isa PSDCone
+                sc = scales[idx]
+                P = vi ./ sc
                 Yk = Y[k]
                 if logdet_flags[k]
                     Binv = Zs[k]
-                    # φ = -(1/ρ) logdet P + ⟨Y, P⟩
-                    Δv[idx] = Δs .* (Yk .- Binv ./ ρ)
-                    ΔYs[k] = Δs .* vi
-                    Δρ += Δs * (_sd_logdet(vi) / ρ^2)
+                    # φ = -(1/ρ) logdet P + ⟨Y, P⟩, P = vi/sc
+                    Δv[idx] = Δs .* ((Yk .- Binv ./ ρ) ./ sc)
+                    ΔYs[k] = Δs .* P
+                    Δρ += Δs * (_sd_logdet(P) / ρ^2)
                 else
                     Zk = Zs[k]
-                    # φ = (‖Π₊(Y - ρP)‖² - ‖Y‖²) / (2ρ)
-                    Δv[idx] = Δs .* (-Zk)
+                    # φ = (‖Π₊(Y - ρP)‖² - ‖Y‖²) / (2ρ), P = vi/sc
+                    Δv[idx] = Δs .* (-Zk ./ sc)
                     ΔYs[k] = Δs .* ((Zk .- Yk) ./ ρ)
-                    Δρ += Δs * (-(sum(abs2, Zk) - sum(abs2, Yk)) / (2ρ^2) - dot(Zk, vi) / ρ)
+                    Δρ += Δs * (-(sum(abs2, Zk) - sum(abs2, Yk)) / (2ρ^2) - dot(Zk, P) / ρ)
                 end
                 k += 1
             else
@@ -231,6 +237,7 @@ function ChainRulesCore.rrule(
             ΔYs,
             Δρ,
             Tuple(Δv),
+            ChainRulesCore.NoTangent(),
             ChainRulesCore.NoTangent(),
             ChainRulesCore.NoTangent(),
         )
@@ -252,13 +259,13 @@ end
 # ------------------------------------------------------------------
 
 function NonconvexAugLagLab._set_psd_multiplier_terms(
-    Y::AbstractVector, v::Tuple, comps::Tuple
+    Y::AbstractVector, v::Tuple, comps::Tuple, scales
 )
     s = 0.0
     k = 1
-    for (vi, set) in zip(v, comps)
+    for (idx, (vi, set)) in enumerate(zip(v, comps))
         set isa PSDCone || continue
-        s += dot(Y[k], vi)
+        s += dot(Y[k], vi ./ scales[idx])
         k += 1
     end
     return s
@@ -269,12 +276,13 @@ function ChainRulesCore.rrule(
     Y::AbstractVector,
     v::Tuple,
     comps::Tuple,
+    scales,
 )
     s = 0.0
     k = 1
-    for (vi, set) in zip(v, comps)
+    for (idx, (vi, set)) in enumerate(zip(v, comps))
         set isa PSDCone || continue
-        s += dot(Y[k], vi)
+        s += dot(Y[k], vi ./ scales[idx])
         k += 1
     end
     function _set_psd_multiplier_terms_pullback(Δs)
@@ -285,6 +293,7 @@ function ChainRulesCore.rrule(
                 ChainRulesCore.NoTangent(),
                 ntuple(_ -> ChainRulesCore.NoTangent(), length(v)),
                 ChainRulesCore.NoTangent(),
+                ChainRulesCore.NoTangent(),
             )
         end
         Δv = Vector{Any}(undef, length(v))
@@ -292,8 +301,8 @@ function ChainRulesCore.rrule(
         k = 1
         for (idx, (vi, set)) in enumerate(zip(v, comps))
             if set isa PSDCone
-                Δv[idx] = Δs .* Y[k]
-                ΔYs[k] = Δs .* vi
+                Δv[idx] = Δs .* (Y[k] ./ scales[idx])
+                ΔYs[k] = Δs .* (vi ./ scales[idx])
                 k += 1
             else
                 Δv[idx] = ChainRulesCore.NoTangent()
