@@ -308,7 +308,13 @@ function ChainRulesCore.rrule(
                 Δv[idx] = ChainRulesCore.NoTangent()
             end
         end
-        return (ChainRulesCore.NoTangent(), ΔYs, Tuple(Δv), ChainRulesCore.NoTangent())
+        return (
+            ChainRulesCore.NoTangent(),
+            ΔYs,
+            Tuple(Δv),
+            ChainRulesCore.NoTangent(),
+            ChainRulesCore.NoTangent(),
+        )
     end
     return s, _set_psd_multiplier_terms_pullback
 end
