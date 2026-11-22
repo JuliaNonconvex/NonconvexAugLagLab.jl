@@ -189,27 +189,29 @@ end
 # Multiplier updates
 # ------------------------------------------------------------------
 
-function _set_update!(model::VecModel, sets_rel, ρ, x, Msets, penalty::Symbol)
+function _set_update!(model::VecModel, sets_rel, ρ, x, Msets, penalty::Symbol, set_scales)
     for (k, i) in enumerate(sets_rel)
         c = model.set_constraints.fs[i]
         y, λ, Y = Msets[k]
         v, comps = _set_components(c, x)
+        sc = set_scales[k]
         k_eq = 1
         k_ineq = 1
         k_psd = 1
-        for (vi, set) in zip(v, comps)
+        for (k2, (vi, set)) in enumerate(zip(v, comps))
             if set isa Reals
                 continue
             elseif _set_is_psd(set)
+                # raw matrices: the projected ALM is scale-adaptive
                 _set_psd_update!(Y[k_psd], ρ, vi, penalty)
                 k_psd += 1
             elseif set isa _SET_EQ
-                g = _component_violation(vi, set)
+                g = _component_violation(vi, set) ./ sc[k2]
                 m = _component_dim(set)
                 y[k_eq:(k_eq + m - 1)] .+= ρ .* g
                 k_eq += m
             else
-                g = _component_violation(vi, set)
+                g = _component_violation(vi, set) ./ sc[k2]
                 m = _component_dim(set)
                 λ[k_ineq:(k_ineq + m - 1)] .= max.(
                     λ[k_ineq:(k_ineq + m - 1)] .+ ρ .* g, 0.0

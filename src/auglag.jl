@@ -2519,7 +2519,7 @@ function optimize!(workspace::AugLagWorkspace)
             τ = Float64(two_level_tau)
             for _ in 1:two_level_iters
                 _sd_multiplier_update!(model, sd_rel, ρ, x_two, Y, penalty)
-                _set_update!(model, sets_rel, ρ, x_two, Msets, penalty)
+                _set_update!(model, sets_rel, ρ, x_two, Msets, penalty, set_scales)
                 sd_t2 = _sd_terms(model, sd_rel, ρ, x_two, Y, penalty)
                 if !isempty(sets_rel)
                     set_t2 = _set_terms_closure(
@@ -2896,7 +2896,7 @@ function optimize!(workspace::AugLagWorkspace)
                 yflat_prev = yflat
             end
             _sd_multiplier_update!(model, sd_rel, ρ, x, Y, penalty)
-            _set_update!(model, sets_rel, ρ, x, Msets, penalty)
+            _set_update!(model, sets_rel, ρ, x, Msets, penalty, set_scales)
             if outer_schedule === :bm
                 # Birgin-Martinez complexity scaling: η, ω tighten with 1/ρ.
                 η = max(η / ρ, ctol)
