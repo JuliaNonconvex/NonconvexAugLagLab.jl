@@ -95,17 +95,19 @@ end
 function _set_violation(model::VecModel, i::Int, x, scales=nothing)
     c = model.set_constraints.fs[i]
     v, comps = _set_components(c, x)
-    out = Float64[]
-    for (k, (vi, s)) in enumerate(zip(v, comps))
-        s isa Reals && continue
-        sc = scales === nothing ? 1.0 : scales[k]
-        if _set_is_psd(s)
-            append!(out, _set_psd_violation(vi, sc))
+    # Mutation-free: the violation is also the restoration-phase merit,
+    # which the sub-solver differentiates.
+    sc = scales === nothing ? fill(1.0, length(v)) : scales
+    vs = [
+        if s isa Reals
+            Float64[]
+        elseif _set_is_psd(s)
+            _set_psd_violation(vi, sc[k])
         else
-            append!(out, _component_violation(vi, s) ./ sc)
-        end
-    end
-    return out
+            _component_violation(vi, s) ./ sc[k]
+        end for (k, (vi, s)) in enumerate(zip(v, comps))
+    ]
+    return vcat(vs...)
 end
 
 # ------------------------------------------------------------------

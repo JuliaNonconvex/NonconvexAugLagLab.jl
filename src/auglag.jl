@@ -1448,21 +1448,15 @@ end
 # Violation measure of the relaxed constraints on the scaled functions.
 # The relaxed indices are passed in (they are computed once per solve;
 # recomputing the subproblem decomposition per call is a hot-path cost).
+# Mutation-free: any consumer may differentiate it (e.g. a feasibility-
+# restoration merit).
 function _scaled_violation(eq_fs, ineq_fs, sd_rel, sets_rel, model, x, set_scales)
-    v = Float64[]
-    for c in eq_fs
-        append!(v, abs.(_vecval(c(x))))
-    end
-    for c in ineq_fs
-        append!(v, max.(_vecval(c(x)), 0.0))
-    end
-    for i in sd_rel
-        append!(v, _sd_violation(model, i, x))
-    end
-    for (k, i) in enumerate(sets_rel)
-        append!(v, _set_violation(model, i, x, set_scales[k]))
-    end
-    return v
+    return vcat(
+        [abs.(_vecval(c(x))) for c in eq_fs]...,
+        [max.(_vecval(c(x)), 0.0) for c in ineq_fs]...,
+        [_sd_violation(model, i, x) for i in sd_rel]...,
+        [_set_violation(model, i, x, set_scales[k]) for (k, i) in enumerate(sets_rel)]...,
+    )
 end
 
 # Raw scaled constraint values at x (signed equalities, inequalities as-is)
