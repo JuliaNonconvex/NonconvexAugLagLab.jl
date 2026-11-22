@@ -53,15 +53,23 @@ end
 # gradient probe is unsuitable here because the components (e.g. stiffness
 # matrices assembled through a linear solve) can have derivative magnitudes
 # unrelated to their values.
-function _set_scales(model::VecModel, i::Int, x0)
+function _set_scales(model::VecModel, i::Int, x0, scale_mode::Symbol)
     c = model.set_constraints.fs[i]
+    if scale_mode === :value
+        v0 = NonconvexCore.set_value(c, x0)
+        return [
+            begin
+                sc = maximum(abs, v)
+                (isfinite(sc) && sc > 0) ? sc : 1.0
+            end for v in v0
+        ]
+    end
+    # Gradient-magnitude probes (opt-in, mirrors the classical groups).
+    δ = 1e-6 .* (1 .+ abs.(x0))
+    δnorm = norm(δ)
+    v1 = NonconvexCore.set_value(c, x0 .+ δ)
     v0 = NonconvexCore.set_value(c, x0)
-    return [
-        begin
-            sc = maximum(abs, v)
-            (isfinite(sc) && sc > 0) ? sc : 1.0
-        end for v in v0
-    ]
+    return [max(1.0, norm(a .- b) / δnorm) for (a, b) in zip(v0, v1)]
 end
 
 # ------------------------------------------------------------------

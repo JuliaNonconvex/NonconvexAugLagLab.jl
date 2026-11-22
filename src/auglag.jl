@@ -581,10 +581,15 @@ end
   worse final accuracy (viol 5.7e-6 vs 1.2e-6), and on Rosetta AC-OPF
   case5 it is 16% faster (217 vs 258 s) with marginally better feasibility
   (viol 0.366 vs 0.369).
-- `scaling`: normalize the relaxed constraints by their gradient magnitudes
-  and the objective by its initial magnitude (Curtis–Jiang–Robinson style
-  scaling), so the penalty applies to balanced, unit-scaled constraint
-  violations (default `true`).
+- `scaling`: normalize the relaxed constraints and the objective by their
+  reference magnitudes, so the penalty applies to balanced, unit-scaled
+  constraint violations (default `true`).
+- `scale_mode`: the constraint scale scheme — `:value` (default) scales
+  each group/component by its reference magnitude `max |c(x₀)|` (unit-free
+  residuals, penalty weights independent of the constraint's derivative
+  scale, which can be unrelated to its values when the function involves a
+  linear solve); `:gradient` uses the Curtis–Jiang–Robinson-style
+  finite-difference gradient-magnitude probe per group.
 - `two_level`, `two_level_iters`, `two_level_tau`: (experimental, opt-in)
   two-level semi-proximal inner loop for the semidefinite block
   (SDPNAL+-style sPADMM adapted to nonlinear `P(x)`, plan S2 option B):
@@ -668,6 +673,7 @@ mutable struct AugLagOptions{S,R,W}
     weights::W
     lsq_multipliers::Bool
     scaling::Bool
+    scale_mode::Symbol
     memory::Int
     elastic::Bool
     elastic_mu::Real
@@ -732,6 +738,7 @@ function AugLagOptions(;
     weights=nothing,
     lsq_multipliers::Bool=true,
     scaling::Bool=true,
+    scale_mode::Symbol=:value,
     memory::Int=50,
     elastic::Bool=false,
     elastic_mu::Real=1e3,
@@ -791,6 +798,8 @@ function AugLagOptions(;
     first_sub_iters >= 1 || throw(ArgumentError("first_sub_iters must be >= 1"))
     max_time > 0 || throw(ArgumentError("max_time must be positive"))
     kkt_tol > 0 || throw(ArgumentError("kkt_tol must be positive"))
+    scale_mode in (:value, :gradient) ||
+        throw(ArgumentError("scale_mode must be :value or :gradient"))
     (second_order === nothing || second_order isa SecondOrderSelection) ||
         throw(ArgumentError("second_order must be a SecondOrderSelection or nothing"))
     two_level_iters >= 1 || throw(ArgumentError("two_level_iters must be >= 1"))
@@ -837,6 +846,7 @@ function AugLagOptions(;
         weights,
         lsq_multipliers,
         scaling,
+        scale_mode,
         memory,
         elastic,
         elastic_mu,
@@ -1140,30 +1150,45 @@ end
 # the largest gradient magnitude at the initial point (capped below at 1) and
 # the objective by its initial magnitude, then run the classical algorithm on
 # the balanced problem; the returned objective is unscaled.
-function _group_scales(model::VecModel, sel, x0)
+function _group_scales(model::VecModel, sel, x0, scale_mode::Symbol)
     eq_rel, ineq_rel, _, _, _ = _subproblem(model, sel, nothing)
     scales = Float64[]
-    # Gradient-magnitude scale from one finite-difference probe per group:
-    # ‖c(x₀ + δ) - c(x₀)‖ / ‖δ‖ estimates the group's gradient magnitude
-    # without materializing any Jacobian (a full Jacobian of a large
-    # vector-valued constraint would be an N×N dense matrix).
-    δ = 1e-6 .* (1 .+ abs.(x0))
-    δnorm = norm(δ)
-    for (kind, rel) in (("eq", eq_rel), ("ineq", ineq_rel))
-        fs = kind == "eq" ? model.eq_constraints.fs : model.ineq_constraints.fs
-        for i in rel
-            c = fs[i]
-            c0 = _vecval(c(x0))
-            c1 = _vecval(c(x0 .+ δ))
-            d = norm(c1 .- c0) / δnorm
-            push!(scales, max(1.0, d))
+    if scale_mode === :value
+        # Value-based (the default): each group is scaled by its reference
+        # magnitude, making the residuals unit-free regardless of the
+        # group's derivative scale.
+        for (kind, rel) in (("eq", eq_rel), ("ineq", ineq_rel))
+            fs = kind == "eq" ? model.eq_constraints.fs : model.ineq_constraints.fs
+            for i in rel
+                v0 = _vecval(fs[i](x0))
+                sc = maximum(abs, v0)
+                push!(scales, (isfinite(sc) && sc > 0) ? sc : 1.0)
+            end
+        end
+    else
+        # Gradient-magnitude scale (opt-in) from one finite-difference probe
+        # per group: ‖c(x₀ + δ) - c(x₀)‖ / ‖δ‖ estimates the group's
+        # gradient magnitude without materializing any Jacobian (a full
+        # Jacobian of a large vector-valued constraint would be an N×N
+        # dense matrix).
+        δ = 1e-6 .* (1 .+ abs.(x0))
+        δnorm = norm(δ)
+        for (kind, rel) in (("eq", eq_rel), ("ineq", ineq_rel))
+            fs = kind == "eq" ? model.eq_constraints.fs : model.ineq_constraints.fs
+            for i in rel
+                c = fs[i]
+                c0 = _vecval(c(x0))
+                c1 = _vecval(c(x0 .+ δ))
+                d = norm(c1 .- c0) / δnorm
+                push!(scales, max(1.0, d))
+            end
         end
     end
     return eq_rel, ineq_rel, scales
 end
 
-function _scaled_problem(model::VecModel, sel, x0)
-    eq_rel, ineq_rel, scales = _group_scales(model, sel, x0)
+function _scaled_problem(model::VecModel, sel, x0, scale_mode::Symbol)
+    eq_rel, ineq_rel, scales = _group_scales(model, sel, x0, scale_mode)
     # Scaled constraint functions: c̃(x) = c(x) / d.
     eq_fs = [
         (x -> _vecval(model.eq_constraints.fs[eq_rel[i]](x)) ./ scales[i]) for
@@ -1810,7 +1835,7 @@ function optimize!(workspace::AugLagWorkspace)
     scaled_obj = fscale == 1.0 ? obj : (x -> obj(x) / fscale)
     y, λ = _init_multipliers(model, relaxed)
     if scaling
-        eq_fs, ineq_fs, scales = _scaled_problem(model, relaxed, x)
+        eq_fs, ineq_fs, scales = _scaled_problem(model, relaxed, x, options.scale_mode)
     else
         eq_fs = [model.eq_constraints.fs[i] for i in eq_rel]
         ineq_fs = [model.ineq_constraints.fs[i] for i in ineq_rel]
@@ -1892,7 +1917,7 @@ function optimize!(workspace::AugLagWorkspace)
     # The set-constraint component scales (gradient-magnitude probes, like
     # the classical group scales): the set penalties, violations and
     # multipliers live in these scaled units.
-    set_scales = [_set_scales(model, i, x) for i in sets_rel]
+    set_scales = [_set_scales(model, i, x, options.scale_mode) for i in sets_rel]
     trajectory = Tuple{typeof(x),Real,Real}[]
     fx = obj(x)
     vprev = Inf
