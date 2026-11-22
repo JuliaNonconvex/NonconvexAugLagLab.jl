@@ -60,7 +60,7 @@ function _set_scales(model::VecModel, i::Int, x0, scale_mode::Symbol)
         return [
             begin
                 sc = maximum(abs, v)
-                (isfinite(sc) && sc > 0) ? sc : 1.0
+                (isfinite(sc) && sc >= 1.0) ? sc : 1.0
             end for v in v0
         ]
     end

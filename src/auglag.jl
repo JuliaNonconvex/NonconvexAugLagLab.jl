@@ -1162,7 +1162,7 @@ function _group_scales(model::VecModel, sel, x0, scale_mode::Symbol)
             for i in rel
                 v0 = _vecval(fs[i](x0))
                 sc = maximum(abs, v0)
-                push!(scales, (isfinite(sc) && sc > 0) ? sc : 1.0)
+                push!(scales, (isfinite(sc) && sc >= 1.0) ? sc : 1.0)
             end
         end
     else
