@@ -1,7 +1,5 @@
 # NonconvexAugLagLab
 
-![JuliaNonconvex logo](https://raw.githubusercontent.com/JuliaNonconvex/NonconvexAugLagLab.jl/master/docs/src/assets/logo.png)
-
 
 
 ## Description
