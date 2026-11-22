@@ -18,7 +18,8 @@ module NonconvexAugLagLabSDPExt
 using NonconvexAugLagLab
 using NonconvexCore: VecModel
 import NonconvexAugLagLab: _sd_violation, _sd_terms, _sd_multiplier_update!, _sd_init
-import NonconvexAugLagLab: _set_psd_violation, _set_psd_init, _set_psd_term, _set_psd_update!
+import NonconvexAugLagLab:
+    _set_psd_violation, _set_psd_init, _set_psd_term, _set_psd_update!
 import NonconvexAugLagLab: _set_is_psd, _component_dim
 using NonconvexSemidefinite: NonconvexSemidefinite
 using NonconvexSemidefinite: project_psd, psd_infeasibility, PSDCone
@@ -125,7 +126,121 @@ function NonconvexAugLagLab._set_psd_term(Y::AbstractMatrix, ρ, vi::AbstractMat
     return use_logdet ? _logdet_term(Y, ρ, vi) : _projected_term(Y, ρ, vi)
 end
 
-function NonconvexAugLagLab._set_psd_update!(Y::AbstractMatrix, ρ, vi::AbstractMatrix, penalty)
+# ------------------------------------------------------------------
+# Batched PSD penalty: ONE call with an analytic rrule instead of a
+# per-block loop, so reverse-mode AD sees a single primitive. The PSD
+# components are selected from the raw bundle value/components inside the
+# native function — no traced filtering or tuple construction.
+# ------------------------------------------------------------------
+
+"""
+    _set_psd_terms(Y, ρ, v::Tuple, comps::Tuple, penalty::Symbol)
+
+The combined penalty of all semidefinite components of one bundle
+evaluation `v` (the `PSDCone` components of `comps`, with one multiplier
+matrix per component in `Y`): the sum of the per-block projected or logdet
+terms. Defined with an analytic [`rrule`](@ref): the selection and the
+block loop are native in the forward pass, and the pullback scatters the
+cotangent back to the PSD slots of `v` (all other slots get `NoTangent`).
+
+The projected branch has ∂φ/∂P = -Π₊(Y - ρP) and ∂φ/∂Y = (Π₊(Y - ρP) - Y)/ρ;
+the logdet branch (P ≻ 0) has ∂φ/∂P = Y - P⁻¹/ρ and ∂φ/∂Y = P.
+"""
+function NonconvexAugLagLab._set_psd_terms(
+    Y::AbstractVector, ρ, v::Tuple, comps::Tuple, penalty::Symbol
+)
+    use_logdet = penalty in (:logdet, :mixed_logdet)
+    s = 0.0
+    k = 1
+    for (vi, set) in zip(v, comps)
+        set isa PSDCone || continue
+        s += use_logdet ? _logdet_term(Y[k], ρ, vi) : _projected_term(Y[k], ρ, vi)
+        k += 1
+    end
+    return s
+end
+
+function ChainRulesCore.rrule(
+    ::typeof(NonconvexAugLagLab._set_psd_terms),
+    Y::AbstractVector,
+    ρ,
+    v::Tuple,
+    comps::Tuple,
+    penalty::Symbol,
+)
+    use_logdet = penalty in (:logdet, :mixed_logdet)
+    s = 0.0
+    # per-block reverse records: the projected matrix (or the inverse for
+    # the logdet branch) and the branch flag; native references only.
+    Zs = Matrix{Float64}[]
+    logdet_flags = Bool[]
+    k = 1
+    for (vi, set) in zip(v, comps)
+        set isa PSDCone || continue
+        if use_logdet && isposdef(Symmetric(vi))
+            push!(logdet_flags, true)
+            push!(Zs, inv(Matrix(Symmetric(vi))))
+            s += -(1 / ρ) * _sd_logdet(vi) + dot(Y[k], vi)
+        else
+            Zk = project_psd(Y[k] - ρ * vi)
+            push!(logdet_flags, false)
+            push!(Zs, Zk)
+            s += (sum(abs2, Zk) - sum(abs2, Y[k])) / (2ρ)
+        end
+        k += 1
+    end
+    function _set_psd_terms_pullback(Δs)
+        Δs = ChainRulesCore.unthunk(Δs)
+        if Δs isa ChainRulesCore.AbstractZero
+            return (
+                ChainRulesCore.NoTangent(),
+                ChainRulesCore.NoTangent(),
+                ChainRulesCore.NoTangent(),
+                ntuple(_ -> ChainRulesCore.NoTangent(), length(v)),
+                ChainRulesCore.NoTangent(),
+                ChainRulesCore.NoTangent(),
+            )
+        end
+        Δv = Vector{Any}(undef, length(v))
+        ΔYs = Vector{Matrix{Float64}}(undef, length(Zs))
+        Δρ = 0.0
+        k = 1
+        for (idx, (vi, set)) in enumerate(zip(v, comps))
+            if set isa PSDCone
+                Yk = Y[k]
+                if logdet_flags[k]
+                    Binv = Zs[k]
+                    # φ = -(1/ρ) logdet P + ⟨Y, P⟩
+                    Δv[idx] = Δs .* (Yk .- Binv ./ ρ)
+                    ΔYs[k] = Δs .* vi
+                    Δρ += Δs * (_sd_logdet(vi) / ρ^2)
+                else
+                    Zk = Zs[k]
+                    # φ = (‖Π₊(Y - ρP)‖² - ‖Y‖²) / (2ρ)
+                    Δv[idx] = Δs .* (-Zk)
+                    ΔYs[k] = Δs .* ((Zk .- Yk) ./ ρ)
+                    Δρ += Δs * (-(sum(abs2, Zk) - sum(abs2, Yk)) / (2ρ^2) - dot(Zk, vi) / ρ)
+                end
+                k += 1
+            else
+                Δv[idx] = ChainRulesCore.NoTangent()
+            end
+        end
+        return (
+            ChainRulesCore.NoTangent(),
+            ΔYs,
+            Δρ,
+            Tuple(Δv),
+            ChainRulesCore.NoTangent(),
+            ChainRulesCore.NoTangent(),
+        )
+    end
+    return s, _set_psd_terms_pullback
+end
+
+function NonconvexAugLagLab._set_psd_update!(
+    Y::AbstractMatrix, ρ, vi::AbstractMatrix, penalty
+)
     Y .= project_psd(Y - ρ * vi)
     return nothing
 end

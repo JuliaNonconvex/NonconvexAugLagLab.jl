@@ -16,8 +16,7 @@
 # capabilities.
 
 using NonconvexCore: set_value, components, _component_violation
-using NonconvexCore:
-    Reals, EqualTo, Zeros, LessThan, GreaterThan, Interval
+using NonconvexCore: Reals, EqualTo, Zeros, LessThan, GreaterThan, Interval
 using NonconvexCore: Nonnegatives, Nonpositives, Simplex, ChanceSet, SetProduct
 
 # ------------------------------------------------------------------
@@ -89,17 +88,12 @@ function _set_terms(model::VecModel, i::Int, ρ, x, mults, penalty::Symbol)
     c = model.set_constraints.fs[i]
     y, λ, Y = mults
     v, comps = _set_components(c, x)
-    s = 0.0
+    s = _set_psd_terms(Y, ρ, v, comps, penalty)
     k_eq = 1
     k_ineq = 1
-    k_psd = 1
     for (vi, set) in zip(v, comps)
-        if set isa Reals
-            continue
-        elseif _set_is_psd(set)
-            s += _set_psd_term(Y[k_psd], ρ, vi, penalty)
-            k_psd += 1
-        elseif set isa _SET_EQ
+        (set isa Reals || _set_is_psd(set)) && continue
+        if set isa _SET_EQ
             g = _component_violation(vi, set)
             m = _component_dim(set)
             yy = @view y[k_eq:(k_eq + m - 1)]
@@ -165,7 +159,9 @@ function _set_update!(model::VecModel, sets_rel, ρ, x, Msets, penalty::Symbol)
             else
                 g = _component_violation(vi, set)
                 m = _component_dim(set)
-                λ[k_ineq:(k_ineq + m - 1)] .= max.(λ[k_ineq:(k_ineq + m - 1)] .+ ρ .* g, 0.0)
+                λ[k_ineq:(k_ineq + m - 1)] .= max.(
+                    λ[k_ineq:(k_ineq + m - 1)] .+ ρ .* g, 0.0
+                )
                 k_ineq += m
             end
         end
@@ -199,11 +195,23 @@ function _set_psd_init(c, ρ)
     )
 end
 
-_set_psd_term(Y, ρ, vi, penalty) = throw(
-    ArgumentError(
-        "Semidefinite components of set constraints are selected for " *
-        "relaxation but NonconvexSemidefinite is not loaded; load it to " *
-        "enable the projected augmented Lagrangian for semidefinite constraints.",
-    ),
-)
+function _set_psd_term(Y, ρ, vi, penalty)
+    return throw(
+        ArgumentError(
+            "Semidefinite components of set constraints are selected for " *
+            "relaxation but NonconvexSemidefinite is not loaded; load it to " *
+            "enable the projected augmented Lagrangian for semidefinite constraints.",
+        ),
+    )
+end
+
+function _set_psd_terms(Y, ρ, v::Tuple, comps::Tuple, penalty)
+    return throw(
+        ArgumentError(
+            "Semidefinite components of set constraints are selected for " *
+            "relaxation but NonconvexSemidefinite is not loaded; load it to " *
+            "enable the projected augmented Lagrangian for semidefinite constraints.",
+        ),
+    )
+end
 _set_psd_update!(Y, ρ, vi, penalty) = nothing
