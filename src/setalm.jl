@@ -114,7 +114,12 @@ function _set_terms(model::VecModel, i::Int, ρ, x, mults, penalty::Symbol, scal
     c = model.set_constraints.fs[i]
     y, λ, Y = mults
     v, comps = _set_components(c, x)
-    s = _set_psd_terms(Y, ρ, v, comps, scales, penalty)
+    # The PSD penalty runs on the RAW matrices: the projected augmented
+    # Lagrangian is scale-adaptive (its projection absorbs the matrix
+    # scale), and dividing P by a value scale would suppress the penalty
+    # force by sc². Only the eq/ineq components use the value scales, where
+    # the quadratic penalty needs them.
+    s = _set_psd_terms(Y, ρ, v, comps, fill(1.0, length(comps)), penalty)
     k_eq = 1
     k_ineq = 1
     for (k, (vi, set)) in enumerate(zip(v, comps))
@@ -266,7 +271,7 @@ function _set_multiplier_terms(model::VecModel, i::Int, x, mults, scales)
     c = model.set_constraints.fs[i]
     y, λ, Y = mults
     v, comps = _set_components(c, x)
-    s = _set_psd_multiplier_terms(Y, v, comps, scales)
+    s = _set_psd_multiplier_terms(Y, v, comps, fill(1.0, length(comps)))
     k_eq = 1
     k_ineq = 1
     for (k, (vi, set)) in enumerate(zip(v, comps))
