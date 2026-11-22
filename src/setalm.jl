@@ -215,3 +215,66 @@ function _set_psd_terms(Y, ρ, v::Tuple, comps::Tuple, penalty)
     )
 end
 _set_psd_update!(Y, ρ, vi, penalty) = nothing
+
+function _set_psd_multiplier_terms(Y, v::Tuple, comps::Tuple)
+    return throw(
+        ArgumentError(
+            "Semidefinite components of set constraints are selected for " *
+            "relaxation but NonconvexSemidefinite is not loaded; load it to " *
+            "enable the projected augmented Lagrangian for semidefinite constraints.",
+        ),
+    )
+end
+
+# ------------------------------------------------------------------
+# Multiplier terms and complementarity of the set constraints: the
+# stationarity contributions ⟨y, g_eq⟩ + ⟨λ, g_ineq⁺⟩ + Σₖ⟨Yₖ, Pₖ⟩ and
+# max |λⱼ gⱼ⁺| used by the KKT-complete stopping test. The PSD part is a
+# single batched call (the multiplier terms are linear in both arguments).
+# ------------------------------------------------------------------
+
+function _set_multiplier_terms(model::VecModel, i::Int, x, mults)
+    c = model.set_constraints.fs[i]
+    y, λ, Y = mults
+    v, comps = _set_components(c, x)
+    s = _set_psd_multiplier_terms(Y, v, comps)
+    k_eq = 1
+    k_ineq = 1
+    for (vi, set) in zip(v, comps)
+        if set isa Reals
+            continue
+        elseif _set_is_psd(set)
+            continue
+        elseif set isa _SET_EQ
+            g = _component_violation(vi, set)
+            m = _component_dim(set)
+            yy = @view y[k_eq:(k_eq + m - 1)]
+            s += dot(yy, g)
+            k_eq += m
+        else
+            g = _component_violation(vi, set)
+            m = _component_dim(set)
+            λλ = @view λ[k_ineq:(k_ineq + m - 1)]
+            s += dot(λλ, max.(g, 0.0))
+            k_ineq += m
+        end
+    end
+    return s
+end
+
+function _set_complementarity(model::VecModel, i::Int, x, mults)
+    c = model.set_constraints.fs[i]
+    _, λ, _ = mults
+    v, comps = _set_components(c, x)
+    comp = 0.0
+    k_ineq = 1
+    for (vi, set) in zip(v, comps)
+        (set isa Reals || _set_is_psd(set) || set isa _SET_EQ) && continue
+        g = _component_violation(vi, set)
+        m = _component_dim(set)
+        λλ = @view λ[k_ineq:(k_ineq + m - 1)]
+        comp = max(comp, maximum(abs.(λλ .* max.(g, 0.0))))
+        k_ineq += m
+    end
+    return comp
+end

@@ -60,9 +60,7 @@ struct RelaxConstraintSelection
     sets::Union{Bool,AbstractVector{Int}}
     labels::Union{Nothing,Set{Symbol}}
 end
-function RelaxConstraintSelection(;
-    eq=true, ineq=true, sd=true, sets=true, labels=nothing
-)
+function RelaxConstraintSelection(; eq=true, ineq=true, sd=true, sets=true, labels=nothing)
     lbls = if labels === nothing
         nothing
     elseif labels isa Union{AbstractVector,Tuple,Base.AbstractSet}
@@ -558,19 +556,21 @@ end
   per-group reverse passes cost more than the single composed pass on
   this one-group problem; off by default, an architecture/robustness
   option for multi-group problems.
-- `stop_kkt`, `kkt_tol`: (opt-in) extend the convergence test from
-  feasibility-only to KKT-complete: once `vnorm ≤ ctol`, the solve also
-  requires the box-projected gradient of the scaled Lagrangian at the
-  current multipliers to satisfy `≤ kkt_tol` (default `1e-6`) and the
-  complementarity residual `max |λⱼgⱼ|` over the relaxed inequalities to
-  satisfy `≤ kkt_tol`. Costs one Lagrangian-gradient assembly per outer
-  iteration once feasible. Measured on the TopOpt local-stress
-  single-level solve: at the default `kkt_tol = 1e-6` the stationarity
-  test never fires within 100 outer iterations (the multiplier-error
-  scale is ~ρ·viol, so the Lagrangian residual stalls around 1e-4-1e-3
-  on this 1600-constraint problem) and the solve refines to viol 1.8e-8
-  in 1819.8 s — opt-in, use a looser `kkt_tol` (≳ 1e-4) or bound the run
-  with `max_time`.
+- `stop_kkt`, `kkt_tol`: the default convergence test is KKT-complete:
+  once `vnorm ≤ ctol`, the solve also requires the box-projected gradient
+  of the scaled Lagrangian at the current multipliers to satisfy
+  `≤ kkt_tol` (default `1e-3`) and the complementarity residual
+  `max |λⱼgⱼ|` over the relaxed inequalities to satisfy `≤ kkt_tol`.
+  Costs one Lagrangian-gradient assembly per outer iteration once
+  feasible. A feasibility-only solve would terminate at any feasible
+  iterate — including the starting point of a feasible-start problem —
+  so stationarity is part of the default test; the tolerance is set at
+  the residual plateau measured on the TopOpt local-stress single-level
+  solve (the multiplier-error scale is ~ρ·viol, so the Lagrangian
+  residual stalls around 1e-4-1e-3 on that 1600-constraint problem, where
+  the old `1e-6` default never fired within 100 outer iterations). Set
+  `stop_kkt = false` for the feasibility-only behavior, or loosen
+  `kkt_tol` and bound the run with `max_time` on large problems.
 - `outer_schedule`: `:bm` (the default) — the Birgin–Martínez complexity
   scaling where both the feasibility target `η` and the subproblem accuracy
   target `ω` tighten with the full `1/ρ` factor on good steps (and reset
@@ -759,8 +759,8 @@ function AugLagOptions(;
     max_time::Real=Inf,
     on_iteration=nothing,
     analytical_gradient::Bool=false,
-    stop_kkt::Bool=false,
-    kkt_tol::Real=1e-6,
+    stop_kkt::Bool=true,
+    kkt_tol::Real=1e-3,
     second_order=nothing,
     inexact_cg::Bool=false,
     outer_schedule::Symbol=:bm,
@@ -921,7 +921,8 @@ function Workspace(
     args...;
     options::AugLagOptions=AugLagOptions(),
     kwargs...,
-)    if optimizer.sub_alg === nothing
+)
+    if optimizer.sub_alg === nothing
         sel = options.relaxed
         nsd = length(_relaxed_indices(sel.sd, model.sd_constraints, sel.labels))
         ntotal_sd = length(model.sd_constraints.fs)
@@ -950,10 +951,17 @@ end
 
 # Convenience: default to the model's initial point when no x0 is given.
 function Workspace(
-    model::VecModel, optimizer::AugLagAlg, args...; options::AugLagOptions=AugLagOptions(), kwargs...
+    model::VecModel,
+    optimizer::AugLagAlg,
+    args...;
+    options::AugLagOptions=AugLagOptions(),
+    kwargs...,
 )
-    isempty(args) && return Workspace(model, optimizer, getinit(model); options=options, kwargs...)
-    return Workspace(model, optimizer, args[1], Base.tail(args)...; options=options, kwargs...)
+    isempty(args) &&
+        return Workspace(model, optimizer, getinit(model); options=options, kwargs...)
+    return Workspace(
+        model, optimizer, args[1], Base.tail(args)...; options=options, kwargs...
+    )
 end
 
 # ------------------------------------------------------------------
@@ -989,18 +997,22 @@ function _subproblem(
     ineq_rel = _relaxed_indices(sel.ineq, model.ineq_constraints, sel.labels)
     sd_rel = _relaxed_indices(sel.sd, model.sd_constraints, sel.labels)
     sets_rel = _relaxed_indices(sel.sets, model.set_constraints, sel.labels)
-    kept_eq = VectorOfFunctions(EqConstraint[
-        c for (i, c) in enumerate(model.eq_constraints.fs) if !(i in eq_rel)
-    ])
-    kept_ineq = VectorOfFunctions(IneqConstraint[
-        c for (i, c) in enumerate(model.ineq_constraints.fs) if !(i in ineq_rel)
-    ])
-    kept_sd = VectorOfFunctions(SDConstraint[
-        c for (i, c) in enumerate(model.sd_constraints.fs) if !(i in sd_rel)
-    ])
-    kept_sets = VectorOfFunctions(FunctionInSet[
-        c for (i, c) in enumerate(model.set_constraints.fs) if !(i in sets_rel)
-    ])
+    kept_eq = VectorOfFunctions(
+        EqConstraint[c for (i, c) in enumerate(model.eq_constraints.fs) if !(i in eq_rel)]
+    )
+    kept_ineq = VectorOfFunctions(
+        IneqConstraint[
+            c for (i, c) in enumerate(model.ineq_constraints.fs) if !(i in ineq_rel)
+        ],
+    )
+    kept_sd = VectorOfFunctions(
+        SDConstraint[c for (i, c) in enumerate(model.sd_constraints.fs) if !(i in sd_rel)]
+    )
+    kept_sets = VectorOfFunctions(
+        FunctionInSet[
+            c for (i, c) in enumerate(model.set_constraints.fs) if !(i in sets_rel)
+        ],
+    )
     return eq_rel,
     ineq_rel, sd_rel, sets_rel,
     VecModel(
@@ -2208,7 +2220,9 @@ function optimize!(workspace::AugLagWorkspace)
             vraw_r = _raw_violation(model, eq_rel, ineq_rel, sets_rel, xr)
             if vraw_r < _raw_violation(model, eq_rel, ineq_rel, sets_rel, x)
                 x = copy(xr)
-                vnorm = norm(_scaled_violation(eq_fs, ineq_fs, sd_rel, sets_rel, model, x), Inf)
+                vnorm = norm(
+                    _scaled_violation(eq_fs, ineq_fs, sd_rel, sets_rel, model, x), Inf
+                )
                 fx = obj(x)
                 if lsq_multipliers && !isempty(eq_rel)
                     y = _lsq_multipliers_scaled(scaled_obj, eq_fs, x)
@@ -2525,7 +2539,8 @@ function optimize!(workspace::AugLagWorkspace)
         # values at the accepted point recover f without re-evaluating
         # anything (Percival's objective recovery, and it also removes the
         # duplicate constraint evaluation of the violation recomputation).
-        can_recover = penalty === :quadratic && !use_elastic && isempty(sd_rel) && isempty(sets_rel)
+        can_recover =
+            penalty === :quadratic && !use_elastic && isempty(sd_rel) && isempty(sets_rel)
         eqvals_acc = nothing
         ineqvals_acc = nothing
         mt_acc = mt
@@ -2572,7 +2587,10 @@ function optimize!(workspace::AugLagWorkspace)
             # No acceptable step: record the current point in the filter and
             # keep it (the outer update will escalate).
             push!(filter_f, al_obj(x_sub))
-            push!(filter_v, norm(_scaled_violation(eq_fs, ineq_fs, sd_rel, sets_rel, model, x), Inf))
+            push!(
+                filter_v,
+                norm(_scaled_violation(eq_fs, ineq_fs, sd_rel, sets_rel, model, x), Inf),
+            )
         end
         if watchdog && !accepted
             # Watchdog rejection: discard the step entirely and let the outer
@@ -2605,7 +2623,9 @@ function optimize!(workspace::AugLagWorkspace)
                 x = _restore_feasible(
                     eq_fs, ineq_fs, model, relaxed, submodel0, copy(xgood), restore_prox
                 )
-                vnorm = norm(_scaled_violation(eq_fs, ineq_fs, sd_rel, sets_rel, model, x), Inf)
+                vnorm = norm(
+                    _scaled_violation(eq_fs, ineq_fs, sd_rel, sets_rel, model, x), Inf
+                )
                 f_new = obj(x)
             else
                 x = _failed_iterate_fallback(trajectory, x_init)
@@ -2896,10 +2916,21 @@ function optimize!(workspace::AugLagWorkspace)
                 gJ = NonconvexCore.value_gradient(z -> dot(_vecval(c(z)), λ[k]), x)[2]
                 gJ === nothing || (g .+= gJ)
             end
+            # The set-constraint multipliers: ⟨y, g_eq⟩ + ⟨λ, g_ineq⁺⟩ +
+            # Σₖ⟨Yₖ, Pₖ⟩ (the PSD part batched into one rule'd call).
+            for (k, i) in enumerate(sets_rel)
+                gJ = NonconvexCore.value_gradient(
+                    z -> _set_multiplier_terms(model, i, z, Msets[k]), x
+                )[2]
+                gJ === nothing || (g .+= gJ)
+            end
             pg = _projected_gnorm(g, x, submodel0.box_min, submodel0.box_max)
             comp = 0.0
             for k in eachindex(ineq_rel)
                 comp = max(comp, maximum(abs.(λ[k] .* _vecval(ineq_fs[k](x)))))
+            end
+            for (k, i) in enumerate(sets_rel)
+                comp = max(comp, _set_complementarity(model, i, x, Msets[k]))
             end
             stat_ok = pg <= kkt_tol
             comp_ok = comp <= kkt_tol

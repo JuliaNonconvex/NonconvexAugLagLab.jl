@@ -245,4 +245,63 @@ function NonconvexAugLagLab._set_psd_update!(
     return nothing
 end
 
+# ------------------------------------------------------------------
+# The multiplier terms Σₖ⟨Yₖ, Pₖ⟩ of the PSD components of one bundle —
+# linear in both arguments, batched into ONE call with an rrule for the
+# KKT-complete stopping test.
+# ------------------------------------------------------------------
+
+function NonconvexAugLagLab._set_psd_multiplier_terms(
+    Y::AbstractVector, v::Tuple, comps::Tuple
+)
+    s = 0.0
+    k = 1
+    for (vi, set) in zip(v, comps)
+        set isa PSDCone || continue
+        s += dot(Y[k], vi)
+        k += 1
+    end
+    return s
+end
+
+function ChainRulesCore.rrule(
+    ::typeof(NonconvexAugLagLab._set_psd_multiplier_terms),
+    Y::AbstractVector,
+    v::Tuple,
+    comps::Tuple,
+)
+    s = 0.0
+    k = 1
+    for (vi, set) in zip(v, comps)
+        set isa PSDCone || continue
+        s += dot(Y[k], vi)
+        k += 1
+    end
+    function _set_psd_multiplier_terms_pullback(Δs)
+        Δs = ChainRulesCore.unthunk(Δs)
+        if Δs isa ChainRulesCore.AbstractZero
+            return (
+                ChainRulesCore.NoTangent(),
+                ChainRulesCore.NoTangent(),
+                ntuple(_ -> ChainRulesCore.NoTangent(), length(v)),
+                ChainRulesCore.NoTangent(),
+            )
+        end
+        Δv = Vector{Any}(undef, length(v))
+        ΔYs = Vector{Matrix{Float64}}(undef, length(Y))
+        k = 1
+        for (idx, (vi, set)) in enumerate(zip(v, comps))
+            if set isa PSDCone
+                Δv[idx] = Δs .* Y[k]
+                ΔYs[k] = Δs .* vi
+                k += 1
+            else
+                Δv[idx] = ChainRulesCore.NoTangent()
+            end
+        end
+        return (ChainRulesCore.NoTangent(), ΔYs, Tuple(Δv), ChainRulesCore.NoTangent())
+    end
+    return s, _set_psd_multiplier_terms_pullback
+end
+
 end
