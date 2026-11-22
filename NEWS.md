@@ -1,5 +1,8 @@
 # NEWS
 
+## 0.5.1
+
+- Docs: the logo now appears only in the sidebar, not in the page body.
 ## 0.5.0
 
 - **Breaking**: the `tron_cauchy` option is removed. The reference TRON
