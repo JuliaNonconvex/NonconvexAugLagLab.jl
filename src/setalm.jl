@@ -47,18 +47,21 @@ function _set_components(c::FunctionInSet, x)
     return v, comps
 end
 
-# One scale per component of a set constraint: the gradient-magnitude probe
-# used for the classical groups, ‖vᵢ(x₀ + δ) - vᵢ(x₀)‖ / ‖δ‖, floored at 1.
-# The penalty terms, violations and multipliers of the set machinery all
-# live in these scaled units, so large-scale components (e.g. stiffness
-# matrices) do not dominate the augmented Lagrangian.
+# One scale per component of a set constraint: the component's reference
+# magnitude max |vᵢ(x₀)|, floored at 1. A value-based normalization makes
+# the residuals unit-free while keeping the penalty weights meaningful; a
+# gradient probe is unsuitable here because the components (e.g. stiffness
+# matrices assembled through a linear solve) can have derivative magnitudes
+# unrelated to their values.
 function _set_scales(model::VecModel, i::Int, x0)
     c = model.set_constraints.fs[i]
     v0 = NonconvexCore.set_value(c, x0)
-    δ = 1e-6 .* (1 .+ abs.(x0))
-    δnorm = norm(δ)
-    v1 = NonconvexCore.set_value(c, x0 .+ δ)
-    return [max(1.0, norm(a .- b) / δnorm) for (a, b) in zip(v0, v1)]
+    return [
+        begin
+            sc = maximum(abs, v)
+            (isfinite(sc) && sc > 0) ? sc : 1.0
+        end for v in v0
+    ]
 end
 
 # ------------------------------------------------------------------
