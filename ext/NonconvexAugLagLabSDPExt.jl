@@ -146,17 +146,46 @@ cotangent back to the PSD slots of `v` (all other slots get `NoTangent`).
 The projected branch has ∂φ/∂P = -Π₊(Y - ρP) and ∂φ/∂Y = (Π₊(Y - ρP) - Y)/ρ;
 the logdet branch (P ≻ 0) has ∂φ/∂P = Y - P⁻¹/ρ and ∂φ/∂Y = P.
 """
+# The batched path applies when every PSD component has the same
+# dimension and the penalty has no logdet branch: the blocks are gathered
+# into ONE 3D array (the partition of the bundle value), the penalty is
+# ONE `project_psd_batch` primitive with an analytic rrule, and the
+# pullback scatters the cotangents back to all partitions at once — no
+# per-block differentiable loop.
+_batched_psd_ok(comps, penalty::Symbol) =
+    !(penalty in (:logdet, :mixed_logdet)) &&
+    length(Set(getproperty.(Tuple(s for s in comps if s isa PSDCone), :dim))) <= 1
+
 function NonconvexAugLagLab._set_psd_terms(
     Y::AbstractVector, ρ, v::Union{Tuple,AbstractVector}, comps::Union{Tuple,AbstractVector}, scales, penalty::Symbol
 )
-    use_logdet = penalty in (:logdet, :mixed_logdet)
+    if !_batched_psd_ok(comps, penalty)
+        use_logdet = penalty in (:logdet, :mixed_logdet)
+        s = 0.0
+        k = 1
+        for (idx, (vi, set)) in enumerate(zip(v, comps))
+            set isa PSDCone || continue
+            P = vi ./ scales[idx]
+            s += use_logdet ? _logdet_term(Y[k], ρ, P) : _projected_term(Y[k], ρ, P)
+            k += 1
+        end
+        return s
+    end
+    kpsd = [k for (k, set) in enumerate(comps) if set isa PSDCone]
+    isempty(kpsd) && return 0.0
+    d = first(comps).dim for first(comps)  # placeholder removed below
+    d = Tuple(s for s in comps if s isa PSDCone)[1].dim
+    nb = length(kpsd)
+    A3 = zeros(d, d, nb)
+    Y3 = zeros(d, d, nb)
+    for (l, k) in enumerate(kpsd)
+        A3[:, :, l] .= v[k] ./ scales[k]
+        Y3[:, :, l] .= Y[l]
+    end
+    Z3 = project_psd_batch(Y3 .- ρ .* A3)
     s = 0.0
-    k = 1
-    for (idx, (vi, set)) in enumerate(zip(v, comps))
-        set isa PSDCone || continue
-        P = vi ./ scales[idx]
-        s += use_logdet ? _logdet_term(Y[k], ρ, P) : _projected_term(Y[k], ρ, P)
-        k += 1
+    for l in 1:nb
+        s += (sum(abs2, @view Z3[:, :, l]) - sum(abs2, @view Y3[:, :, l])) / (2ρ)
     end
     return s
 end
@@ -170,29 +199,104 @@ function ChainRulesCore.rrule(
     scales,
     penalty::Symbol,
 )
-    use_logdet = penalty in (:logdet, :mixed_logdet)
-    s = 0.0
-    # per-block reverse records: the projected matrix (or the inverse for
-    # the logdet branch) and the branch flag; native references only.
-    Zs = Matrix{Float64}[]
-    logdet_flags = Bool[]
-    k = 1
-    for (idx, (vi, set)) in enumerate(zip(v, comps))
-        set isa PSDCone || continue
-        P = vi ./ scales[idx]
-        if use_logdet && isposdef(Symmetric(P))
-            push!(logdet_flags, true)
-            push!(Zs, inv(Matrix(Symmetric(P))))
-            s += -(1 / ρ) * _sd_logdet(P) + dot(Y[k], P)
-        else
-            Zk = project_psd(Y[k] - ρ * P)
-            push!(logdet_flags, false)
-            push!(Zs, Zk)
-            s += (sum(abs2, Zk) - sum(abs2, Y[k])) / (2ρ)
+    if !_batched_psd_ok(comps, penalty)
+        use_logdet = penalty in (:logdet, :mixed_logdet)
+        s = 0.0
+        Zs = Matrix{Float64}[]
+        logdet_flags = Bool[]
+        k = 1
+        for (idx, (vi, set)) in enumerate(zip(v, comps))
+            set isa PSDCone || continue
+            P = vi ./ scales[idx]
+            if use_logdet && isposdef(Symmetric(P))
+                push!(logdet_flags, true)
+                push!(Zs, inv(Matrix(Symmetric(P))))
+                s += -(1 / ρ) * _sd_logdet(P) + dot(Y[k], P)
+            else
+                Zk = project_psd(Y[k] - ρ * P)
+                push!(logdet_flags, false)
+                push!(Zs, Zk)
+                s += (sum(abs2, Zk) - sum(abs2, Y[k])) / (2ρ)
+            end
+            k += 1
         end
-        k += 1
+        function _set_psd_terms_loop_pb(Δs)
+            Δs = ChainRulesCore.unthunk(Δs)
+            if Δs isa ChainRulesCore.AbstractZero
+                return (
+                    ChainRulesCore.NoTangent(),
+                    ChainRulesCore.NoTangent(),
+                    ChainRulesCore.NoTangent(),
+                    ntuple(_ -> ChainRulesCore.NoTangent(), length(v)),
+                    ChainRulesCore.NoTangent(),
+                    ChainRulesCore.NoTangent(),
+                    ChainRulesCore.NoTangent(),
+                )
+            end
+            Δv = Vector{Any}(undef, length(v))
+            ΔYs = Vector{Matrix{Float64}}(undef, length(Zs))
+            Δρ = 0.0
+            k = 1
+            for (idx, (vi, set)) in enumerate(zip(v, comps))
+                if set isa PSDCone
+                    sc = scales[idx]
+                    P = vi ./ sc
+                    Yk = Y[k]
+                    if logdet_flags[k]
+                        Binv = Zs[k]
+                        Δv[idx] = Δs .* ((Yk .- Binv ./ ρ) ./ sc)
+                        ΔYs[k] = Δs .* P
+                        Δρ += Δs * (_sd_logdet(P) / ρ^2)
+                    else
+                        Zk = Zs[k]
+                        Δv[idx] = Δs .* (-Zk ./ sc)
+                        ΔYs[k] = Δs .* ((Zk .- Yk) ./ ρ)
+                        Δρ += Δs * (-(sum(abs2, Zk) - sum(abs2, Yk)) / (2ρ^2) - dot(Zk, P) / ρ)
+                    end
+                    k += 1
+                else
+                    Δv[idx] = ChainRulesCore.NoTangent()
+                end
+            end
+            return (
+                ChainRulesCore.NoTangent(),
+                ΔYs,
+                Δρ,
+                Tuple(Δv),
+                ChainRulesCore.NoTangent(),
+                ChainRulesCore.NoTangent(),
+                ChainRulesCore.NoTangent(),
+            )
+        end
+        return s, _set_psd_terms_loop_pb
     end
-    function _set_psd_terms_pullback(Δs)
+    # batched path
+    kpsd = [k for (k, set) in enumerate(comps) if set isa PSDCone]
+    if isempty(kpsd)
+        return 0.0, _ -> (
+            ChainRulesCore.NoTangent(),
+            ChainRulesCore.NoTangent(),
+            ChainRulesCore.NoTangent(),
+            ntuple(_ -> ChainRulesCore.NoTangent(), length(v)),
+            ChainRulesCore.NoTangent(),
+            ChainRulesCore.NoTangent(),
+            ChainRulesCore.NoTangent(),
+        )
+    end
+    d = Tuple(s for s in comps if s isa PSDCone)[1].dim
+    nb = length(kpsd)
+    A3 = zeros(d, d, nb)
+    Y3 = zeros(d, d, nb)
+    for (l, k) in enumerate(kpsd)
+        A3[:, :, l] .= v[k] ./ scales[k]
+        Y3[:, :, l] .= Y[l]
+    end
+    Z3 = project_psd_batch(Y3 .- ρ .* A3)
+    s = 0.0
+    for l in 1:nb
+        s += (sum(abs2, @view Z3[:, :, l]) - sum(abs2, @view Y3[:, :, l])) / (2ρ)
+    end
+    function _set_psd_terms_batch_pb(Δs)
         Δs = ChainRulesCore.unthunk(Δs)
         if Δs isa ChainRulesCore.AbstractZero
             return (
@@ -205,33 +309,25 @@ function ChainRulesCore.rrule(
                 ChainRulesCore.NoTangent(),
             )
         end
+        # The cotangent of the quadratic penalty is PROPORTIONAL to the
+        # projection: ΔZ = (Δs/ρ)·Z, and the spectral differential of
+        # ΔZ ∝ Z is exactly ΔZ itself (the G-matrix Hadamard acts on the
+        # diagonal and picks the positive part of θ — which IS θ). So the
+        # derivative propagation to ALL partitions is one scaling:
+        # ΔW = (Δs/ρ)·Z3, ΔA = -ρ·ΔW, ΔY = ΔW - (Δs/ρ)·Y3. No spectral
+        # differentials, no per-block reverse machinery.
+        ΔW = (Δs / ρ) .* Z3
+        ΔA = -ρ .* ΔW
+        ΔY = ΔW .- (Δs / ρ) .* Y3
+        Δρ = Δs * (-(sum(abs2, Z3) - sum(abs2, Y3)) / (2ρ^2)) - sum(ΔW .* A3)
         Δv = Vector{Any}(undef, length(v))
-        ΔYs = Vector{Matrix{Float64}}(undef, length(Zs))
-        Δρ = 0.0
-        k = 1
-        for (idx, (vi, set)) in enumerate(zip(v, comps))
-            if set isa PSDCone
-                sc = scales[idx]
-                P = vi ./ sc
-                Yk = Y[k]
-                if logdet_flags[k]
-                    Binv = Zs[k]
-                    # φ = -(1/ρ) logdet P + ⟨Y, P⟩, P = vi/sc
-                    Δv[idx] = Δs .* ((Yk .- Binv ./ ρ) ./ sc)
-                    ΔYs[k] = Δs .* P
-                    Δρ += Δs * (_sd_logdet(P) / ρ^2)
-                else
-                    Zk = Zs[k]
-                    # φ = (‖Π₊(Y - ρP)‖² - ‖Y‖²) / (2ρ), P = vi/sc
-                    Δv[idx] = Δs .* (-Zk ./ sc)
-                    ΔYs[k] = Δs .* ((Zk .- Yk) ./ ρ)
-                    Δρ += Δs * (-(sum(abs2, Zk) - sum(abs2, Yk)) / (2ρ^2) - dot(Zk, P) / ρ)
-                end
-                k += 1
-            else
-                Δv[idx] = ChainRulesCore.NoTangent()
-            end
+        for l in 1:nb
+            Δv[kpsd[l]] = ΔA[:, :, l] ./ scales[kpsd[l]]
         end
+        for (idx, set) in enumerate(comps)
+            set isa PSDCone || (Δv[idx] = ChainRulesCore.NoTangent())
+        end
+        ΔYs = [ΔY[:, :, l] for l in 1:nb]
         return (
             ChainRulesCore.NoTangent(),
             ΔYs,
@@ -242,7 +338,7 @@ function ChainRulesCore.rrule(
             ChainRulesCore.NoTangent(),
         )
     end
-    return s, _set_psd_terms_pullback
+    return s, _set_psd_terms_batch_pb
 end
 
 function NonconvexAugLagLab._set_psd_update!(
