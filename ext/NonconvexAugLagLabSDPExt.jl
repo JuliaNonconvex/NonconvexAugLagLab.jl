@@ -134,7 +134,7 @@ end
 # ------------------------------------------------------------------
 
 """
-    _set_psd_terms(Y, ρ, v::Tuple, comps::Tuple, penalty::Symbol)
+    _set_psd_terms(Y, ρ, v::Union{Tuple,AbstractVector}, comps::Union{Tuple,AbstractVector}, penalty::Symbol)
 
 The combined penalty of all semidefinite components of one bundle
 evaluation `v` (the `PSDCone` components of `comps`, with one multiplier
@@ -147,7 +147,7 @@ The projected branch has ∂φ/∂P = -Π₊(Y - ρP) and ∂φ/∂Y = (Π₊(Y 
 the logdet branch (P ≻ 0) has ∂φ/∂P = Y - P⁻¹/ρ and ∂φ/∂Y = P.
 """
 function NonconvexAugLagLab._set_psd_terms(
-    Y::AbstractVector, ρ, v::Tuple, comps::Tuple, scales, penalty::Symbol
+    Y::AbstractVector, ρ, v::Union{Tuple,AbstractVector}, comps::Union{Tuple,AbstractVector}, scales, penalty::Symbol
 )
     use_logdet = penalty in (:logdet, :mixed_logdet)
     s = 0.0
@@ -259,7 +259,7 @@ end
 # ------------------------------------------------------------------
 
 function NonconvexAugLagLab._set_psd_multiplier_terms(
-    Y::AbstractVector, v::Tuple, comps::Tuple, scales
+    Y::AbstractVector, v::Union{Tuple,AbstractVector}, comps::Union{Tuple,AbstractVector}, scales
 )
     s = 0.0
     k = 1

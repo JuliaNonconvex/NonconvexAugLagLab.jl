@@ -313,7 +313,7 @@ function _set_psd_terms(Y, ρ, v::Tuple, comps::Tuple, penalty)
 end
 _set_psd_update!(Y, ρ, vi, penalty) = nothing
 
-function _set_psd_multiplier_terms(Y, v::Tuple, comps::Tuple)
+function _set_psd_multiplier_terms(Y, v::Union{Tuple,AbstractVector}, comps::Union{Tuple,AbstractVector})
     return throw(
         ArgumentError(
             "Semidefinite components of set constraints are selected for " *
