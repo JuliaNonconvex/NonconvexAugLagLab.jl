@@ -1083,6 +1083,19 @@ function _unit_weights(weights, indices)
     return weights
 end
 
+# The per-group weights in the order [eq; ineq; sets].
+function _group_weights(weights, neq, nineq, nsets)
+    weights === nothing && return (ones(neq), ones(nineq), ones(nsets))
+    length(weights) == neq + nineq + nsets || throw(
+        ArgumentError(
+            "weights must have one entry per relaxed constraint group in the order [eq; ineq; sets] ($(neq + nineq + nsets) groups), got $(length(weights)).",
+        ),
+    )
+    return (
+        weights[1:neq], weights[(neq + 1):(neq + nineq)], weights[(neq + nineq + 1):end]
+    )
+end
+
 function _auglag_objective(
     model::VecModel,
     sel::RelaxConstraintSelection,
@@ -1725,7 +1738,22 @@ end
 # violated constraint groups (selective weights, when enabled) or the
 # global penalty when no single group stands out.
 function _escalate_penalty!(
-    ρ, η, ω, w_eq, w_ineq, w_max, options, eq_rel, ineq_rel, eq_fs, ineq_fs, x
+    ρ,
+    η,
+    ω,
+    w_eq,
+    w_ineq,
+    w_sets,
+    w_max,
+    options,
+    eq_rel,
+    ineq_rel,
+    sets_rel,
+    eq_fs,
+    ineq_fs,
+    model,
+    set_scales,
+    x,
 )
     bumped = false
     if options.selective
@@ -1740,6 +1768,13 @@ function _escalate_penalty!(
             vk = norm(max.(_vecval(ineq_fs[k](x)), 0.0), Inf)
             if vk > η && w_ineq[k] < w_max
                 w_ineq[k] = min(w_ineq[k] * options.rho_incr, w_max)
+                bumped = true
+            end
+        end
+        for (k, i) in enumerate(sets_rel)
+            vk = norm(_set_violation(model, i, x, set_scales[k]), Inf)
+            if vk > η && w_sets[k] < w_max
+                w_sets[k] = min(w_sets[k] * options.rho_incr, w_max)
                 bumped = true
             end
         end
@@ -1850,9 +1885,11 @@ function optimize!(workspace::AugLagWorkspace)
         ρ = clamp(norm(∇f) / max(viol0, 1e-8), 1.0, 1e6)
     end
     # Internal per-group penalty weights (selective bumps modify these; the
-    # user-provided weights are the initial values).
-    w_eq = _unit_weights(options.weights, 1:length(eq_fs))
-    w_ineq = _unit_weights(options.weights, 1:length(ineq_fs))
+    # user-provided weights are the initial values). The convention is one
+    # entry per relaxed group in the order [eq; ineq; sets].
+    w_eq, w_ineq, w_sets = _group_weights(
+        options.weights, length(eq_fs), length(ineq_fs), length(sets_rel)
+    )
     # Per-group PBM barrier coefficients (the adaptive barrier tracks the
     # complementarity of the implied duals instead of the global penalty).
     b_ineq = Float64[ρ * w_ineq[k] for k in eachindex(w_ineq)]
@@ -1908,6 +1945,14 @@ function optimize!(workspace::AugLagWorkspace)
     # Multiplier buffers of the relaxed function-in-set constraints
     # (y_eq, λ_ineq, Y_psd per constraint).
     Msets = [_set_init_multipliers(model, i, ρ) for i in sets_rel]
+    # Anderson-mixing histories of the set-constraint multiplier maps
+    # (per constraint: (equality history, inequality history)).
+    set_and_hist = [
+        (
+            Tuple{Vector{Float64},Vector{Float64}}[],
+            Tuple{Vector{Float64},Vector{Float64}}[],
+        ) for _ in sets_rel
+    ]
     # The set-constraint component scales: with scaling on, gradient/value
     # probes per the scale_mode; with scaling off, unit scales — the
     # formulation is then expected to provide well-scaled residuals.
@@ -2269,7 +2314,9 @@ function optimize!(workspace::AugLagWorkspace)
             empty!(vhist)
         end
         sd_terms = _sd_terms(model, sd_rel, ρ, x, Y, penalty)
-        set_terms = _set_terms_closure(model, sets_rel, ρ, x, Msets, penalty, set_scales)
+        set_terms = _set_terms_closure(
+            model, sets_rel, ρ, x, Msets, penalty, set_scales, w_sets
+        )
         if !isempty(sets_rel)
             sd_terms0 = sd_terms
             sd_terms = z -> sd_terms0(z) + set_terms(z)
@@ -2519,11 +2566,25 @@ function optimize!(workspace::AugLagWorkspace)
             τ = Float64(two_level_tau)
             for _ in 1:two_level_iters
                 _sd_multiplier_update!(model, sd_rel, ρ, x_two, Y, penalty)
-                _set_update!(model, sets_rel, ρ, x_two, Msets, penalty, set_scales)
+                _set_update!(
+                    model,
+                    sets_rel,
+                    ρ,
+                    x_two,
+                    Msets,
+                    penalty,
+                    set_scales,
+                    w_sets,
+                    1.0,
+                    options.safeguard,
+                    set_and_hist,
+                    options.anderson_ineq,
+                    options.anderson_depth,
+                )
                 sd_t2 = _sd_terms(model, sd_rel, ρ, x_two, Y, penalty)
                 if !isempty(sets_rel)
                     set_t2 = _set_terms_closure(
-                        model, sets_rel, ρ, x_two, Msets, penalty, set_scales
+                        model, sets_rel, ρ, x_two, Msets, penalty, set_scales, w_sets
                     )
                     sd_t2_0 = sd_t2
                     sd_t2 = z -> sd_t2_0(z) + set_t2(z)
@@ -2896,7 +2957,21 @@ function optimize!(workspace::AugLagWorkspace)
                 yflat_prev = yflat
             end
             _sd_multiplier_update!(model, sd_rel, ρ, x, Y, penalty)
-            _set_update!(model, sets_rel, ρ, x, Msets, penalty, set_scales)
+            _set_update!(
+                model,
+                sets_rel,
+                ρ,
+                x,
+                Msets,
+                penalty,
+                set_scales,
+                w_sets,
+                θ_mult,
+                options.safeguard,
+                set_and_hist,
+                options.anderson_ineq,
+                options.anderson_depth,
+            )
             if outer_schedule === :bm
                 # Birgin-Martinez complexity scaling: η, ω tighten with 1/ρ.
                 η = max(η / ρ, ctol)
@@ -2914,7 +2989,22 @@ function optimize!(workspace::AugLagWorkspace)
             # Selective penalty update: escalate only the most-violated
             # constraint groups instead of the global penalty.
             ρ, η, ω = _escalate_penalty!(
-                ρ, η, ω, w_eq, w_ineq, w_max, options, eq_rel, ineq_rel, eq_fs, ineq_fs, x
+                ρ,
+                η,
+                ω,
+                w_eq,
+                w_ineq,
+                w_sets,
+                w_max,
+                options,
+                eq_rel,
+                ineq_rel,
+                sets_rel,
+                eq_fs,
+                ineq_fs,
+                model,
+                set_scales,
+                x,
             )
         end
         vprev = vnorm

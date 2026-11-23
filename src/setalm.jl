@@ -128,7 +128,7 @@ end
 # (bundle evaluated once)
 # ------------------------------------------------------------------
 
-function _set_terms(model::VecModel, i::Int, ρ, x, mults, penalty::Symbol, scales)
+function _set_terms(model::VecModel, i::Int, ρ, x, mults, penalty::Symbol, scales, w)
     c = model.set_constraints.fs[i]
     y, λ, Y = mults
     v, comps = _set_components(c, x)
@@ -136,8 +136,10 @@ function _set_terms(model::VecModel, i::Int, ρ, x, mults, penalty::Symbol, scal
     # Lagrangian is scale-adaptive (its projection absorbs the matrix
     # scale), and dividing P by a value scale would suppress the penalty
     # force by sc². Only the eq/ineq components use the value scales, where
-    # the quadratic penalty needs them.
-    s = _set_psd_terms(Y, ρ, v, comps, fill(1.0, length(comps)), penalty)
+    # the quadratic penalty needs them. The group weight w scales the
+    # penalty parts (multiplier terms stay unweighted, as in the classical
+    # groups).
+    s = _set_psd_terms(Y, ρ * w, v, comps, fill(1.0, length(comps)), penalty)
     k_eq = 1
     k_ineq = 1
     for (k, (vi, set)) in enumerate(zip(v, comps))
@@ -147,7 +149,7 @@ function _set_terms(model::VecModel, i::Int, ρ, x, mults, penalty::Symbol, scal
             g = _component_violation(vi, set) ./ sc
             m = _component_dim(set)
             yy = @view y[k_eq:(k_eq + m - 1)]
-            s += dot(yy, g) + (ρ / 2) * dot(g, g)
+            s += dot(yy, g) + (ρ * w / 2) * dot(g, g)
             k_eq += m
         else
             g = _component_violation(vi, set) ./ sc
@@ -155,14 +157,14 @@ function _set_terms(model::VecModel, i::Int, ρ, x, mults, penalty::Symbol, scal
             λλ = @view λ[k_ineq:(k_ineq + m - 1)]
             if penalty in (:pbm, :mixed, :mixed_logdet)
                 feas = g .<= 0
-                s += _pbm_barrier(g[feas], λλ[feas], ρ)
+                s += _pbm_barrier(g[feas], λλ[feas], ρ * w)
                 if any(.!feas)
                     gp = max.(g, 0.0)
-                    s += dot(λλ, gp) + (ρ / 2) * dot(gp, gp)
+                    s += dot(λλ, gp) + (ρ * w / 2) * dot(gp, gp)
                 end
             else
                 gp = max.(g, 0.0)
-                s += dot(λλ, gp) + (ρ / 2) * dot(gp, gp)
+                s += dot(λλ, gp) + (ρ * w / 2) * dot(gp, gp)
             end
             k_ineq += m
         end
@@ -173,13 +175,13 @@ end
 # The combined penalty term of all relaxed set constraints (a closure, like
 # `_sd_terms`).
 function _set_terms_closure(
-    model::VecModel, sets_rel, ρ, x, Msets, penalty::Symbol, set_scales
+    model::VecModel, sets_rel, ρ, x, Msets, penalty::Symbol, set_scales, w_sets
 )
     isempty(sets_rel) && return _ -> 0.0
     return z -> begin
         s = 0.0
         for (k, i) in enumerate(sets_rel)
-            s += _set_terms(model, i, ρ, z, Msets[k], penalty, set_scales[k])
+            s += _set_terms(model, i, ρ, z, Msets[k], penalty, set_scales[k], w_sets[k])
         end
         return s
     end
@@ -189,12 +191,30 @@ end
 # Multiplier updates
 # ------------------------------------------------------------------
 
-function _set_update!(model::VecModel, sets_rel, ρ, x, Msets, penalty::Symbol, set_scales)
+function _set_update!(
+    model::VecModel,
+    sets_rel,
+    ρ,
+    x,
+    Msets,
+    penalty::Symbol,
+    set_scales,
+    w_sets,
+    θ_mult,
+    safeguard::Bool,
+    set_and_hist,
+    anderson_ineq::Bool,
+    anderson_depth::Int,
+)
+    use_and_eq = penalty === :quadratic
+    use_and_ineq = anderson_ineq && penalty === :quadratic
     for (k, i) in enumerate(sets_rel)
         c = model.set_constraints.fs[i]
         y, λ, Y = Msets[k]
         v, comps = _set_components(c, x)
         sc = set_scales[k]
+        w = w_sets[k]
+        hist_eq, hist_ineq = set_and_hist[k]
         k_eq = 1
         k_ineq = 1
         k_psd = 1
@@ -203,19 +223,42 @@ function _set_update!(model::VecModel, sets_rel, ρ, x, Msets, penalty::Symbol, 
                 continue
             elseif _set_is_psd(set)
                 # raw matrices: the projected ALM is scale-adaptive
-                _set_psd_update!(Y[k_psd], ρ, vi, penalty)
+                _set_psd_update!(Y[k_psd], ρ * w * θ_mult, vi, penalty)
                 k_psd += 1
             elseif set isa _SET_EQ
                 g = _component_violation(vi, set) ./ sc[k2]
                 m = _component_dim(set)
-                y[k_eq:(k_eq + m - 1)] .+= ρ .* g
+                yk = y[k_eq:(k_eq + m - 1)]
+                step = θ_mult .* (ρ * w) .* g
+                if use_and_eq && !isempty(hist_eq)
+                    # Anderson acceleration of the set-equality multiplier map
+                    yk .= _anderson_mix(hist_eq, yk .+ step)
+                    push!(hist_eq, (copy(yk), step))
+                    length(hist_eq) > anderson_depth && popfirst!(hist_eq)
+                else
+                    yk .+= step
+                    push!(hist_eq, (copy(yk), step))
+                    length(hist_eq) > anderson_depth && popfirst!(hist_eq)
+                end
                 k_eq += m
             else
                 g = _component_violation(vi, set) ./ sc[k2]
                 m = _component_dim(set)
-                λ[k_ineq:(k_ineq + m - 1)] .= max.(
-                    λ[k_ineq:(k_ineq + m - 1)] .+ ρ .* g, 0.0
-                )
+                λk = λ[k_ineq:(k_ineq + m - 1)]
+                step = θ_mult .* (ρ * w) .* g
+                if use_and_ineq && !isempty(hist_ineq)
+                    λk .= _anderson_mix(hist_ineq, λk .+ step)
+                    push!(hist_ineq, (copy(λk), step))
+                    length(hist_ineq) > anderson_depth && popfirst!(hist_ineq)
+                else
+                    λk .+= step
+                    push!(hist_ineq, (copy(λk), step))
+                    length(hist_ineq) > anderson_depth && popfirst!(hist_ineq)
+                end
+                λk .= max.(λk, 0.0)
+                if safeguard
+                    λk .= min.(λk, 1e8)
+                end
                 k_ineq += m
             end
         end
