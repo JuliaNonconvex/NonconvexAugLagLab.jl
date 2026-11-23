@@ -556,21 +556,20 @@ end
   per-group reverse passes cost more than the single composed pass on
   this one-group problem; off by default, an architecture/robustness
   option for multi-group problems.
-- `stop_kkt`, `kkt_tol`: the default convergence test is KKT-complete:
-  once `vnorm ≤ ctol`, the solve also requires the box-projected gradient
+- `stop_kkt`, `kkt_tol`: opt-in KKT-complete stopping (default `false`,
+  the historical feasibility-only test): with `stop_kkt = true`, once
+  `vnorm ≤ ctol` the solve also requires the box-projected gradient
   of the scaled Lagrangian at the current multipliers to satisfy
-  `≤ kkt_tol` (default `1e-3`) and the complementarity residual
+  `≤ kkt_tol` (default `1e-6`) and the complementarity residual
   `max |λⱼgⱼ|` over the relaxed inequalities to satisfy `≤ kkt_tol`.
   Costs one Lagrangian-gradient assembly per outer iteration once
   feasible. A feasibility-only solve would terminate at any feasible
   iterate — including the starting point of a feasible-start problem —
-  so stationarity is part of the default test; the tolerance is set at
+  so stationarity is available as an opt-in; the tolerance is set at
   the residual plateau measured on the TopOpt local-stress single-level
   solve (the multiplier-error scale is ~ρ·viol, so the Lagrangian
   residual stalls around 1e-4-1e-3 on that 1600-constraint problem, where
-  the old `1e-6` default never fired within 100 outer iterations). Set
-  `stop_kkt = false` for the feasibility-only behavior, or loosen
-  `kkt_tol` and bound the run with `max_time` on large problems.
+  the old `1e-6` default never fired within 100 outer iterations).
 - `outer_schedule`: `:bm` (the default) — the Birgin–Martínez complexity
   scaling where both the feasibility target `η` and the subproblem accuracy
   target `ω` tighten with the full `1/ρ` factor on good steps (and reset
@@ -584,12 +583,13 @@ end
 - `scaling`: normalize the relaxed constraints and the objective by their
   reference magnitudes, so the penalty applies to balanced, unit-scaled
   constraint violations (default `true`).
-- `scale_mode`: the constraint scale scheme — `:value` (default) scales
+- `scale_mode`: the constraint scale scheme — `:gradient` (default, the
+  historical scheme) uses the Curtis–Jiang–Robinson-style
+  finite-difference gradient-magnitude probe per group; `:value` scales
   each group/component by its reference magnitude `max |c(x₀)|` (unit-free
   residuals, penalty weights independent of the constraint's derivative
   scale, which can be unrelated to its values when the function involves a
-  linear solve); `:gradient` uses the Curtis–Jiang–Robinson-style
-  finite-difference gradient-magnitude probe per group.
+  linear solve).
 - `two_level`, `two_level_iters`, `two_level_tau`: (experimental, opt-in)
   two-level semi-proximal inner loop for the semidefinite block
   (SDPNAL+-style sPADMM adapted to nonlinear `P(x)`, plan S2 option B):
@@ -740,7 +740,7 @@ function AugLagOptions(;
     weights=nothing,
     lsq_multipliers::Bool=true,
     scaling::Bool=true,
-    scale_mode::Symbol=:value,
+    scale_mode::Symbol=:gradient,
     memory::Int=50,
     elastic::Bool=false,
     elastic_mu::Real=1e3,
@@ -768,8 +768,8 @@ function AugLagOptions(;
     max_time::Real=Inf,
     on_iteration=nothing,
     analytical_gradient::Bool=false,
-    stop_kkt::Bool=true,
-    kkt_tol::Real=1e-3,
+    stop_kkt::Bool=false,
+    kkt_tol::Real=1e-6,
     second_order=nothing,
     inexact_cg::Bool=false,
     outer_schedule::Symbol=:bm,
