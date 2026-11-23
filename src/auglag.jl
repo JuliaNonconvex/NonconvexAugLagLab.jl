@@ -1875,6 +1875,7 @@ function optimize!(workspace::AugLagWorkspace)
         # at x0 (on the scaled constraints): avoids the escalation waste of a
         # too-small rho_init (measured: ~130 outer iterations on AC-OPF).
         _, ∇f = NonconvexCore.value_gradient(obj, x)
+        ∇f === nothing && (∇f = zeros(length(x)))
         viol0 = 0.0
         for c in eq_fs
             viol0 = max(viol0, norm(_vecval(c(x)), Inf))
