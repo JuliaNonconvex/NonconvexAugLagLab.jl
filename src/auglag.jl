@@ -664,6 +664,7 @@ mutable struct AugLagOptions{S,R,W}
     rho_incr::Real
     rho_decr::Real
     auto_rho_init::Bool
+    auto_weights::Bool
     curvature::Symbol
     prox::Real
     max_iter::Int
@@ -729,6 +730,7 @@ function AugLagOptions(;
     rho_incr::Real=10.0,
     rho_decr::Real=10.0,
     auto_rho_init::Bool=false,
+    auto_weights::Bool=false,
     curvature::Symbol=:lbfgs,
     prox::Real=0.0,
     max_iter::Int=1000,
@@ -837,6 +839,7 @@ function AugLagOptions(;
         rho_incr,
         rho_decr,
         auto_rho_init,
+        auto_weights,
         curvature,
         prox,
         max_iter,
@@ -1081,6 +1084,21 @@ function _unit_weights(weights, indices)
         ),
     )
     return weights
+end
+
+# The per-group penalty-gradient weight of one group: w = |grad f| / |grad
+# 1/2||viol||^2| at x0, clamped -- so each group's penalty force at the unit
+# violation balances the objective gradient (auto_weights).
+function _auto_weight(g, x, gscale)
+    _, dg = NonconvexCore.value_gradient(z -> sum(abs2, _vecval(g(z))) / 2, x)
+    dg === nothing && return 1.0
+    return clamp(gscale / max(norm(dg), 1e-8), 1.0, 1e6)
+end
+function _auto_weight_set(model, i, x, sc, gscale)
+    g = z -> _set_violation(model, i, z, sc)
+    _, dg = NonconvexCore.value_gradient(z -> sum(abs2, g(z)) / 2, x)
+    dg === nothing && return 1.0
+    return clamp(gscale / max(norm(dg), 1e-8), 1.0, 1e6)
 end
 
 # The per-group weights in the order [eq; ineq; sets].
@@ -1426,6 +1444,7 @@ end
 # (on the violated rows only) + ∇(sd terms); each Jᵀv is one reverse pass.
 function _analytical_al_gradient(a::AnalyticalALObjective, x)
     _, ∇f = NonconvexCore.value_gradient(a.scaled_obj, x)
+    ∇f === nothing && (∇f = zeros(length(x)))
     g = copy(∇f)
     for (k, c) in enumerate(a.eq_fs)
         cv = _vecval(c(x))
@@ -1962,6 +1981,17 @@ function optimize!(workspace::AugLagWorkspace)
     else
         [
             fill(1.0, length(NonconvexCore.components(model.set_constraints.fs[i].set))) for i in sets_rel
+        ]
+    end
+    if options.auto_weights
+        _, ∇f0 = NonconvexCore.value_gradient(obj, x)
+        ∇f0 === nothing && (∇f0 = zeros(length(x)))
+        gscale = max(norm(∇f0), 1e-8)
+        w_eq = [_auto_weight(c, x, gscale) for c in eq_fs]
+        w_ineq = [_auto_weight(c, x, gscale) for c in ineq_fs]
+        w_sets = [
+            _auto_weight_set(model, i, x, set_scales[k], gscale) for
+            (k, i) in enumerate(sets_rel)
         ]
     end
     trajectory = Tuple{typeof(x),Real,Real}[]
@@ -3040,6 +3070,7 @@ function optimize!(workspace::AugLagWorkspace)
         comp_ok = true
         if stop_kkt && vnorm <= ctol
             _, ∇f = NonconvexCore.value_gradient(scaled_obj, x)
+            ∇f === nothing && (∇f = zeros(length(x)))
             g = copy(∇f)
             for (k, c) in enumerate(eq_fs)
                 gJ = NonconvexCore.value_gradient(z -> dot(_vecval(c(z)), y[k]), x)[2]
@@ -3156,6 +3187,7 @@ end
 
 function _lsq_multipliers_scaled(obj, eq_fs, x)
     _, ∇f = NonconvexCore.value_gradient(obj, x)
+    ∇f === nothing && (∇f = zeros(length(x)))
     ∇f = copy(∇f)
     y = Vector{Vector{Float64}}()
     ε = sqrt(eps(Float64)) * (1 + norm(x))
