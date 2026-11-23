@@ -42,3 +42,39 @@ options = AugLagOptions(
 )
 r = optimize(m, alg, [0.0, 0.0], options = options)
 ```
+
+## Function-in-set constraints
+
+NonconvexCore 2.3 defines every constraint through the function-in-set
+framework: `add_set_constraint!(model, f, set)` declares a (possibly
+vector-valued) function `f` constrained to a set — `LessThan`,
+`Nonnegatives`, a `SetProduct` of several sets, or a `PSDCone`. A single
+bundle evaluation can feed a product of scalar bounds and semidefinite
+blocks, which is the natural formulation for buckling-constrained
+problems:
+
+```julia
+using NonconvexAugLagLab, NonconvexCore
+
+# P(x) = K(x) + λ̄·Kσ(x) must stay positive semidefinite while the volume
+# stays under the budget — one evaluation, one constraint, two components.
+model = Model(x -> compliance(x))
+addvar!(model, fill(xmin, m), fill(1.0, m))
+add_set_constraint!(
+    model,
+    x -> ((sum(x) - V̄ * m) / (V̄ * m), K(x) + λ̄ * Kσ(x)),
+    SetProduct(LessThan(0.0), PSDCone(n)),
+)
+```
+
+The augmented Lagrangian handles the components of a set constraint as one
+group: a single multiplier vector per constraint, one penalty evaluation
+per bundle, and per-component scales. For the `PSDCone` components the
+penalty runs on the **raw matrices** (the projected augmented Lagrangian
+is scale-adaptive — its projection absorbs the matrix scale), while the
+scalar components follow the same `scale_mode` scheme as the classical
+constraints. The per-group `weights` cover the set groups after the
+equality and inequality groups; `anderson_ineq`/`anderson_depth` accelerate
+the set multipliers as well, and the KKT-complete stopping
+(`stop_kkt = true`) includes the set-constraint stationarity and
+complementarity terms.
