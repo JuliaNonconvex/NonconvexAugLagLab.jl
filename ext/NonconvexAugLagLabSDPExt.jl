@@ -194,8 +194,8 @@ function ChainRulesCore.rrule(
     ::typeof(NonconvexAugLagLab._set_psd_terms),
     Y::AbstractVector,
     ρ,
-    v::Tuple,
-    comps::Tuple,
+    v::Union{Tuple,AbstractVector},
+    comps::Union{Tuple,AbstractVector},
     scales,
     penalty::Symbol,
 )
@@ -370,8 +370,8 @@ end
 function ChainRulesCore.rrule(
     ::typeof(NonconvexAugLagLab._set_psd_multiplier_terms),
     Y::AbstractVector,
-    v::Tuple,
-    comps::Tuple,
+    v::Union{Tuple,AbstractVector},
+    comps::Union{Tuple,AbstractVector},
     scales,
 )
     s = 0.0
