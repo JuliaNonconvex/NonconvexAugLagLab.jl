@@ -22,7 +22,8 @@ import NonconvexAugLagLab:
     _set_psd_violation, _set_psd_init, _set_psd_term, _set_psd_update!
 import NonconvexAugLagLab: _set_is_psd, _component_dim
 using NonconvexSemidefinite: NonconvexSemidefinite
-using NonconvexSemidefinite: project_psd, psd_infeasibility, PSDCone
+using NonconvexSemidefinite: project_psd, project_psd_batch, psd_infeasibility,
+                       psd_neg_eig, psd_infeasibility_batch, partition_blocks, PSDCone
 using NonconvexSemidefinite: NonconvexSemidefinite, ChainRulesCore
 # Block-aware helpers when a NonconvexSemidefinite with BlockSDConstraint is
 # loaded; fall back to the single-matrix contract for the registered 0.3.x.
