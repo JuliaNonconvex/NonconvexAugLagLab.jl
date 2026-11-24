@@ -173,7 +173,6 @@ function NonconvexAugLagLab._set_psd_terms(
     end
     kpsd = [k for (k, set) in enumerate(comps) if set isa PSDCone]
     isempty(kpsd) && return 0.0
-    d = first(comps).dim for first(comps)  # placeholder removed below
     d = Tuple(s for s in comps if s isa PSDCone)[1].dim
     nb = length(kpsd)
     A3 = zeros(d, d, nb)
