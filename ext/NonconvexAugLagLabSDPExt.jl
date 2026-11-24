@@ -147,6 +147,10 @@ cotangent back to the PSD slots of `v` (all other slots get `NoTangent`).
 The projected branch has ∂φ/∂P = -Π₊(Y - ρP) and ∂φ/∂Y = (Π₊(Y - ρP) - Y)/ρ;
 the logdet branch (P ≻ 0) has ∂φ/∂P = Y - P⁻¹/ρ and ∂φ/∂Y = P.
 """
+# The cotangent of the bundle value keeps the primal's shape: a tuple for
+# tuple bundles, the vector itself for vector bundles.
+_dv_output(v, Δv) = v isa Tuple ? Tuple(Δv) : Δv
+
 # The batched path applies when every PSD component has the same
 # dimension and the penalty has no logdet branch: the blocks are gathered
 # into ONE 3D array (the partition of the bundle value), the penalty is
@@ -227,7 +231,7 @@ function ChainRulesCore.rrule(
                     ChainRulesCore.NoTangent(),
                     ChainRulesCore.NoTangent(),
                     ChainRulesCore.NoTangent(),
-                    ntuple(_ -> ChainRulesCore.NoTangent(), length(v)),
+                    _dv_output(v, fill(ChainRulesCore.NoTangent(), length(v))),
                     ChainRulesCore.NoTangent(),
                     ChainRulesCore.NoTangent(),
                     ChainRulesCore.NoTangent(),
@@ -262,7 +266,7 @@ function ChainRulesCore.rrule(
                 ChainRulesCore.NoTangent(),
                 ΔYs,
                 Δρ,
-                Tuple(Δv),
+                _dv_output(v, Δv),
                 ChainRulesCore.NoTangent(),
                 ChainRulesCore.NoTangent(),
                 ChainRulesCore.NoTangent(),
@@ -277,7 +281,7 @@ function ChainRulesCore.rrule(
             ChainRulesCore.NoTangent(),
             ChainRulesCore.NoTangent(),
             ChainRulesCore.NoTangent(),
-            ntuple(_ -> ChainRulesCore.NoTangent(), length(v)),
+            _dv_output(v, fill(ChainRulesCore.NoTangent(), length(v))),
             ChainRulesCore.NoTangent(),
             ChainRulesCore.NoTangent(),
             ChainRulesCore.NoTangent(),
@@ -303,7 +307,7 @@ function ChainRulesCore.rrule(
                 ChainRulesCore.NoTangent(),
                 ChainRulesCore.NoTangent(),
                 ChainRulesCore.NoTangent(),
-                ntuple(_ -> ChainRulesCore.NoTangent(), length(v)),
+                _dv_output(v, fill(ChainRulesCore.NoTangent(), length(v))),
                 ChainRulesCore.NoTangent(),
                 ChainRulesCore.NoTangent(),
                 ChainRulesCore.NoTangent(),
@@ -332,7 +336,7 @@ function ChainRulesCore.rrule(
             ChainRulesCore.NoTangent(),
             ΔYs,
             Δρ,
-            Tuple(Δv),
+            _dv_output(v, Δv),
             ChainRulesCore.NoTangent(),
             ChainRulesCore.NoTangent(),
             ChainRulesCore.NoTangent(),
@@ -387,7 +391,7 @@ function ChainRulesCore.rrule(
             return (
                 ChainRulesCore.NoTangent(),
                 ChainRulesCore.NoTangent(),
-                ntuple(_ -> ChainRulesCore.NoTangent(), length(v)),
+                _dv_output(v, fill(ChainRulesCore.NoTangent(), length(v))),
                 ChainRulesCore.NoTangent(),
                 ChainRulesCore.NoTangent(),
             )
@@ -407,7 +411,7 @@ function ChainRulesCore.rrule(
         return (
             ChainRulesCore.NoTangent(),
             ΔYs,
-            Tuple(Δv),
+            _dv_output(v, Δv),
             ChainRulesCore.NoTangent(),
             ChainRulesCore.NoTangent(),
         )
