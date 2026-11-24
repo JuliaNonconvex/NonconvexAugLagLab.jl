@@ -16,6 +16,7 @@
 # capabilities.
 
 using NonconvexCore: set_value, components, _component_violation
+using Zygote
 using NonconvexCore: Reals, EqualTo, Zeros, LessThan, GreaterThan, Interval
 using NonconvexCore: Nonnegatives, Nonpositives, Simplex, ChanceSet, SetProduct
 
@@ -374,4 +375,164 @@ function _set_complementarity(model::VecModel, i::Int, x, mults, scales)
         k_ineq += m
     end
     return comp
+end
+
+# The barrier-ified inequality term (the :pbm / :mixed branches), kept as a
+# small function so the _set_terms rrule can differentiate it componentwise
+# with Zygote when needed.
+function _set_terms_ineq_term(λ, ρ, w, g, k_ineq, m, penalty)
+    λλ = @view λ[k_ineq:(k_ineq + m - 1)]
+    feas = g .<= 0
+    s = _pbm_barrier(g[feas], λλ[feas], ρ * w)
+    if any(.!feas)
+        gp = max.(g, 0.0)
+        s += dot(λλ, gp) + (ρ * w / 2) * dot(gp, gp)
+    end
+    return s
+end
+
+# The augmented-Lagrangian penalty of one set constraint, differentiated
+# through ONE analytic rule. The forward is the native loop over the bundle
+# components (including thousands of PSD blocks); without this rule Zygote
+# would trace that loop — an unrolled 55k-iteration graph whose compilation
+# alone takes tens of minutes at 320×320. The pullback assembles the
+# bundle-value cotangent natively (the batched PSD rule + closed forms for
+# the eq/ineq components) and routes it through the bundle's own rule.
+function ChainRulesCore.rrule(
+    ::typeof(_set_terms),
+    model::VecModel,
+    i::Int,
+    ρ,
+    x,
+    mults,
+    penalty::Symbol,
+    scales,
+    w,
+)
+    c = model.set_constraints.fs[i]
+    y, λ, Y = mults
+    v, comps = _set_components(c, x)
+    s = _set_psd_terms(Y, ρ * w, v, comps, fill(1.0, length(comps)), penalty)
+    eqrec = Any[]      # (slot, vi, sc, g, y-range)
+    ineqrec = Any[]    # (slot, vi, sc, g, λ-range)
+    k_eq = 1
+    k_ineq = 1
+    for (k, (vi, set)) in enumerate(zip(v, comps))
+        (set isa Reals || _set_is_psd(set)) && continue
+        sc = scales[k]
+        g = _component_violation(vi, set) ./ sc
+        m = _component_dim(set)
+        if set isa _SET_EQ
+            yy = @view y[k_eq:(k_eq + m - 1)]
+            s += dot(yy, g) + (ρ * w / 2) * dot(g, g)
+            push!(eqrec, (k, vi, sc, g, k_eq, m))
+            k_eq += m
+        elseif penalty === :quadratic
+            gp = max.(g, 0.0)
+            λλ = @view λ[k_ineq:(k_ineq + m - 1)]
+            s += dot(λλ, gp) + (ρ * w / 2) * dot(gp, gp)
+            push!(ineqrec, (k, vi, sc, g, gp, k_ineq, m, false))
+            k_ineq += m
+        else
+            # barrier-ified branch: rare; differentiate the small term
+            s += _set_terms_ineq_term(λ, ρ, w, g, k_ineq, m, penalty)
+            push!(ineqrec, (k, vi, sc, g, nothing, k_ineq, m, true))
+            k_ineq += m
+        end
+    end
+    function _set_terms_pb(Δs)
+        Δs = ChainRulesCore.unthunk(Δs)
+        nv = length(v)
+        Δv = Vector{Any}(undef, nv)
+        for k in 1:nv
+            Δv[k] = ChainRulesCore.NoTangent()
+        end
+        if !(Δs isa ChainRulesCore.AbstractZero)
+            # PSD components: the batched rule (native)
+            _, _, Δρp, Δv_psd, _, _, _ = ChainRulesCore.rrule(
+                _set_psd_terms, Y, ρ * w, v, comps,
+                fill(1.0, length(comps)), penalty,
+            )[2](Δs)
+            Δρ_psd = Δρp * w
+            for k in 1:nv
+                if !(Δv_psd[k] isa ChainRulesCore.AbstractZero)
+                    Δv[k] = Δv_psd[k]
+                end
+            end
+            Δρ_eqineq = 0.0
+            for (k, vi, sc, g, k_eq, m) in eqrec
+                D = _violation_jacobian(vi, comps[k])   # diagonal indicators
+                yy = @view y[k_eq:(k_eq + m - 1)]
+                Δv[k] = Δs .* (D .* (yy .+ ρ * w .* g) ./ sc)
+                Δρ_eqineq += Δs * (w / 2) * dot(g, g)
+            end
+            for (k, vi, sc, g, gp, k_ineq, m, barrierized) in ineqrec
+                if barrierized
+                    _, bk = Zygote.pullback(
+                        gg -> _set_terms_ineq_term(λ, ρ, w, gg, k_ineq, m, penalty),
+                        g,
+                    )
+                    Δv[k] = bk(Δs)[1] .* _violation_jacobian(vi, comps[k]) ./ sc
+                    Δρ_eqineq += 0.0   # barrier branch: ρ handled by Zygote fallback below
+                    Δρ_eqineq += Δs * 0.0
+                else
+                    λλ = @view λ[k_ineq:(k_ineq + m - 1)]
+                    D = _violation_jacobian(vi, comps[k])
+                    Dp = D .* (gp .> 0.0)
+                    Δv[k] = Δs .* (Dp .* (λλ .+ ρ * w .* gp) ./ sc)
+                    Δρ_eqineq += Δs * (w / 2) * dot(gp, gp)
+                end
+            end
+            Δρ = Δρ_psd + Δρ_eqineq
+            # through the bundle's own rule (native forward + native
+            # pullback); c.f is the bundle closure (e.g. x -> bec(filt(x))).
+            rΔx = Zygote.pullback(c.f, x)[2](Δv)
+            Δx = rΔx isa Tuple ? last(rΔx) : rΔx
+        else
+            Δρ = zero(ρ)
+            Δx = zero.(x)
+        end
+        return (
+            ChainRulesCore.NoTangent(),   # ::typeof(_set_terms)
+            ChainRulesCore.NoTangent(),   # model
+            ChainRulesCore.NoTangent(),   # i
+            Δρ,
+            Δx,
+            ChainRulesCore.NoTangent(),   # mults
+            ChainRulesCore.NoTangent(),   # penalty
+            ChainRulesCore.NoTangent(),   # scales
+            ChainRulesCore.NoTangent(),   # w
+        )
+    end
+    return s, _set_terms_pb
+end
+
+# The derivative of a component violation g(v) w.r.t. v, as the diagonal
+# indicator matrix (all the order-set violations are entrywise max-plus
+# linear).
+function _violation_jacobian(vi, set)
+    if set isa EqualTo
+        return ones(length(vi))
+    elseif set isa Zeros
+        return ones(length(vi))
+    elseif set isa LessThan
+        return Float64.(vi .> set.upper)
+    elseif set isa GreaterThan
+        return Float64.(vi .< set.lower)
+    elseif set isa Interval
+        return Float64.((vi .> set.upper) .- (vi .< set.lower))
+    elseif set isa Nonnegatives
+        return Float64.(vi .< 0)
+    elseif set isa Nonpositives
+        return Float64.(vi .> 0)
+    else
+        # generic fallback: entrywise numeric jacobian of the small vector
+        g(v) = _component_violation(v, set)
+        D = zeros(length(vi), length(vi))
+        for j in 1:length(vi)
+            D[j, j] = (g(vi .+ (1e-6) * (1 .+ abs.(vi)) .* (1:length(vi) .== j))[j] -
+                       g(vi .- (1e-6) * (1 .+ abs.(vi)) .* (1:length(vi) .== j))[j]) / (2e-6)
+        end
+        return D
+    end
 end

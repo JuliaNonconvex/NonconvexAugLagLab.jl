@@ -157,9 +157,24 @@ _dv_output(v, Δv) = v isa Tuple ? Tuple(Δv) : Δv
 # ONE `project_psd_batch` primitive with an analytic rrule, and the
 # pullback scatters the cotangents back to all partitions at once — no
 # per-block differentiable loop.
+# no giant tuples: `comps` may hold tens of thousands of PSDCone
+# components and must never be collected into an NTuple (type blow-up).
+_first_psd_dim(comps) = begin
+    for s in comps
+        s isa PSDCone && return s.dim
+    end
+    return -1
+end
+
 _batched_psd_ok(comps, penalty::Symbol) =
-    !(penalty in (:logdet, :mixed_logdet)) &&
-    length(Set(getproperty.(Tuple(s for s in comps if s isa PSDCone), :dim))) <= 1
+    !(penalty in (:logdet, :mixed_logdet)) && begin
+        d0 = _first_psd_dim(comps)
+        ok = true
+        for s in comps
+            s isa PSDCone && s.dim != d0 && (ok = false; break)
+        end
+        ok
+    end
 
 function NonconvexAugLagLab._set_psd_terms(
     Y::AbstractVector, ρ, v::Union{Tuple,AbstractVector}, comps::Union{Tuple,AbstractVector}, scales, penalty::Symbol
@@ -178,7 +193,7 @@ function NonconvexAugLagLab._set_psd_terms(
     end
     kpsd = [k for (k, set) in enumerate(comps) if set isa PSDCone]
     isempty(kpsd) && return 0.0
-    d = Tuple(s for s in comps if s isa PSDCone)[1].dim
+    d = _first_psd_dim(comps)
     nb = length(kpsd)
     A3 = zeros(d, d, nb)
     Y3 = zeros(d, d, nb)
@@ -287,7 +302,7 @@ function ChainRulesCore.rrule(
             ChainRulesCore.NoTangent(),
         )
     end
-    d = Tuple(s for s in comps if s isa PSDCone)[1].dim
+    d = _first_psd_dim(comps)
     nb = length(kpsd)
     A3 = zeros(d, d, nb)
     Y3 = zeros(d, d, nb)
