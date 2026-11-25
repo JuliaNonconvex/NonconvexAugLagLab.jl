@@ -55,7 +55,7 @@ end
     add_eq_constraint!(m, x -> x[1] + x[2] - 1)
     add_ineq_constraint!(m, x -> 0.75 - x[1])
     options = AugLagOptions(
-        weights=[2.0],
+        weights=[2.0, 2.0],
         lsq_multipliers=true,
         rho_init=1.0,
         rho_max=1e6,
@@ -72,7 +72,7 @@ end
     @test r.trajectory !== nothing
     @test all(t -> length(t[1]) == 2, r.trajectory)
     @test_throws ArgumentError optimize(
-        m, AugLagAlg(), [0.5, 0.5]; options=AugLagOptions(weights=[1.0, 2.0])
+        m, AugLagAlg(), [0.5, 0.5]; options=AugLagOptions(weights=[1.0])
     )
 end
 
