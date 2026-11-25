@@ -158,7 +158,9 @@ the logdet branch (P ≻ 0) has ∂φ/∂P = Y - P⁻¹/ρ and ∂φ/∂Y = P.
 _dv_output(v, Δv) = v isa Tuple ? Tuple(Δv) : Δv
 
 # The batched path applies when every PSD component has the same
-# dimension and the penalty has no logdet branch: the blocks are gathered
+# dimension, the penalty has no logdet branch AND the batched primitive
+# exists (NonconvexSemidefinite 0.5; the registered 0.4.x falls back to
+# the per-block loop): the blocks are gathered
 # into ONE 3D array (the partition of the bundle value), the penalty is
 # ONE `project_psd_batch` primitive with an analytic rrule, and the
 # pullback scatters the cotangents back to all partitions at once — no
@@ -173,6 +175,7 @@ _first_psd_dim(comps) = begin
 end
 
 function _batched_psd_ok(comps, penalty::Symbol)
+    isdefined(NonconvexSemidefinite, :project_psd_batch) || return false
     return !(penalty in (:logdet, :mixed_logdet)) && begin
         d0 = _first_psd_dim(comps)
         ok = true

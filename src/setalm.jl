@@ -359,6 +359,21 @@ function _set_psd_multiplier_terms(
     )
 end
 
+# The 4-argument form used by the multiplier-term assembly. Without the SDP
+# extension loaded, PSD-free bundles contribute nothing (their multiplier
+# terms are zero); a PSD component is a modeling error. The extension
+# specializes this method with a more specific signature.
+function _set_psd_multiplier_terms(Y, v, comps, scales)
+    any(_set_is_psd, comps) && return throw(
+        ArgumentError(
+            "Semidefinite components of set constraints are selected for " *
+            "relaxation but NonconvexSemidefinite is not loaded; load it to " *
+            "enable the projected augmented Lagrangian for semidefinite constraints.",
+        ),
+    )
+    return 0.0
+end
+
 # ------------------------------------------------------------------
 # Multiplier terms and complementarity of the set constraints: the
 # stationarity contributions ⟨y, g_eq⟩ + ⟨λ, g_ineq⁺⟩ + Σₖ⟨Yₖ, Pₖ⟩ and

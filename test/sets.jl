@@ -128,35 +128,40 @@ end
 @testitem "AugLagAlg: chordal-decomposed set constraint" begin
     using NonconvexAugLagLab, NonconvexSemidefinite, LinearAlgebra, Test, SparseArrays
 
-    # min (x₁ - 0.2)² + (x₂ - 0.2)² s.t. the tridiagonal P(x) ⪰ 0,
-    # chordally decomposed: the unconstrained point (0.2, 0.2) is not PSD,
-    # so the constraint binds.
-    P(x) = [
-        x[1] 0.25 0.0 0.0
-        0.25 x[2] 0.25 0.0
-        0.0 0.25 x[1] 0.25
-        0.0 0.0 0.25 x[2]
-    ]
-    m = Model(x -> (x[1] - 0.2)^2 + (x[2] - 0.2)^2)
-    addvar!(m, [0.0, 0.0], [5.0, 5.0]; init=[2.0, 2.0])
-    add_set_constraint!(m, P, PSDCone(4); flags=[:chordal])
-    vm, x0, _ = NonconvexCore.tovecmodel(m, [2.0, 2.0])
-    pat = sparse(P(vm.init) .!= 0)
-    dm, d0, mapc = chordal_transform(vm, [pat]; x0=vm.init, labels=[:chordal])
-    @test dm.set_constraints.fs[1].set isa EqualTo  # the coupling equality
-    r = NonconvexCore.optimize(
-        dm, AugLagAlg(), d0; options=AugLagOptions(rho_init=100.0, ctol=1e-6)
-    )
-    xs = mapc(r.minimizer)
-    @test minimum(eigvals(Symmetric(P(xs)))) >= -1e-4
-    @test prod(xs) >= 0.16
+    if !isdefined(NonconvexSemidefinite, :chordal_transform)
+        # The registered 0.4.x has no chordal machinery (0.5, PR #37).
+        @test_skip "chordal decomposition requires NonconvexSemidefinite 0.5"
+    else
+        # min (x₁ - 0.2)² + (x₂ - 0.2)² s.t. the tridiagonal P(x) ⪰ 0,
+        # chordally decomposed: the unconstrained point (0.2, 0.2) is not PSD,
+        # so the constraint binds.
+        P(x) = [
+            x[1] 0.25 0.0 0.0
+            0.25 x[2] 0.25 0.0
+            0.0 0.25 x[1] 0.25
+            0.0 0.0 0.25 x[2]
+        ]
+        m = Model(x -> (x[1] - 0.2)^2 + (x[2] - 0.2)^2)
+        addvar!(m, [0.0, 0.0], [5.0, 5.0]; init=[2.0, 2.0])
+        add_set_constraint!(m, P, PSDCone(4); flags=[:chordal])
+        vm, x0, _ = NonconvexCore.tovecmodel(m, [2.0, 2.0])
+        pat = sparse(P(vm.init) .!= 0)
+        dm, d0, mapc = chordal_transform(vm, [pat]; x0=vm.init, labels=[:chordal])
+        @test dm.set_constraints.fs[1].set isa EqualTo  # the coupling equality
+        r = NonconvexCore.optimize(
+            dm, AugLagAlg(), d0; options=AugLagOptions(rho_init=100.0, ctol=1e-6)
+        )
+        xs = mapc(r.minimizer)
+        @test minimum(eigvals(Symmetric(P(xs)))) >= -1e-4
+        @test prod(xs) >= 0.16
 
-    # Equivalence with the dense (undecomposed) solve.
-    r2 = NonconvexCore.optimize(
-        vm, AugLagAlg(), [2.0, 2.0]; options=AugLagOptions(rho_init=100.0, ctol=1e-6)
-    )
-    @test minimum(eigvals(Symmetric(P(r2.minimizer)))) >= -1e-4
-    @test xs ≈ r2.minimizer atol = 5e-2
+        # Equivalence with the dense (undecomposed) solve.
+        r2 = NonconvexCore.optimize(
+            vm, AugLagAlg(), [2.0, 2.0]; options=AugLagOptions(rho_init=100.0, ctol=1e-6)
+        )
+        @test minimum(eigvals(Symmetric(P(r2.minimizer)))) >= -1e-4
+        @test xs ≈ r2.minimizer atol = 5e-2
+    end
 end
 
 @testitem "AugLagAlg: buckling-constrained truss (epigraph + set product)" begin
