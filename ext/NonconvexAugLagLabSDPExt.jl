@@ -22,8 +22,14 @@ import NonconvexAugLagLab:
     _set_psd_violation, _set_psd_init, _set_psd_term, _set_psd_update!
 import NonconvexAugLagLab: _set_is_psd, _component_dim
 using NonconvexSemidefinite: NonconvexSemidefinite
-using NonconvexSemidefinite: project_psd, project_psd_batch, psd_infeasibility,
-                       psd_neg_eig, psd_infeasibility_batch, partition_blocks, PSDCone
+using NonconvexSemidefinite:
+    project_psd,
+    project_psd_batch,
+    psd_infeasibility,
+    psd_neg_eig,
+    psd_infeasibility_batch,
+    partition_blocks,
+    PSDCone
 using NonconvexSemidefinite: NonconvexSemidefinite, ChainRulesCore
 # Block-aware helpers when a NonconvexSemidefinite with BlockSDConstraint is
 # loaded; fall back to the single-matrix contract for the registered 0.3.x.
@@ -166,18 +172,24 @@ _first_psd_dim(comps) = begin
     return -1
 end
 
-_batched_psd_ok(comps, penalty::Symbol) =
-    !(penalty in (:logdet, :mixed_logdet)) && begin
+function _batched_psd_ok(comps, penalty::Symbol)
+    return !(penalty in (:logdet, :mixed_logdet)) && begin
         d0 = _first_psd_dim(comps)
         ok = true
         for s in comps
-            s isa PSDCone && s.dim != d0 && (ok = false; break)
+            s isa PSDCone && s.dim != d0 && (ok=false; break)
         end
         ok
     end
+end
 
 function NonconvexAugLagLab._set_psd_terms(
-    Y::AbstractVector, ρ, v::Union{Tuple,AbstractVector}, comps::Union{Tuple,AbstractVector}, scales, penalty::Symbol
+    Y::AbstractVector,
+    ρ,
+    v::Union{Tuple,AbstractVector},
+    comps::Union{Tuple,AbstractVector},
+    scales,
+    penalty::Symbol,
 )
     if !_batched_psd_ok(comps, penalty)
         use_logdet = penalty in (:logdet, :mixed_logdet)
@@ -270,7 +282,9 @@ function ChainRulesCore.rrule(
                         Zk = Zs[k]
                         Δv[idx] = Δs .* (-Zk ./ sc)
                         ΔYs[k] = Δs .* ((Zk .- Yk) ./ ρ)
-                        Δρ += Δs * (-(sum(abs2, Zk) - sum(abs2, Yk)) / (2ρ^2) - dot(Zk, P) / ρ)
+                        Δρ +=
+                            Δs *
+                            (-(sum(abs2, Zk) - sum(abs2, Yk)) / (2ρ^2) - dot(Zk, P) / ρ)
                     end
                     k += 1
                 else
@@ -292,7 +306,8 @@ function ChainRulesCore.rrule(
     # batched path
     kpsd = [k for (k, set) in enumerate(comps) if set isa PSDCone]
     if isempty(kpsd)
-        return 0.0, _ -> (
+        return 0.0,
+        _ -> (
             ChainRulesCore.NoTangent(),
             ChainRulesCore.NoTangent(),
             ChainRulesCore.NoTangent(),
@@ -374,7 +389,10 @@ end
 # ------------------------------------------------------------------
 
 function NonconvexAugLagLab._set_psd_multiplier_terms(
-    Y::AbstractVector, v::Union{Tuple,AbstractVector}, comps::Union{Tuple,AbstractVector}, scales
+    Y::AbstractVector,
+    v::Union{Tuple,AbstractVector},
+    comps::Union{Tuple,AbstractVector},
+    scales,
 )
     s = 0.0
     k = 1

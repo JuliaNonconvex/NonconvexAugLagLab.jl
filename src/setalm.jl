@@ -336,19 +336,20 @@ end
 # (its penalty is zero); a PSD component is a modeling error. The
 # extension specializes this method with a more specific signature.
 function _set_psd_terms(Y, ρ, v, comps, scales, penalty)
-    any(_set_is_psd, comps) &&
-        return throw(
-            ArgumentError(
-                "Semidefinite components of set constraints are selected for " *
-                "relaxation but NonconvexSemidefinite is not loaded; load it to " *
-                "enable the projected augmented Lagrangian for semidefinite constraints.",
-            ),
-        )
+    any(_set_is_psd, comps) && return throw(
+        ArgumentError(
+            "Semidefinite components of set constraints are selected for " *
+            "relaxation but NonconvexSemidefinite is not loaded; load it to " *
+            "enable the projected augmented Lagrangian for semidefinite constraints.",
+        ),
+    )
     return 0.0
 end
 _set_psd_update!(Y, ρ, vi, penalty) = nothing
 
-function _set_psd_multiplier_terms(Y, v::Union{Tuple,AbstractVector}, comps::Union{Tuple,AbstractVector})
+function _set_psd_multiplier_terms(
+    Y, v::Union{Tuple,AbstractVector}, comps::Union{Tuple,AbstractVector}
+)
     return throw(
         ArgumentError(
             "Semidefinite components of set constraints are selected for " *
@@ -433,15 +434,7 @@ end
 # bundle-value cotangent natively (the batched PSD rule + closed forms for
 # the eq/ineq components) and routes it through the bundle's own rule.
 function ChainRulesCore.rrule(
-    ::typeof(_set_terms),
-    model::VecModel,
-    i::Int,
-    ρ,
-    x,
-    mults,
-    penalty::Symbol,
-    scales,
-    w,
+    ::typeof(_set_terms), model::VecModel, i::Int, ρ, x, mults, penalty::Symbol, scales, w
 )
     c = model.set_constraints.fs[i]
     y, λ, Y = mults
@@ -487,8 +480,7 @@ function ChainRulesCore.rrule(
             # zero (the forward would have thrown otherwise), so its
             # cotangents are all zero.
             psdr = ChainRulesCore.rrule(
-                _set_psd_terms, Y, ρ * w, v, comps,
-                fill(1.0, length(comps)), penalty,
+                _set_psd_terms, Y, ρ * w, v, comps, fill(1.0, length(comps)), penalty
             )
             if psdr === nothing
                 Δρ_psd = 0.0
@@ -512,8 +504,7 @@ function ChainRulesCore.rrule(
             for (k, vi, sc, g, gp, k_ineq, m, barrierized) in ineqrec
                 if barrierized
                     _, bk = Zygote.pullback(
-                        gg -> _set_terms_ineq_term(λ, ρ, w, gg, k_ineq, m, penalty),
-                        g,
+                        gg -> _set_terms_ineq_term(λ, ρ, w, gg, k_ineq, m, penalty), g
                     )
                     Δvk = bk(Δs)[1] .* _violation_jacobian(vi, comps[k]) ./ sc
                     Δv[k] = vi isa AbstractVector ? _collapse_cot(Δvk) : only(Δvk)
@@ -614,8 +605,11 @@ function _violation_jacobian(vi, set)
         D = zeros(m, length(vi))
         for i in 1:length(vi)
             for j in 1:m
-                D[j, i] = (g(vi .+ (1e-6) * (1 .+ abs.(vi)) .* (1:length(vi) .== i))[j] -
-                           g(vi .- (1e-6) * (1 .+ abs.(vi)) .* (1:length(vi) .== i))[j]) / (2e-6)
+                D[j, i] =
+                    (
+                        g(vi .+ (1e-6) * (1 .+ abs.(vi)) .* (1:length(vi) .== i))[j] -
+                        g(vi .- (1e-6) * (1 .+ abs.(vi)) .* (1:length(vi) .== i))[j]
+                    ) / (2e-6)
             end
         end
         return D

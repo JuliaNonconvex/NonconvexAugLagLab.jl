@@ -10,9 +10,7 @@
     m = Model(x -> sum(abs2, x .- [1.0, 2.0]))
     addvar!(m, [0.0, 0.0], [5.0, 5.0])
     add_set_constraint!(
-        m,
-        x -> (sum(x) - 3.0, x[2] - x[1]),
-        SetProduct(EqualTo(0.0), GreaterThan(0.0)),
+        m, x -> (sum(x) - 3.0, x[2] - x[1]), SetProduct(EqualTo(0.0), GreaterThan(0.0))
     )
     r = optimize(m, AugLagAlg(), [0.0, 0.0])
     @test r.minimizer ≈ [1.0, 2.0] atol = 1e-3
@@ -84,9 +82,7 @@ end
     addvar!(m, 0.0, 1.0)
     rng = MersenneTwister(42)
     scenarios = [rand(rng, Uniform01()) for _ in 1:1000]
-    add_chance_constraint!(
-        m, (x, ξ) -> x[1] + ξ, scenarios, LessThan(1.0); epsilon=0.1,
-    )
+    add_chance_constraint!(m, (x, ξ) -> x[1] + ξ, scenarios, LessThan(1.0); epsilon=0.1)
     r = optimize(m, AugLagAlg(), [0.0]; options=AugLagOptions(ctol=1e-4))
     # The smoothed exceedance drives p̂ = ε: with the tanh surrogate
     # p̂(x) = log(cosh(5x))/5, ε = 0.1 ⇔ x ≈ 0.226 (the smoothing
@@ -236,26 +232,25 @@ end
         return minimum(v for v in F.values if isfinite(v) && v > 0)
     end
 
-    bundle = x -> begin
-        t = x[end]
-        xd = x[1:n]
-        K0, _ = assemble(xd, zeros(ndof))
-        u = scatter(K0 \ f_load[free])
-        K, Kσ = assemble(xd, u)
-        return (
-            dot(f_load[free], u[length(fixed) + 1:end]) - t,
-            sum(xd .* Ls) / sum(Ls) - Vbar,
-            K + cbeta * Kσ,
-        )
-    end
+    bundle =
+        x -> begin
+            t = x[end]
+            xd = x[1:n]
+            K0, _ = assemble(xd, zeros(ndof))
+            u = scatter(K0 \ f_load[free])
+            K, Kσ = assemble(xd, u)
+            return (
+                dot(f_load[free], u[(length(fixed) + 1):end]) - t,
+                sum(xd .* Ls) / sum(Ls) - Vbar,
+                K + cbeta * Kσ,
+            )
+        end
 
     # Baseline: minimum compliance with the volume constraint only.
     m0 = Model(x -> x[end])
     addvar!(m0, fill(1e-3, n), ones(n); init=fill(Vbar, n), flags=[:design])
     add_set_variable!(m0, Interval(0.0, Inf); init=[1.0])
-    add_set_constraint!(
-        m0, x -> bundle(x)[1:2], SetProduct(LessThan(0.0), LessThan(0.0))
-    )
+    add_set_constraint!(m0, x -> bundle(x)[1:2], SetProduct(LessThan(0.0), LessThan(0.0)))
     vm0, x0v, _ = NonconvexCore.tovecmodel(m0, [fill(Vbar, n); 1.0])
     r0 = NonconvexCore.optimize(
         vm0, AugLagAlg(), [fill(Vbar, n); 1.0]; options=AugLagOptions(ctol=1e-6)
@@ -277,9 +272,7 @@ end
     m = Model(x -> x[end])
     addvar!(m, fill(1e-3, n), ones(n); init=copy(x0), flags=[:design])
     add_set_variable!(m, Interval(0.0, Inf); init=[t0])
-    add_set_constraint!(
-        m, bundle, SetProduct(LessThan(0.0), LessThan(0.0), PSDCone(4))
-    )
+    add_set_constraint!(m, bundle, SetProduct(LessThan(0.0), LessThan(0.0), PSDCone(4)))
     vm, xv, _ = NonconvexCore.tovecmodel(m, [x0; t0])
     r = NonconvexCore.optimize(
         vm,
@@ -311,9 +304,7 @@ end
         cnt[] += 1
         return (x[1] - 2.0, x[2] - 2.0, [x[1] + x[2] - 2.0;;])
     end
-    add_set_constraint!(
-        m, f, SetProduct(LessThan(0.0), LessThan(0.0), PSDCone(1))
-    )
+    add_set_constraint!(m, f, SetProduct(LessThan(0.0), LessThan(0.0), PSDCone(1)))
     r = optimize(m, AugLagAlg(), [0.0, 0.0]; options=AugLagOptions(max_iter=30))
     @test r.minimizer ≈ [1.0, 1.0] atol = 1e-3
     # Three components but one shared evaluation: the bundle must not run

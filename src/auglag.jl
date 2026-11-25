@@ -37,7 +37,7 @@ vector of constraint indices (relax those only). In addition, `labels`
 friends) contain one of the given labels — independently of the kind
 selection. Box constraints are always handled by the sub-solver.
 
-`sets` selects the function-in-set constraints ([`FunctionInSet`](@ref)).
+`sets` selects the function-in-set constraints (`NonconvexCore.FunctionInSet`).
 Relaxing one splits its components into the equivalent classical
 constraints (equality components as equalities, order/simplex/chance
 components as inequalities, `PSDCone` components as semidefinite
