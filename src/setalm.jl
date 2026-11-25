@@ -48,6 +48,24 @@ function _set_components(c::FunctionInSet, x)
     return v, comps
 end
 
+# As `_set_components`, but also returns the bundle's RAW output (before
+# `set_value` normalizes it into a tuple/vector of components). The pullback
+# must rebuild the cotangent in the shape of `c.f(x)` itself: a bundle that
+# returns a single object (e.g. the symmetrized PSD matrix of a variable
+# cone constraint) has a matrix/scalar cotangent, not a 1-tuple of it.
+function _raw_components(c::FunctionInSet, x)
+    raw = c(x)
+    comps = components(c.set)
+    v = if raw isa Tuple
+        raw
+    elseif raw isa AbstractVector && length(comps) > 1 && length(raw) == length(comps)
+        raw
+    else
+        (raw,)
+    end
+    return v, comps, raw
+end
+
 # One scale per component of a set constraint: the component's reference
 # magnitude max |vᵢ(x₀)|, floored at 1. A value-based normalization makes
 # the residuals unit-free while keeping the penalty weights meaningful; a
@@ -312,6 +330,22 @@ function _set_psd_terms(Y, ρ, v::Tuple, comps::Tuple, penalty)
         ),
     )
 end
+
+# The 6-argument form used by the ALM loop. Without the SDP extension
+# loaded there is nothing to do when the bundle has no PSD components
+# (its penalty is zero); a PSD component is a modeling error. The
+# extension specializes this method with a more specific signature.
+function _set_psd_terms(Y, ρ, v, comps, scales, penalty)
+    any(_set_is_psd, comps) &&
+        return throw(
+            ArgumentError(
+                "Semidefinite components of set constraints are selected for " *
+                "relaxation but NonconvexSemidefinite is not loaded; load it to " *
+                "enable the projected augmented Lagrangian for semidefinite constraints.",
+            ),
+        )
+    return 0.0
+end
 _set_psd_update!(Y, ρ, vi, penalty) = nothing
 
 function _set_psd_multiplier_terms(Y, v::Union{Tuple,AbstractVector}, comps::Union{Tuple,AbstractVector})
@@ -411,7 +445,7 @@ function ChainRulesCore.rrule(
 )
     c = model.set_constraints.fs[i]
     y, λ, Y = mults
-    v, comps = _set_components(c, x)
+    v, comps, raw = _raw_components(c, x)
     s = _set_psd_terms(Y, ρ * w, v, comps, fill(1.0, length(comps)), penalty)
     eqrec = Any[]      # (slot, vi, sc, g, y-range)
     ineqrec = Any[]    # (slot, vi, sc, g, λ-range)
@@ -448,22 +482,31 @@ function ChainRulesCore.rrule(
             Δv[k] = ChainRulesCore.NoTangent()
         end
         if !(Δs isa ChainRulesCore.AbstractZero)
-            # PSD components: the batched rule (native)
-            _, _, Δρp, Δv_psd, _, _, _ = ChainRulesCore.rrule(
+            # PSD components: the batched rule (native). Without the SDP
+            # extension there is no rrule and the PSD penalty is identically
+            # zero (the forward would have thrown otherwise), so its
+            # cotangents are all zero.
+            psdr = ChainRulesCore.rrule(
                 _set_psd_terms, Y, ρ * w, v, comps,
                 fill(1.0, length(comps)), penalty,
-            )[2](Δs)
-            Δρ_psd = Δρp * w
-            for k in 1:nv
-                if !(Δv_psd[k] isa ChainRulesCore.AbstractZero)
-                    Δv[k] = Δv_psd[k]
+            )
+            if psdr === nothing
+                Δρ_psd = 0.0
+            else
+                _, _, Δρp, Δv_psd, _, _, _ = psdr[2](Δs)
+                Δρ_psd = Δρp * w
+                for k in 1:nv
+                    if !(Δv_psd[k] isa ChainRulesCore.AbstractZero)
+                        Δv[k] = Δv_psd[k]
+                    end
                 end
             end
             Δρ_eqineq = 0.0
             for (k, vi, sc, g, k_eq, m) in eqrec
                 D = _violation_jacobian(vi, comps[k])   # diagonal indicators
                 yy = @view y[k_eq:(k_eq + m - 1)]
-                Δv[k] = Δs .* (D .* (yy .+ ρ * w .* g) ./ sc)
+                Δvk = Δs .* (D .* (yy .+ ρ * w .* g) ./ sc)
+                Δv[k] = vi isa AbstractVector ? _collapse_cot(Δvk) : only(Δvk)
                 Δρ_eqineq += Δs * (w / 2) * dot(g, g)
             end
             for (k, vi, sc, g, gp, k_ineq, m, barrierized) in ineqrec
@@ -472,21 +515,34 @@ function ChainRulesCore.rrule(
                         gg -> _set_terms_ineq_term(λ, ρ, w, gg, k_ineq, m, penalty),
                         g,
                     )
-                    Δv[k] = bk(Δs)[1] .* _violation_jacobian(vi, comps[k]) ./ sc
+                    Δvk = bk(Δs)[1] .* _violation_jacobian(vi, comps[k]) ./ sc
+                    Δv[k] = vi isa AbstractVector ? _collapse_cot(Δvk) : only(Δvk)
                     Δρ_eqineq += 0.0   # barrier branch: ρ handled by Zygote fallback below
                     Δρ_eqineq += Δs * 0.0
                 else
                     λλ = @view λ[k_ineq:(k_ineq + m - 1)]
                     D = _violation_jacobian(vi, comps[k])
                     Dp = D .* (gp .> 0.0)
-                    Δv[k] = Δs .* (Dp .* (λλ .+ ρ * w .* gp) ./ sc)
+                    Δvk = Δs .* (Dp .* (λλ .+ ρ * w .* gp) ./ sc)
+                    Δv[k] = vi isa AbstractVector ? _collapse_cot(Δvk) : only(Δvk)
                     Δρ_eqineq += Δs * (w / 2) * dot(gp, gp)
                 end
             end
             Δρ = Δρ_psd + Δρ_eqineq
             # through the bundle's own rule (native forward + native
             # pullback); c.f is the bundle closure (e.g. x -> bec(filt(x))).
-            rΔx = Zygote.pullback(c.f, x)[2](Δv)
+            # The cotangent keeps the RAW output's shape: a tuple bundle
+            # gets a tuple cotangent, a kept vector bundle a vector, and a
+            # single object (e.g. the PSD matrix of a variable cone
+            # constraint) the object itself — never a 1-tuple wrapper.
+            # Chance bundles have a two-argument f(x, ξ): their pullback
+            # traces the native scenario loop instead.
+            Δv_shaped = v === raw ? (raw isa Tuple ? Tuple(Δv) : Δv) : only(Δv)
+            rΔx = if c.set isa ChanceSet
+                Zygote.pullback(x -> [c.f(x, ξ) for ξ in c.set.scenarios], x)[2](Δv_shaped)
+            else
+                Zygote.pullback(c.f, x)[2](Δv_shaped)
+            end
             Δx = rΔx isa Tuple ? last(rΔx) : rΔx
         else
             Δρ = zero(ρ)
@@ -507,31 +563,60 @@ function ChainRulesCore.rrule(
     return s, _set_terms_pb
 end
 
+# The value cotangent of one component: the violation Jacobian is an
+# m-vector for the order sets (entrywise) but an m×n MATRIX for sets whose
+# violation is longer than the value (e.g. Simplex: n+1 rows). The matrix
+# case collapses over the violation entries: Δv = Dᵀ (∂s/∂g).
+_collapse_cot(Δvk::AbstractMatrix) = vec(sum(Δvk; dims=1))
+_collapse_cot(Δvk) = Δvk
+
 # The derivative of a component violation g(v) w.r.t. v, as the diagonal
 # indicator matrix (all the order-set violations are entrywise max-plus
 # linear).
 function _violation_jacobian(vi, set)
     if set isa EqualTo
-        return ones(length(vi))
+        # g = |vi - value|  →  ∂g/∂vi = sign(vi - value)
+        return sign.(vi .- set.value)
     elseif set isa Zeros
-        return ones(length(vi))
+        # g = |vi|  →  ∂g/∂vi = sign(vi)
+        return sign.(vi)
     elseif set isa LessThan
+        # g = max(vi - upper, 0)  →  ∂g/∂vi = (vi > upper)
         return Float64.(vi .> set.upper)
     elseif set isa GreaterThan
-        return Float64.(vi .< set.lower)
+        # g = max(lower - vi, 0)  →  ∂g/∂vi = -(vi < lower)
+        return -Float64.(vi .< set.lower)
     elseif set isa Interval
+        # g = max(lower - vi, vi - upper, 0)
         return Float64.((vi .> set.upper) .- (vi .< set.lower))
     elseif set isa Nonnegatives
-        return Float64.(vi .< 0)
+        # g = max(-vi, 0)  →  ∂g/∂vi = -(vi < 0)
+        return -Float64.(vi .< 0)
     elseif set isa Nonpositives
+        # g = max(vi, 0)  →  ∂g/∂vi = (vi > 0)
         return Float64.(vi .> 0)
+    elseif set isa Simplex
+        # g(v) = [max(-v, 0)..., |sum(v) - 1|]: an (n+1)-row Jacobian —
+        # diag(-(v .< 0)) for the nonnegativity violations and a constant
+        # sign(sum(v)-1) last row for the sum violation.
+        n = length(vi)
+        D = zeros(n + 1, n)
+        for j in 1:n
+            D[j, j] = -Float64(vi[j] < 0)
+        end
+        D[n + 1, :] .= sign(sum(vi) - 1.0)
+        return D
     else
-        # generic fallback: entrywise numeric jacobian of the small vector
+        # generic fallback: numeric jacobian of the small vector (m rows for
+        # the m violation entries, n columns for the n value entries).
         g(v) = _component_violation(v, set)
-        D = zeros(length(vi), length(vi))
-        for j in 1:length(vi)
-            D[j, j] = (g(vi .+ (1e-6) * (1 .+ abs.(vi)) .* (1:length(vi) .== j))[j] -
-                       g(vi .- (1e-6) * (1 .+ abs.(vi)) .* (1:length(vi) .== j))[j]) / (2e-6)
+        m = length(g(vi))
+        D = zeros(m, length(vi))
+        for i in 1:length(vi)
+            for j in 1:m
+                D[j, i] = (g(vi .+ (1e-6) * (1 .+ abs.(vi)) .* (1:length(vi) .== i))[j] -
+                           g(vi .- (1e-6) * (1 .+ abs.(vi)) .* (1:length(vi) .== i))[j]) / (2e-6)
+            end
         end
         return D
     end
