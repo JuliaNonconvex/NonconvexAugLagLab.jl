@@ -1,5 +1,21 @@
 # NEWS
 
+## Unreleased
+
+- **Sets support** (function-in-set constraints and set variables in the
+  augmented Lagrangian): `AugLagAlg` relaxes `FunctionInSet` constraints
+  (incl. `SetProduct` bundles with PSD, simplex and chance components) and
+  handles `VariableInSet` blocks. The `_set_terms` ALM penalty has one
+  analytic rule — the forward is a native loop over the bundle components
+  (no traced per-component loops) and the pullback assembles the
+  bundle-value cotangent natively (batched PSD rule + closed forms for
+  the order/simplex components) and routes it through the bundle's own
+  rule in the raw output's shape. Bundles with only eq/ineq components
+  now optimize without the SDP extension loaded, and chance bundles
+  (two-argument `f(x, ξ)`) pull back through the native scenario loop.
+- Fix the violation-Jacobian signs of the set ALM (`EqualTo`/`Zeros` use
+  `sign`, `GreaterThan`/`Nonnegatives` get their minus back) — the set
+  penalty gradient was sign-flipped for these components.
 ## 0.5.1
 
 - Docs: the logo now appears only in the sidebar, not in the page body.
