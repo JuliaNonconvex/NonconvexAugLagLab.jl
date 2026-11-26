@@ -1,6 +1,6 @@
 # NEWS
 
-## Unreleased
+## 0.5.2
 
 - **Sets support** (function-in-set constraints and set variables in the
   augmented Lagrangian): `AugLagAlg` relaxes `FunctionInSet` constraints
@@ -16,6 +16,8 @@
 - Fix the violation-Jacobian signs of the set ALM (`EqualTo`/`Zeros` use
   `sign`, `GreaterThan`/`Nonnegatives` get their minus back) — the set
   penalty gradient was sign-flipped for these components.
+- A NonconvexUno extension forwards the ALM's adaptive subproblem
+  tolerances to the Uno sub-solver.
 ## 0.5.1
 
 - Docs: the logo now appears only in the sidebar, not in the page body.
