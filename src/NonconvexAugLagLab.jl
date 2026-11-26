@@ -22,11 +22,18 @@ using NonconvexCore:
     VectorOfFunctions,
     AbstractResult,
     GenericResult,
-    Tolerance
+    Tolerance,
+    EqConstraint,
+    IneqConstraint,
+    SDConstraint,
+    FunctionInSet,
+    VariableInSet,
+    getinit
 import NonconvexCore: Workspace, optimize!, _optimize_precheck
 
 include("qn.jl")
 include("auglag.jl")
+include("setalm.jl")
 include("sqsdp.jl")
 
 end

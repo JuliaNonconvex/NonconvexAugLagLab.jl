@@ -26,7 +26,8 @@
 # one workspace (`warm_continue = true`). See docs/theory for the details.
 
 """
-    RelaxConstraintSelection(; eq = true, ineq = true, sd = true, labels = nothing)
+    RelaxConstraintSelection(; eq = true, ineq = true, sd = true, sets = true,
+                              labels = nothing)
 
 Selects which constraints are relaxed into the augmented Lagrangian. Each
 kind entry is `true` (relax all of that kind), `false` (keep all hard) or a
@@ -36,9 +37,17 @@ vector of constraint indices (relax those only). In addition, `labels`
 friends) contain one of the given labels — independently of the kind
 selection. Box constraints are always handled by the sub-solver.
 
+`sets` selects the function-in-set constraints (`NonconvexCore.FunctionInSet`).
+Relaxing one splits its components into the equivalent classical
+constraints (equality components as equalities, order/simplex/chance
+components as inequalities, `PSDCone` components as semidefinite
+constraints handled by the projected augmented Lagrangian — which requires
+NonconvexSemidefinite to be loaded); the split components are then always
+relaxed.
+
 ```julia
 # relax every constraint carrying the :relax flag, keep the rest hard
-RelaxConstraintSelection(eq = false, ineq = false, sd = false, labels = [:relax])
+RelaxConstraintSelection(eq = false, ineq = false, sd = false, sets = false, labels = [:relax])
 
 # all equalities, plus anything flagged :relax
 RelaxConstraintSelection(labels = :relax)
@@ -48,19 +57,20 @@ struct RelaxConstraintSelection
     eq::Union{Bool,AbstractVector{Int}}
     ineq::Union{Bool,AbstractVector{Int}}
     sd::Union{Bool,AbstractVector{Int}}
+    sets::Union{Bool,AbstractVector{Int}}
     labels::Union{Nothing,Set{Symbol}}
 end
-function RelaxConstraintSelection(; eq=true, ineq=true, sd=true, labels=nothing)
+function RelaxConstraintSelection(; eq=true, ineq=true, sd=true, sets=true, labels=nothing)
     lbls = if labels === nothing
         nothing
-    elseif labels isa Union{AbstractVector,Tuple,AbstractSet}
+    elseif labels isa Union{AbstractVector,Tuple,Base.AbstractSet}
         Set(Symbol.(labels))
     else
         # a single label (Symbol or String): Symbol.(x) would broadcast
         # (and a bare Set(x) cannot iterate a scalar), so wrap it first
         Set([Symbol(labels)])
     end
-    return RelaxConstraintSelection(eq, ineq, sd, lbls)
+    return RelaxConstraintSelection(eq, ineq, sd, sets, lbls)
 end
 
 function _relaxed_indices(sel::Bool, n::Int)
@@ -105,7 +115,7 @@ end
 function SecondOrderSelection(; eq=true, ineq=true, labels=nothing)
     lbls = if labels === nothing
         nothing
-    elseif labels isa Union{AbstractVector,Tuple,AbstractSet}
+    elseif labels isa Union{AbstractVector,Tuple,Base.AbstractSet}
         Set(Symbol.(labels))
     else
         Set([Symbol(labels)])
@@ -190,6 +200,14 @@ function NonconvexCore.solver_capabilities(alg::AugLagAlg)
             nonlinear_ineq=true,
             linear_sd=true,
             nonlinear_sd=true,
+            sets_eq=true,
+            sets_ineq=true,
+            sets_sd=true,
+            sets_simplex=true,
+            sets_product=true,
+            sets_chance=true,
+            variable_sets_sd=true,
+            variable_sets_simplex=true,
             box=true,
             continuous=true,
             binary=false,
@@ -206,6 +224,14 @@ function NonconvexCore.solver_capabilities(alg::AugLagAlg)
         nonlinear_ineq=true,
         linear_sd=true,
         nonlinear_sd=true,
+        sets_eq=true,
+        sets_ineq=true,
+        sets_sd=true,
+        sets_simplex=true,
+        sets_product=true,
+        sets_chance=true,
+        variable_sets_sd=true,
+        variable_sets_simplex=true,
     )
 end
 
@@ -530,19 +556,20 @@ end
   per-group reverse passes cost more than the single composed pass on
   this one-group problem; off by default, an architecture/robustness
   option for multi-group problems.
-- `stop_kkt`, `kkt_tol`: (opt-in) extend the convergence test from
-  feasibility-only to KKT-complete: once `vnorm ≤ ctol`, the solve also
-  requires the box-projected gradient of the scaled Lagrangian at the
-  current multipliers to satisfy `≤ kkt_tol` (default `1e-6`) and the
-  complementarity residual `max |λⱼgⱼ|` over the relaxed inequalities to
-  satisfy `≤ kkt_tol`. Costs one Lagrangian-gradient assembly per outer
-  iteration once feasible. Measured on the TopOpt local-stress
-  single-level solve: at the default `kkt_tol = 1e-6` the stationarity
-  test never fires within 100 outer iterations (the multiplier-error
-  scale is ~ρ·viol, so the Lagrangian residual stalls around 1e-4-1e-3
-  on this 1600-constraint problem) and the solve refines to viol 1.8e-8
-  in 1819.8 s — opt-in, use a looser `kkt_tol` (≳ 1e-4) or bound the run
-  with `max_time`.
+- `stop_kkt`, `kkt_tol`: opt-in KKT-complete stopping (default `false`,
+  the historical feasibility-only test): with `stop_kkt = true`, once
+  `vnorm ≤ ctol` the solve also requires the box-projected gradient
+  of the scaled Lagrangian at the current multipliers to satisfy
+  `≤ kkt_tol` (default `1e-6`) and the complementarity residual
+  `max |λⱼgⱼ|` over the relaxed inequalities to satisfy `≤ kkt_tol`.
+  Costs one Lagrangian-gradient assembly per outer iteration once
+  feasible. A feasibility-only solve would terminate at any feasible
+  iterate — including the starting point of a feasible-start problem —
+  so stationarity is available as an opt-in; the tolerance is set at
+  the residual plateau measured on the TopOpt local-stress single-level
+  solve (the multiplier-error scale is ~ρ·viol, so the Lagrangian
+  residual stalls around 1e-4-1e-3 on that 1600-constraint problem, where
+  the old `1e-6` default never fired within 100 outer iterations).
 - `outer_schedule`: `:bm` (the default) — the Birgin–Martínez complexity
   scaling where both the feasibility target `η` and the subproblem accuracy
   target `ω` tighten with the full `1/ρ` factor on good steps (and reset
@@ -553,10 +580,16 @@ end
   worse final accuracy (viol 5.7e-6 vs 1.2e-6), and on Rosetta AC-OPF
   case5 it is 16% faster (217 vs 258 s) with marginally better feasibility
   (viol 0.366 vs 0.369).
-- `scaling`: normalize the relaxed constraints by their gradient magnitudes
-  and the objective by its initial magnitude (Curtis–Jiang–Robinson style
-  scaling), so the penalty applies to balanced, unit-scaled constraint
-  violations (default `true`).
+- `scaling`: normalize the relaxed constraints and the objective by their
+  reference magnitudes, so the penalty applies to balanced, unit-scaled
+  constraint violations (default `true`).
+- `scale_mode`: the constraint scale scheme — `:gradient` (default, the
+  historical scheme) uses the Curtis–Jiang–Robinson-style
+  finite-difference gradient-magnitude probe per group; `:value` scales
+  each group/component by its reference magnitude `max |c(x₀)|` (unit-free
+  residuals, penalty weights independent of the constraint's derivative
+  scale, which can be unrelated to its values when the function involves a
+  linear solve).
 - `two_level`, `two_level_iters`, `two_level_tau`: (experimental, opt-in)
   two-level semi-proximal inner loop for the semidefinite block
   (SDPNAL+-style sPADMM adapted to nonlinear `P(x)`, plan S2 option B):
@@ -631,6 +664,7 @@ mutable struct AugLagOptions{S,R,W}
     rho_incr::Real
     rho_decr::Real
     auto_rho_init::Bool
+    auto_weights::Bool
     curvature::Symbol
     prox::Real
     max_iter::Int
@@ -640,6 +674,7 @@ mutable struct AugLagOptions{S,R,W}
     weights::W
     lsq_multipliers::Bool
     scaling::Bool
+    scale_mode::Symbol
     memory::Int
     elastic::Bool
     elastic_mu::Real
@@ -695,6 +730,7 @@ function AugLagOptions(;
     rho_incr::Real=10.0,
     rho_decr::Real=10.0,
     auto_rho_init::Bool=false,
+    auto_weights::Bool=false,
     curvature::Symbol=:lbfgs,
     prox::Real=0.0,
     max_iter::Int=1000,
@@ -704,6 +740,7 @@ function AugLagOptions(;
     weights=nothing,
     lsq_multipliers::Bool=true,
     scaling::Bool=true,
+    scale_mode::Symbol=:gradient,
     memory::Int=50,
     elastic::Bool=false,
     elastic_mu::Real=1e3,
@@ -763,6 +800,8 @@ function AugLagOptions(;
     first_sub_iters >= 1 || throw(ArgumentError("first_sub_iters must be >= 1"))
     max_time > 0 || throw(ArgumentError("max_time must be positive"))
     kkt_tol > 0 || throw(ArgumentError("kkt_tol must be positive"))
+    scale_mode in (:value, :gradient) ||
+        throw(ArgumentError("scale_mode must be :value or :gradient"))
     (second_order === nothing || second_order isa SecondOrderSelection) ||
         throw(ArgumentError("second_order must be a SecondOrderSelection or nothing"))
     two_level_iters >= 1 || throw(ArgumentError("two_level_iters must be >= 1"))
@@ -800,6 +839,7 @@ function AugLagOptions(;
         rho_incr,
         rho_decr,
         auto_rho_init,
+        auto_weights,
         curvature,
         prox,
         max_iter,
@@ -809,6 +849,7 @@ function AugLagOptions(;
         weights,
         lsq_multipliers,
         scaling,
+        scale_mode,
         memory,
         elastic,
         elastic_mu,
@@ -905,11 +946,35 @@ function Workspace(
                 "or pass a sub_alg.",
             ),
         )
+        nsets = length(_relaxed_indices(sel.sets, model.set_constraints, sel.labels))
+        ntotal_sets = length(model.set_constraints.fs)
+        nsets == ntotal_sets || throw(
+            ArgumentError(
+                "AugLagAlg() cannot keep function-in-set constraints hard for the " *
+                "built-in QuasiNewtonAlg; relax them (`RelaxConstraintSelection(sets = true)`) " *
+                "or pass a sub_alg.",
+            ),
+        )
         # kept (non-relaxed) equality/inequality constraints are allowed:
         # they are folded into the built-in subproblem as a smooth quadratic
         # penalty with weight hard_rho (see the hard_rho option).
     end
     return AugLagWorkspace(model, copy(x0), options, optimizer.sub_alg, nothing)
+end
+
+# Convenience: default to the model's initial point when no x0 is given.
+function Workspace(
+    model::VecModel,
+    optimizer::AugLagAlg,
+    args...;
+    options::AugLagOptions=AugLagOptions(),
+    kwargs...,
+)
+    isempty(args) &&
+        return Workspace(model, optimizer, getinit(model); options=options, kwargs...)
+    return Workspace(
+        model, optimizer, args[1], Base.tail(args)...; options=options, kwargs...
+    )
 end
 
 # ------------------------------------------------------------------
@@ -944,22 +1009,32 @@ function _subproblem(
     eq_rel = _relaxed_indices(sel.eq, model.eq_constraints, sel.labels)
     ineq_rel = _relaxed_indices(sel.ineq, model.ineq_constraints, sel.labels)
     sd_rel = _relaxed_indices(sel.sd, model.sd_constraints, sel.labels)
-    kept_eq = VectorOfFunctions([
-        c for (i, c) in enumerate(model.eq_constraints.fs) if !(i in eq_rel)
-    ],)
-    kept_ineq = VectorOfFunctions([
-        c for (i, c) in enumerate(model.ineq_constraints.fs) if !(i in ineq_rel)
-    ],)
-    kept_sd = VectorOfFunctions([
-        c for (i, c) in enumerate(model.sd_constraints.fs) if !(i in sd_rel)
-    ],)
+    sets_rel = _relaxed_indices(sel.sets, model.set_constraints, sel.labels)
+    kept_eq = VectorOfFunctions(
+        EqConstraint[c for (i, c) in enumerate(model.eq_constraints.fs) if !(i in eq_rel)]
+    )
+    kept_ineq = VectorOfFunctions(
+        IneqConstraint[
+            c for (i, c) in enumerate(model.ineq_constraints.fs) if !(i in ineq_rel)
+        ],
+    )
+    kept_sd = VectorOfFunctions(
+        SDConstraint[c for (i, c) in enumerate(model.sd_constraints.fs) if !(i in sd_rel)]
+    )
+    kept_sets = VectorOfFunctions(
+        FunctionInSet[
+            c for (i, c) in enumerate(model.set_constraints.fs) if !(i in sets_rel)
+        ],
+    )
     return eq_rel,
-    ineq_rel, sd_rel,
+    ineq_rel, sd_rel, sets_rel,
     VecModel(
         model.objective,
         kept_eq,
         kept_ineq,
         kept_sd,
+        kept_sets,
+        VariableInSet[],
         model.box_min,
         model.box_max,
         model.init,
@@ -1011,6 +1086,34 @@ function _unit_weights(weights, indices)
     return weights
 end
 
+# The per-group penalty-gradient weight of one group: w = |grad f| / |grad
+# 1/2||viol||^2| at x0, clamped -- so each group's penalty force at the unit
+# violation balances the objective gradient (auto_weights).
+function _auto_weight(g, x, gscale)
+    _, dg = NonconvexCore.value_gradient(z -> sum(abs2, _vecval(g(z))) / 2, x)
+    dg === nothing && return 1.0
+    return clamp(gscale / max(norm(dg), 1e-8), 1.0, 1e6)
+end
+function _auto_weight_set(model, i, x, sc, gscale)
+    g = z -> _set_violation(model, i, z, sc)
+    _, dg = NonconvexCore.value_gradient(z -> sum(abs2, g(z)) / 2, x)
+    dg === nothing && return 1.0
+    return clamp(gscale / max(norm(dg), 1e-8), 1.0, 1e6)
+end
+
+# The per-group weights in the order [eq; ineq; sets].
+function _group_weights(weights, neq, nineq, nsets)
+    weights === nothing && return (ones(neq), ones(nineq), ones(nsets))
+    length(weights) == neq + nineq + nsets || throw(
+        ArgumentError(
+            "weights must have one entry per relaxed constraint group in the order [eq; ineq; sets] ($(neq + nineq + nsets) groups), got $(length(weights)).",
+        ),
+    )
+    return (
+        weights[1:neq], weights[(neq + 1):(neq + nineq)], weights[(neq + nineq + 1):end]
+    )
+end
+
 function _auglag_objective(
     model::VecModel,
     sel::RelaxConstraintSelection,
@@ -1022,7 +1125,7 @@ function _auglag_objective(
     penalty::Symbol,
     b_ineq=nothing,
 )
-    eq_rel, ineq_rel, _, _ = _subproblem(model, sel, nothing)
+    eq_rel, ineq_rel, _, _, _ = _subproblem(model, sel, nothing)
     objective0 = model.objective
     objective0 === nothing && throw(ArgumentError("The model has no objective."))
     w_eq = _unit_weights(weights, eq_rel)
@@ -1062,7 +1165,7 @@ end
 # Multiplier buffers per constraint group (one vector of multipliers per
 # relaxed constraint).
 function _init_multipliers(model, sel)
-    eq_rel, ineq_rel, _, _ = _subproblem(model, sel, nothing)
+    eq_rel, ineq_rel, _, _, _ = _subproblem(model, sel, nothing)
     y = [zeros(length(_vecval(model.eq_constraints.fs[i](model.init)))) for i in eq_rel]
     λ = [zeros(length(_vecval(model.ineq_constraints.fs[i](model.init)))) for i in ineq_rel]
     return y, λ
@@ -1078,30 +1181,45 @@ end
 # the largest gradient magnitude at the initial point (capped below at 1) and
 # the objective by its initial magnitude, then run the classical algorithm on
 # the balanced problem; the returned objective is unscaled.
-function _group_scales(model::VecModel, sel, x0)
-    eq_rel, ineq_rel, _, _ = _subproblem(model, sel, nothing)
+function _group_scales(model::VecModel, sel, x0, scale_mode::Symbol)
+    eq_rel, ineq_rel, _, _, _ = _subproblem(model, sel, nothing)
     scales = Float64[]
-    # Gradient-magnitude scale from one finite-difference probe per group:
-    # ‖c(x₀ + δ) - c(x₀)‖ / ‖δ‖ estimates the group's gradient magnitude
-    # without materializing any Jacobian (a full Jacobian of a large
-    # vector-valued constraint would be an N×N dense matrix).
-    δ = 1e-6 .* (1 .+ abs.(x0))
-    δnorm = norm(δ)
-    for (kind, rel) in (("eq", eq_rel), ("ineq", ineq_rel))
-        fs = kind == "eq" ? model.eq_constraints.fs : model.ineq_constraints.fs
-        for i in rel
-            c = fs[i]
-            c0 = _vecval(c(x0))
-            c1 = _vecval(c(x0 .+ δ))
-            d = norm(c1 .- c0) / δnorm
-            push!(scales, max(1.0, d))
+    if scale_mode === :value
+        # Value-based (the default): each group is scaled by its reference
+        # magnitude, making the residuals unit-free regardless of the
+        # group's derivative scale.
+        for (kind, rel) in (("eq", eq_rel), ("ineq", ineq_rel))
+            fs = kind == "eq" ? model.eq_constraints.fs : model.ineq_constraints.fs
+            for i in rel
+                v0 = _vecval(fs[i](x0))
+                sc = maximum(abs, v0)
+                push!(scales, (isfinite(sc) && sc >= 1.0) ? sc : 1.0)
+            end
+        end
+    else
+        # Gradient-magnitude scale (opt-in) from one finite-difference probe
+        # per group: ‖c(x₀ + δ) - c(x₀)‖ / ‖δ‖ estimates the group's
+        # gradient magnitude without materializing any Jacobian (a full
+        # Jacobian of a large vector-valued constraint would be an N×N
+        # dense matrix).
+        δ = 1e-6 .* (1 .+ abs.(x0))
+        δnorm = norm(δ)
+        for (kind, rel) in (("eq", eq_rel), ("ineq", ineq_rel))
+            fs = kind == "eq" ? model.eq_constraints.fs : model.ineq_constraints.fs
+            for i in rel
+                c = fs[i]
+                c0 = _vecval(c(x0))
+                c1 = _vecval(c(x0 .+ δ))
+                d = norm(c1 .- c0) / δnorm
+                push!(scales, max(1.0, d))
+            end
         end
     end
     return eq_rel, ineq_rel, scales
 end
 
-function _scaled_problem(model::VecModel, sel, x0)
-    eq_rel, ineq_rel, scales = _group_scales(model, sel, x0)
+function _scaled_problem(model::VecModel, sel, x0, scale_mode::Symbol)
+    eq_rel, ineq_rel, scales = _group_scales(model, sel, x0, scale_mode)
     # Scaled constraint functions: c̃(x) = c(x) / d.
     eq_fs = [
         (x -> _vecval(model.eq_constraints.fs[eq_rel[i]](x)) ./ scales[i]) for
@@ -1326,6 +1444,7 @@ end
 # (on the violated rows only) + ∇(sd terms); each Jᵀv is one reverse pass.
 function _analytical_al_gradient(a::AnalyticalALObjective, x)
     _, ∇f = NonconvexCore.value_gradient(a.scaled_obj, x)
+    ∇f === nothing && (∇f = zeros(length(x)))
     g = copy(∇f)
     for (k, c) in enumerate(a.eq_fs)
         cv = _vecval(c(x))
@@ -1361,18 +1480,15 @@ end
 # Violation measure of the relaxed constraints on the scaled functions.
 # The relaxed indices are passed in (they are computed once per solve;
 # recomputing the subproblem decomposition per call is a hot-path cost).
-function _scaled_violation(eq_fs, ineq_fs, sd_rel, model, x)
-    v = Float64[]
-    for c in eq_fs
-        append!(v, abs.(_vecval(c(x))))
-    end
-    for c in ineq_fs
-        append!(v, max.(_vecval(c(x)), 0.0))
-    end
-    for i in sd_rel
-        append!(v, _sd_violation(model, i, x))
-    end
-    return v
+# Mutation-free: any consumer may differentiate it (e.g. a feasibility-
+# restoration merit).
+function _scaled_violation(eq_fs, ineq_fs, sd_rel, sets_rel, model, x, set_scales)
+    return vcat(
+        [abs.(_vecval(c(x))) for c in eq_fs]...,
+        [max.(_vecval(c(x)), 0.0) for c in ineq_fs]...,
+        [_sd_violation(model, i, x) for i in sd_rel]...,
+        [_set_violation(model, i, x, set_scales[k]) for (k, i) in enumerate(sets_rel)]...,
+    )
 end
 
 # Raw scaled constraint values at x (signed equalities, inequalities as-is)
@@ -1467,7 +1583,7 @@ end
 # between the final main-phase iterate and the best restoration point
 # (the restoration merit minimizes this, while the main phase's internal
 # metric is the scaled violation).
-function _raw_violation(model, eq_rel, ineq_rel, x)
+function _raw_violation(model, eq_rel, ineq_rel, sets_rel, x)
     v = 0.0
     for i in eq_rel
         v = max(v, norm(_vecval(model.eq_constraints.fs[i](x)), Inf))
@@ -1475,14 +1591,17 @@ function _raw_violation(model, eq_rel, ineq_rel, x)
     for i in ineq_rel
         v = max(v, norm(max.(_vecval(model.ineq_constraints.fs[i](x)), 0.0), Inf))
     end
+    for i in sets_rel
+        v = max(v, norm(_set_violation(model, i, x), Inf))
+    end
     return v
 end
 
 # Compatibility wrapper for the selection-based call (the hot paths pass
 # the precomputed indices).
 function _raw_violation(model, relaxed, x)
-    eq_rel, ineq_rel, _, _ = _subproblem(model, relaxed, nothing)
-    return _raw_violation(model, eq_rel, ineq_rel, x)
+    eq_rel, ineq_rel, _, sets_rel, _ = _subproblem(model, relaxed, nothing)
+    return _raw_violation(model, eq_rel, ineq_rel, sets_rel, x)
 end
 
 function _failed_iterate_fallback(trajectory, x_init)
@@ -1494,7 +1613,7 @@ end
 # usable iterate after a blow-up, instead of just reverting.
 function _restore_feasible(eq_fs, ineq_fs, model, relaxed, submodel0, x, prox=0.0)
     x̄ = copy(x)  # snapshot: the anchor must not drift with the solve
-    eq_rel, ineq_rel, sd_rel, _ = _subproblem(model, relaxed, nothing)
+    eq_rel, ineq_rel, sd_rel, sets_rel, _ = _subproblem(model, relaxed, nothing)
     # anchor widths: relative moves are measured against each variable's
     # box width (a raw Euclidean anchor would be dominated by the widest
     # block, e.g. displacements in [-1e3, 1e3] vs densities in [0, 1])
@@ -1522,6 +1641,9 @@ function _restore_feasible(eq_fs, ineq_fs, model, relaxed, submodel0, x, prox=0.
             end
             for i in sd_rel
                 v += sum(abs2, _sd_violation(model, i, z))
+            end
+            for i in sets_rel
+                v += sum(abs2, _set_violation(model, i, z))
             end
             # optional Rockafellar anchor: stay close to the pre-restoration
             # iterate (the violation merit alone can wander along its zero
@@ -1635,7 +1757,22 @@ end
 # violated constraint groups (selective weights, when enabled) or the
 # global penalty when no single group stands out.
 function _escalate_penalty!(
-    ρ, η, ω, w_eq, w_ineq, w_max, options, eq_rel, ineq_rel, eq_fs, ineq_fs, x
+    ρ,
+    η,
+    ω,
+    w_eq,
+    w_ineq,
+    w_sets,
+    w_max,
+    options,
+    eq_rel,
+    ineq_rel,
+    sets_rel,
+    eq_fs,
+    ineq_fs,
+    model,
+    set_scales,
+    x,
 )
     bumped = false
     if options.selective
@@ -1650,6 +1787,13 @@ function _escalate_penalty!(
             vk = norm(max.(_vecval(ineq_fs[k](x)), 0.0), Inf)
             if vk > η && w_ineq[k] < w_max
                 w_ineq[k] = min(w_ineq[k] * options.rho_incr, w_max)
+                bumped = true
+            end
+        end
+        for (k, i) in enumerate(sets_rel)
+            vk = norm(_set_violation(model, i, x, set_scales[k]), Inf)
+            if vk > η && w_sets[k] < w_max
+                w_sets[k] = min(w_sets[k] * options.rho_incr, w_max)
                 bumped = true
             end
         end
@@ -1724,7 +1868,10 @@ function optimize!(workspace::AugLagWorkspace)
     end
     # The starting point of this run, for the first-iteration failure fallback.
     x_init = copy(x)
-    eq_rel, ineq_rel, sd_rel, submodel0 = _subproblem(model, relaxed, options.weights)
+    eq_rel, ineq_rel, sd_rel, _, submodel0 = _subproblem(model, relaxed, options.weights)
+    # The relaxed function-in-set constraints are handled as dedicated
+    # groups: one bundle evaluation per call feeds all their components.
+    sets_rel = _relaxed_indices(relaxed.sets, model.set_constraints, relaxed.labels)
     # Objective scale: minimize f/s_f so the AL objective terms are O(1).
     # (The PBM barrier parameters are calibrated to the unscaled objective,
     # so only the classical quadratic mode scales f.)
@@ -1736,7 +1883,7 @@ function optimize!(workspace::AugLagWorkspace)
     scaled_obj = fscale == 1.0 ? obj : (x -> obj(x) / fscale)
     y, λ = _init_multipliers(model, relaxed)
     if scaling
-        eq_fs, ineq_fs, scales = _scaled_problem(model, relaxed, x)
+        eq_fs, ineq_fs, scales = _scaled_problem(model, relaxed, x, options.scale_mode)
     else
         eq_fs = [model.eq_constraints.fs[i] for i in eq_rel]
         ineq_fs = [model.ineq_constraints.fs[i] for i in ineq_rel]
@@ -1747,6 +1894,7 @@ function optimize!(workspace::AugLagWorkspace)
         # at x0 (on the scaled constraints): avoids the escalation waste of a
         # too-small rho_init (measured: ~130 outer iterations on AC-OPF).
         _, ∇f = NonconvexCore.value_gradient(obj, x)
+        ∇f === nothing && (∇f = zeros(length(x)))
         viol0 = 0.0
         for c in eq_fs
             viol0 = max(viol0, norm(_vecval(c(x)), Inf))
@@ -1757,9 +1905,11 @@ function optimize!(workspace::AugLagWorkspace)
         ρ = clamp(norm(∇f) / max(viol0, 1e-8), 1.0, 1e6)
     end
     # Internal per-group penalty weights (selective bumps modify these; the
-    # user-provided weights are the initial values).
-    w_eq = _unit_weights(options.weights, 1:length(eq_fs))
-    w_ineq = _unit_weights(options.weights, 1:length(ineq_fs))
+    # user-provided weights are the initial values). The convention is one
+    # entry per relaxed group in the order [eq; ineq; sets].
+    w_eq, w_ineq, w_sets = _group_weights(
+        options.weights, length(eq_fs), length(ineq_fs), length(sets_rel)
+    )
     # Per-group PBM barrier coefficients (the adaptive barrier tracks the
     # complementarity of the implied duals instead of the global penalty).
     b_ineq = Float64[ρ * w_ineq[k] for k in eachindex(w_ineq)]
@@ -1812,6 +1962,38 @@ function optimize!(workspace::AugLagWorkspace)
     ω = max(omega0, 1 / ρ^0.1)
     w_max = Float64(options.rho_max) / ρ
     Y = _sd_init(model, sd_rel, ρ)
+    # Multiplier buffers of the relaxed function-in-set constraints
+    # (y_eq, λ_ineq, Y_psd per constraint).
+    Msets = [_set_init_multipliers(model, i, ρ) for i in sets_rel]
+    # Anderson-mixing histories of the set-constraint multiplier maps
+    # (per constraint: (equality history, inequality history)).
+    set_and_hist = [
+        (
+            Tuple{Vector{Float64},Vector{Float64}}[],
+            Tuple{Vector{Float64},Vector{Float64}}[],
+        ) for _ in sets_rel
+    ]
+    # The set-constraint component scales: with scaling on, gradient/value
+    # probes per the scale_mode; with scaling off, unit scales — the
+    # formulation is then expected to provide well-scaled residuals.
+    set_scales = if options.scaling
+        [_set_scales(model, i, x, options.scale_mode) for i in sets_rel]
+    else
+        [
+            fill(1.0, length(NonconvexCore.components(model.set_constraints.fs[i].set))) for i in sets_rel
+        ]
+    end
+    if options.auto_weights
+        _, ∇f0 = NonconvexCore.value_gradient(obj, x)
+        ∇f0 === nothing && (∇f0 = zeros(length(x)))
+        gscale = max(norm(∇f0), 1e-8)
+        w_eq = [_auto_weight(c, x, gscale) for c in eq_fs]
+        w_ineq = [_auto_weight(c, x, gscale) for c in ineq_fs]
+        w_sets = [
+            _auto_weight_set(model, i, x, set_scales[k], gscale) for
+            (k, i) in enumerate(sets_rel)
+        ]
+    end
     trajectory = Tuple{typeof(x),Real,Real}[]
     fx = obj(x)
     vprev = Inf
@@ -2140,10 +2322,15 @@ function optimize!(workspace::AugLagWorkspace)
             xr = _restore_feasible(
                 eq_fs, ineq_fs, model, relaxed, submodel0, copy(x), restore_prox
             )
-            vraw_r = _raw_violation(model, eq_rel, ineq_rel, xr)
-            if vraw_r < _raw_violation(model, eq_rel, ineq_rel, x)
+            vraw_r = _raw_violation(model, eq_rel, ineq_rel, sets_rel, xr)
+            if vraw_r < _raw_violation(model, eq_rel, ineq_rel, sets_rel, x)
                 x = copy(xr)
-                vnorm = norm(_scaled_violation(eq_fs, ineq_fs, sd_rel, model, x), Inf)
+                vnorm = norm(
+                    _scaled_violation(
+                        eq_fs, ineq_fs, sd_rel, sets_rel, model, x, set_scales
+                    ),
+                    Inf,
+                )
                 fx = obj(x)
                 if lsq_multipliers && !isempty(eq_rel)
                     y = _lsq_multipliers_scaled(scaled_obj, eq_fs, x)
@@ -2158,6 +2345,13 @@ function optimize!(workspace::AugLagWorkspace)
             empty!(vhist)
         end
         sd_terms = _sd_terms(model, sd_rel, ρ, x, Y, penalty)
+        set_terms = _set_terms_closure(
+            model, sets_rel, ρ, x, Msets, penalty, set_scales, w_sets
+        )
+        if !isempty(sets_rel)
+            sd_terms0 = sd_terms
+            sd_terms = z -> sd_terms0(z) + set_terms(z)
+        end
         build_al =
             sd_t -> if use_elastic
                 _elastic_objective(
@@ -2238,6 +2432,8 @@ function optimize!(workspace::AugLagWorkspace)
                         use_hard_penalty ? no_eq : submodel0.eq_constraints,
                         use_hard_penalty ? no_ineq : submodel0.ineq_constraints,
                         submodel0.sd_constraints,
+                        submodel0.set_constraints,
+                        submodel0.set_variables,
                         [submodel0.box_min; fill(-1e3, m_eq)],
                         [submodel0.box_max; fill(1e3, m_eq)],
                         [submodel0.init; zeros(m_eq)],
@@ -2257,6 +2453,8 @@ function optimize!(workspace::AugLagWorkspace)
                         use_hard_penalty ? no_eq : submodel0.eq_constraints,
                         use_hard_penalty ? no_ineq : submodel0.ineq_constraints,
                         submodel0.sd_constraints,
+                        submodel0.set_constraints,
+                        submodel0.set_variables,
                         submodel0.box_min,
                         submodel0.box_max,
                         submodel0.init,
@@ -2268,6 +2466,8 @@ function optimize!(workspace::AugLagWorkspace)
                         use_hard_penalty ? no_eq : submodel0.eq_constraints,
                         use_hard_penalty ? no_ineq : submodel0.ineq_constraints,
                         submodel0.sd_constraints,
+                        submodel0.set_constraints,
+                        submodel0.set_variables,
                         submodel0.box_min,
                         submodel0.box_max,
                         submodel0.init,
@@ -2397,7 +2597,29 @@ function optimize!(workspace::AugLagWorkspace)
             τ = Float64(two_level_tau)
             for _ in 1:two_level_iters
                 _sd_multiplier_update!(model, sd_rel, ρ, x_two, Y, penalty)
+                _set_update!(
+                    model,
+                    sets_rel,
+                    ρ,
+                    x_two,
+                    Msets,
+                    penalty,
+                    set_scales,
+                    w_sets,
+                    1.0,
+                    options.safeguard,
+                    set_and_hist,
+                    options.anderson_ineq,
+                    options.anderson_depth,
+                )
                 sd_t2 = _sd_terms(model, sd_rel, ρ, x_two, Y, penalty)
+                if !isempty(sets_rel)
+                    set_t2 = _set_terms_closure(
+                        model, sets_rel, ρ, x_two, Msets, penalty, set_scales, w_sets
+                    )
+                    sd_t2_0 = sd_t2
+                    sd_t2 = z -> sd_t2_0(z) + set_t2(z)
+                end
                 al_two = build_al(sd_t2)
                 prox = z -> al_two(z) + (τ / 2) * sum(abs2, z .- x_two)
                 sub2 = make_submodel(prox)
@@ -2443,7 +2665,8 @@ function optimize!(workspace::AugLagWorkspace)
         # values at the accepted point recover f without re-evaluating
         # anything (Percival's objective recovery, and it also removes the
         # duplicate constraint evaluation of the violation recomputation).
-        can_recover = penalty === :quadratic && !use_elastic && isempty(sd_rel)
+        can_recover =
+            penalty === :quadratic && !use_elastic && isempty(sd_rel) && isempty(sets_rel)
         eqvals_acc = nothing
         ineqvals_acc = nothing
         mt_acc = mt
@@ -2456,6 +2679,9 @@ function optimize!(workspace::AugLagWorkspace)
             vvals = _scaled_violation_from(eqvals, ineqvals)
             for i in sd_rel
                 append!(vvals, _sd_violation(model, i, xt_orig))
+            end
+            for i in sets_rel
+                append!(vvals, _set_violation(model, i, xt_orig))
             end
             φt = norm(vvals, Inf)
             if isfinite(mt) &&
@@ -2487,7 +2713,15 @@ function optimize!(workspace::AugLagWorkspace)
             # No acceptable step: record the current point in the filter and
             # keep it (the outer update will escalate).
             push!(filter_f, al_obj(x_sub))
-            push!(filter_v, norm(_scaled_violation(eq_fs, ineq_fs, sd_rel, model, x), Inf))
+            push!(
+                filter_v,
+                norm(
+                    _scaled_violation(
+                        eq_fs, ineq_fs, sd_rel, sets_rel, model, x, set_scales
+                    ),
+                    Inf,
+                ),
+            )
         end
         if watchdog && !accepted
             # Watchdog rejection: discard the step entirely and let the outer
@@ -2500,7 +2734,7 @@ function optimize!(workspace::AugLagWorkspace)
         vnorm = if accepted && can_recover
             φt_acc
         else
-            norm(_scaled_violation(eq_fs, ineq_fs, sd_rel, model, x), Inf)
+            norm(_scaled_violation(eq_fs, ineq_fs, sd_rel, sets_rel, model, x, set_scales), Inf)
         end
         f_new = if accepted && can_recover
             _recover_objective(mt_acc, eqvals_acc, ineqvals_acc, y, λ, w_eq, w_ineq, ρ, fscale)
@@ -2520,7 +2754,12 @@ function optimize!(workspace::AugLagWorkspace)
                 x = _restore_feasible(
                     eq_fs, ineq_fs, model, relaxed, submodel0, copy(xgood), restore_prox
                 )
-                vnorm = norm(_scaled_violation(eq_fs, ineq_fs, sd_rel, model, x), Inf)
+                vnorm = norm(
+                    _scaled_violation(
+                        eq_fs, ineq_fs, sd_rel, sets_rel, model, x, set_scales
+                    ),
+                    Inf,
+                )
                 f_new = obj(x)
             else
                 x = _failed_iterate_fallback(trajectory, x_init)
@@ -2749,6 +2988,21 @@ function optimize!(workspace::AugLagWorkspace)
                 yflat_prev = yflat
             end
             _sd_multiplier_update!(model, sd_rel, ρ, x, Y, penalty)
+            _set_update!(
+                model,
+                sets_rel,
+                ρ,
+                x,
+                Msets,
+                penalty,
+                set_scales,
+                w_sets,
+                θ_mult,
+                options.safeguard,
+                set_and_hist,
+                options.anderson_ineq,
+                options.anderson_depth,
+            )
             if outer_schedule === :bm
                 # Birgin-Martinez complexity scaling: η, ω tighten with 1/ρ.
                 η = max(η / ρ, ctol)
@@ -2766,7 +3020,22 @@ function optimize!(workspace::AugLagWorkspace)
             # Selective penalty update: escalate only the most-violated
             # constraint groups instead of the global penalty.
             ρ, η, ω = _escalate_penalty!(
-                ρ, η, ω, w_eq, w_ineq, w_max, options, eq_rel, ineq_rel, eq_fs, ineq_fs, x
+                ρ,
+                η,
+                ω,
+                w_eq,
+                w_ineq,
+                w_sets,
+                w_max,
+                options,
+                eq_rel,
+                ineq_rel,
+                sets_rel,
+                eq_fs,
+                ineq_fs,
+                model,
+                set_scales,
+                x,
             )
         end
         vprev = vnorm
@@ -2801,6 +3070,7 @@ function optimize!(workspace::AugLagWorkspace)
         comp_ok = true
         if stop_kkt && vnorm <= ctol
             _, ∇f = NonconvexCore.value_gradient(scaled_obj, x)
+            ∇f === nothing && (∇f = zeros(length(x)))
             g = copy(∇f)
             for (k, c) in enumerate(eq_fs)
                 gJ = NonconvexCore.value_gradient(z -> dot(_vecval(c(z)), y[k]), x)[2]
@@ -2810,10 +3080,21 @@ function optimize!(workspace::AugLagWorkspace)
                 gJ = NonconvexCore.value_gradient(z -> dot(_vecval(c(z)), λ[k]), x)[2]
                 gJ === nothing || (g .+= gJ)
             end
+            # The set-constraint multipliers: ⟨y, g_eq⟩ + ⟨λ, g_ineq⁺⟩ +
+            # Σₖ⟨Yₖ, Pₖ⟩ (the PSD part batched into one rule'd call).
+            for (k, i) in enumerate(sets_rel)
+                gJ = NonconvexCore.value_gradient(
+                    z -> _set_multiplier_terms(model, i, z, Msets[k], set_scales[k]), x
+                )[2]
+                gJ === nothing || (g .+= gJ)
+            end
             pg = _projected_gnorm(g, x, submodel0.box_min, submodel0.box_max)
             comp = 0.0
             for k in eachindex(ineq_rel)
                 comp = max(comp, maximum(abs.(λ[k] .* _vecval(ineq_fs[k](x)))))
+            end
+            for (k, i) in enumerate(sets_rel)
+                comp = max(comp, _set_complementarity(model, i, x, Msets[k], set_scales[k]))
             end
             stat_ok = pg <= kkt_tol
             comp_ok = comp <= kkt_tol
@@ -2847,7 +3128,7 @@ function optimize!(workspace::AugLagWorkspace)
     # main-phase iterate — the main phase is not feasibility-preserving,
     # so its terminal iterate can be infeasible even though a restoration
     # phase reached feasibility earlier.
-    vraw_final = _raw_violation(model, eq_rel, ineq_rel, x)
+    vraw_final = _raw_violation(model, eq_rel, ineq_rel, sets_rel, x)
     reported_x = (x_rest !== nothing && vraw_rest < vraw_final) ? x_rest : x
     reported_fx = (x_rest !== nothing && vraw_rest < vraw_final) ? fx_rest : fx
     workspace.state = (
@@ -2906,6 +3187,7 @@ end
 
 function _lsq_multipliers_scaled(obj, eq_fs, x)
     _, ∇f = NonconvexCore.value_gradient(obj, x)
+    ∇f === nothing && (∇f = zeros(length(x)))
     ∇f = copy(∇f)
     y = Vector{Vector{Float64}}()
     ε = sqrt(eps(Float64)) * (1 + norm(x))

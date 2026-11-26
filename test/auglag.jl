@@ -692,14 +692,44 @@ end
     # weight grows and rho stays.
     w_eq = [1.0]
     ρ, η, ω = NonconvexAugLagLab._escalate_penalty!(
-        10.0, 0.5, 1.0, w_eq, Float64[], 1000.0, opts, [1], Int[], eq_fs, ineq_fs, [5.0]
+        10.0,
+        0.5,
+        1.0,
+        w_eq,
+        Float64[],
+        Float64[],
+        1000.0,
+        opts,
+        [1],
+        Int[],
+        Int[],
+        eq_fs,
+        ineq_fs,
+        nothing,
+        Float64[],
+        [5.0],
     )
     @test w_eq[1] == 10.0
     @test ρ == 10.0
     # global escalation: the weight is at the cap -> rho grows and the
     # tolerances reset.
     ρ2, η2, ω2 = NonconvexAugLagLab._escalate_penalty!(
-        10.0, 0.5, 1.0, [1000.0], Float64[], 1000.0, opts, [1], Int[], eq_fs, ineq_fs, [5.0]
+        10.0,
+        0.5,
+        1.0,
+        [1000.0],
+        Float64[],
+        Float64[],
+        1000.0,
+        opts,
+        [1],
+        Int[],
+        Int[],
+        eq_fs,
+        ineq_fs,
+        nothing,
+        Float64[],
+        [5.0],
     )
     @test ρ2 == 100.0
     # the default schedule is :bm (full 1/ρ reset)
@@ -720,12 +750,16 @@ end
         1.0,
         [1000.0],
         Float64[],
+        Float64[],
         1000.0,
         opts_def,
         [1],
         Int[],
+        Int[],
         eq_fs,
         ineq_fs,
+        nothing,
+        Float64[],
         [5.0],
     )
     @test η3 == max(opts_def.eta0 / ρ3^0.1, opts_def.ctol)
